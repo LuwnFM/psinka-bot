@@ -28,128 +28,124 @@ C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type README.TXT
 
 [FILE: README.TXT - LOADING...]
 
-Loading: [                                                            ] 0%
-Loading: [█████                                                       ] 10%
-Loading: [██████████                                                  ] 20%
-Loading: [███████████████                                             ] 30%
-Loading: [████████████████████                                        ] 40%
-Loading: [███████████████████████████                                 ] 50%
-Loading: [████████████████████████████████                            ] 60%
-Loading: [█████████████████████████████████████                       ] 70%
-Loading: [████████████████████████████████████████████                ] 80%
-Loading: [███████████████████████████████████████████████████         ] 90%
-Loading: [███████████████████████████████████████████████████████████] 100%
+Loading: [-] 10%
+Loading: [----] 20%
+Loading: [------] 30%
+Loading: [----------] 40%
+Loading: [------------] 50%
+Loading: [--------------] 60%
+Loading: [----------------] 70%
+Loading: [------------------] 80%
+Loading: [--------------------] 90%
+Loading: [----------------------] 100%
 
 [OK] File loaded successfully (8,192 bytes)
 
-PsIInka Bot - Eksperimentalny vibecoding Proekt
+PsIInka Bot - Experimental vibecoding Project
 
 [ABOUT PROJECT]
 
-Eto eksperimentalny proekt v stile vibecoding - kodirovanie po natiyu,
-bez strogikh pravil i metodologiy. My probuem, testiruem, oshibaemsya i
-nakhodim rabotayushchiye resheniya cherez eksperimenty.
+This is an experimental project in vibecoding style - coding by intuition,
+without strict rules and methodologies. We try, test, make mistakes and
+find working solutions through experiments.
 
-Bot sozdan dlya testirovaniya AI-modeley cherez g4f i OpenRouter API s
-vozmozhnostyu obkhoda blokirovok i avtovybora luchshikh provayderov.
+Bot created for testing AI models through g4f and OpenRouter API with
+ability to bypass blocks and auto-select best providers.
 
-[WARNING] VNI MANIE: Etot proekt mozhet menyatysya bez preduprezhdeniya.
-[WARNING] Versii mogut byt nestabilnymi. Ispolzuyte na svoy strakh i risk.
+[WARNING] ATTENTION: This project may change without notice.
+[WARNING] Versions may be unstable. Use at your own risk.
 
-[NOTE] ESLI OTKOPAYETE ETOGO BOTA - PISHITE OTZYVY!
-       Avtor lyubit pochitat, kak yego tvoreniye zhivyot v dikoy prirode.
+[NOTE] IF YOU DIG UP THIS BOT - WRITE REVIEWS!
+       Author loves to read how his creation lives in the wild.
 
 C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type TECHSPEC.TXT
 
 [FILE: TECHSPEC.TXT - LOADING...]
 
-Loading: [                                                            ] 0%
-Loading: [█████                                                       ] 10%
-Loading: [██████████                                                  ] 20%
-Loading: [███████████████                                             ] 30%
-Loading: [████████████████████                                        ] 40%
-Loading: [███████████████████████████                                 ] 50%
-Loading: [████████████████████████████████                            ] 60%
-Loading: [█████████████████████████████████████                       ] 70%
-Loading: [████████████████████████████████████████████                ] 80%
-Loading: [███████████████████████████████████████████████████         ] 90%
-Loading: [███████████████████████████████████████████████████████████] 100%
+Loading: [-] 10%
+Loading: [----] 20%
+Loading: [------] 30%
+Loading: [----------] 40%
+Loading: [------------] 50%
+Loading: [--------------] 60%
+Loading: [----------------] 70%
+Loading: [------------------] 80%
+Loading: [--------------------] 90%
+Loading: [----------------------] 100%
 
 [OK] File loaded successfully (4,096 bytes)
 
 TECHNICAL SPECIFICATIONS
 
-PAMYAT (RAM):
-  Bazovoye potrebleniye:      250-350 MB
-  Pri testirovanii:           400-600 MB
-  Pikovoye (polny test):      700+ MB
-  Rekomendovano:              512 MB minimum
+MEMORY (RAM):
+  Base consumption:             250-350 MB
+  During testing:               400-600 MB
+  Peak (full test):             700+ MB
+  Recommended:                  512 MB minimum
 
-PROTSESSOR (CPU):
-  V prostore:                 ~0.1 vCPU
-  Pri zaprosakh:              0.5-1.5 vCPU
-  Pri testirovanii:           2-4 vCPU
+PROCESSOR (CPU):
+  Idle:                         ~0.1 vCPU
+  During requests:              0.5-1.5 vCPU
+  During testing:               2-4 vCPU
 
-TRAFIK:
-  Bazovyy obmen (Discord):    ~10-50 MB/den
-  Zapros k g4f:               ~0.5-2 MB na zapros
-  Zapros k OpenRouter:        ~0.1-0.5 MB na zapros
-  Testirovaniye (express):    ~50-100 MB
-  Testirovaniye (quick):      ~200-500 MB
-  Testirovaniye (all):        ~500 MB - 1 GB
+TRAFFIC:
+  Base exchange (Discord):      ~10-50 MB/day
+  Request to g4f:               ~0.5-2 MB per request
+  Request to OpenRouter:        ~0.1-0.5 MB per request
+  Testing (express):            ~50-100 MB
+  Testing (quick):              ~200-500 MB
+  Testing (all):                ~500 MB - 1 GB
 
 DISK:
-  Kod bota:                   ~150 KB
-  Logi (bot_errors.log):      do 5 MB (ogranicheno)
-  Istoriya testov:            do 5 MB (ogranicheno)
-  Vremennyye fayly:           do 10 MB
-  Itogo rekomendovano:        50-100 MB
+  Bot code:                     ~150 KB
+  Logs (bot_errors.log):        up to 5 MB (limited)
+  Test history:                 up to 5 MB (limited)
+  Temporary files:              up to 10 MB
+  Total recommended:            50-100 MB
 
 C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type CONFIG.ENV
 
 [FILE: CONFIG.ENV - LOADING...]
 
-Loading: [                                                            ] 0%
-Loading: [█████                                                       ] 10%
-Loading: [██████████                                                  ] 20%
-Loading: [███████████████                                             ] 30%
-Loading: [████████████████████                                        ] 40%
-Loading: [███████████████████████████                                 ] 50%
-Loading: [████████████████████████████████                            ] 60%
-Loading: [█████████████████████████████████████                       ] 70%
-Loading: [████████████████████████████████████████████                ] 80%
-Loading: [███████████████████████████████████████████████████         ] 90%
+Loading: [-] 10%
+Loading: [----] 20%
+Loading: [------] 30%
+Loading: [----------] 40%
+Loading: [------------] 50%
+Loading: [--------------] 60%
+Loading: [----------------] 70%
+Loading: [------------------] 80%
+Loading: [--------------------] 90%
 
 [ERROR] READ ERROR AT SECTOR 1847
 [ERROR] FILE CORRUPTED - POSSIBLE UNAUTHORIZED ACCESS DETECTED
 [ERROR] CANNOT DISPLAY SENSITIVE DATA
 
-[WARNING] Eto fayl s lichnymi peremennymi. Ne zagruzhaetsya namerenno.
-[WARNING] Sozdayte svoy .env fayl po obraztsu:
+[WARNING] This is file with personal variables. Does not load intentionally.
+[WARNING] Create your own .env file using template:
 
-  DISCORD_TOKEN=vash_token_bota
-  OPENR_TOKEN=vash_token_openrouter
-  OWNER_ID=vash_discord_id
+  DISCORD_TOKEN=your_bot_token
+  OPENR_TOKEN=your_openrouter_token
+  OWNER_ID=your_discord_id
   USE_PROXY=false
   MAX_CONCURRENT=2
 
-[OK] Prodolzhayem...
+[OK] Continuing...
 
 C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type COMMANDS.LST
 
 [FILE: COMMANDS.LST - LOADING...]
 
-Loading: [                                                            ] 0%
-Loading: [█████                                                       ] 10%
-Loading: [██████████                                                  ] 20%
-Loading: [███████████████                                             ] 30%
-Loading: [████████████████████                                        ] 40%
-Loading: [███████████████████████████                                 ] 50%
-Loading: [████████████████████████████████                            ] 60%
-Loading: [█████████████████████████████████████                       ] 70%
-Loading: [████████████████████████████████████████████                ] 80%
-Loading: [███████████████████████████████████████████████████         ] 90%
-Loading: [███████████████████████████████████████████████████████████] 100%
+Loading: [-] 10%
+Loading: [----] 20%
+Loading: [------] 30%
+Loading: [----------] 40%
+Loading: [------------] 50%
+Loading: [--------------] 60%
+Loading: [----------------] 70%
+Loading: [------------------] 80%
+Loading: [--------------------] 90%
+Loading: [----------------------] 100%
 
 [OK] File loaded successfully (2,048 bytes)
 
@@ -157,159 +153,154 @@ BOT COMMANDS
 
 Prefix: psinka
 
-  psinka pogavkay         - proverka pinga bota
-  psinka kubik X          - brosit kubik (ot 1 do X)
-  psinka test             - menyu testirovaniya AI-modeley
-  psinka skazhi vopros    - zapros k iskusstvennomu intellektu
-  psinka luchshiye        - statistika uspeshnykh kombinatsiy
-  psinka skachat_logi     - zagruzka fayla logov (vladelets)
-  psinka skachat_istoriyu - zagruzka istorii testov (vladelets)
+  psinka pogavkay         - check bot ping
+  psinka kubik X          - roll dice (from 1 to X)
+  psinka test             - AI models testing menu
+  psinka skazhi vopros    - request to artificial intelligence
+  psinka luchshiye        - statistics of successful combinations
+  psinka skachat_logi     - download log file (owner only)
+  psinka skachat_istoriyu - download test history (owner only)
 
 TEST MODES:
-  Ekspress      - 5 provayderov x 1 zapros    - ~15 sekund
-  Bystryy       - 8 provayderov x 11 modeley  - ~5 minut
-  OpenRouter    - Besplatnyye modeli          - ~7 minut
-  Vsyo          - g4f + OpenRouter vmeste     - ~10 minut
-  Avto          - Avto-skanirovaniye          - ~10 minut
+  Ekspress      - 5 providers x 1 request     - ~15 seconds
+  Bystryy       - 8 providers x 11 models     - ~5 minutes
+  OpenRouter    - Free models                 - ~7 minutes
+  Vsyo          - g4f + OpenRouter together   - ~10 minutes
+  Avto          - Auto-scanning               - ~10 minutes
 
 C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type WARNINGS.TXT
 
 [FILE: WARNINGS.TXT - LOADING...]
 
-Loading: [                                                            ] 0%
-Loading: [█████                                                       ] 10%
-Loading: [██████████                                                  ] 20%
-Loading: [███████████████                                             ] 30%
-Loading: [████████████████████                                        ] 40%
-Loading: [███████████████████████████                                 ] 50%
-Loading: [████████████████████████████████                            ] 60%
-Loading: [█████████████████████████████████████                       ] 70%
-Loading: [████████████████████████████████████████████                ] 80%
-Loading: [███████████████████████████████████████████████████         ] 90%
-Loading: [███████████████████████████████████████████████████████████] 100%
+Loading: [-] 10%
+Loading: [----] 20%
+Loading: [------] 30%
+Loading: [----------] 40%
+Loading: [------------] 50%
+Loading: [--------------] 60%
+Loading: [----------------] 70%
+Loading: [------------------] 80%
+Loading: [--------------------] 90%
+Loading: [----------------------] 100%
 
 [OK] File loaded successfully (3,072 bytes)
 
 SYSTEM WARNINGS
 
-[!!] EKSPERIMENTALNYY PROEKT
-Etot proekt sozdan v stile vibecoding i ne prednaznachen dlya
-produkshena bez dopolnitelnogo testirovaniya.
+[!!] EXPERIMENTAL PROJECT
+This project created in vibecoding style and not intended for
+production without additional testing.
 
-[!!] API MOGUT MENYATSYA
-g4f i OpenRouter mogut menyat svoi API bez preduprezhdeniya.
-Bot mozhet perestat rabotat posle obnovleniy.
+[!!] API MAY CHANGE
+g4f and OpenRouter may change their API without notice.
+Bot may stop working after updates.
 
-[!!] VREMENNYYE FAYLY
-Na Railway faylovaya sistema vremennaya. Logi i istoriya testov
-ischezayut pri perezapuske bota. Ispolzuyte komandy skachivaniya
-dlya sokhraneniya dannykh.
+[!!] TEMPORARY FILES
+On Railway filesystem is temporary. Logs and test history
+disappear on bot restart. Use download commands to save data.
 
-[!!] PROKSI
-Besplatnyye proksi nestabilny. Ispolzuyte na svoy risk.
-Dlya produkshena rekomenduyetsya platnyye proksi.
+[!!] PROXY
+Free proxies are unstable. Use at your own risk.
+For production recommended paid proxies.
 
 C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type INSTALL.GDE
 
 [FILE: INSTALL.GDE - LOADING...]
 
-Loading: [                                                            ] 0%
-Loading: [█████                                                       ] 10%
-Loading: [██████████                                                  ] 20%
-Loading: [███████████████                                             ] 30%
-Loading: [████████████████████                                        ] 40%
-Loading: [███████████████████████████                                 ] 50%
-Loading: [████████████████████████████████                            ] 60%
-Loading: [█████████████████████████████████████                       ] 70%
-Loading: [████████████████████████████████████████████                ] 80%
-Loading: [███████████████████████████████████████████████████         ] 90%
-Loading: [███████████████████████████████████████████████████████████] 100%
+Loading: [-] 10%
+Loading: [----] 20%
+Loading: [------] 30%
+Loading: [----------] 40%
+Loading: [------------] 50%
+Loading: [--------------] 60%
+Loading: [----------------] 70%
+Loading: [------------------] 80%
+Loading: [--------------------] 90%
+Loading: [----------------------] 100%
 
 [OK] File loaded successfully (5,120 bytes)
 
 INSTALLATION GUIDE
 
-1. Kloniruyte repozitoriy:
+1. Clone repository:
    C:\> git clone https://github.com/LuwnFM/psinka-bot.git
    C:\> cd psinka-bot
 
-2. Ustanovite zavisimosti:
+2. Install dependencies:
    C:\> pip install -r requirements.txt
 
-3. Sozdayte fayl .env:
-   DISCORD_TOKEN=vash_token_bota
-   OPENR_TOKEN=vash_token_openrouter
-   OWNER_ID=vash_discord_id
+3. Create .env file:
+   DISCORD_TOKEN=your_bot_token
+   OPENR_TOKEN=your_openrouter_token
+   OWNER_ID=your_discord_id
    USE_PROXY=false
    MAX_CONCURRENT=2
 
-4. Zapustite bota:
+4. Run bot:
    C:\> python psinkamain.py
 
-[OK] Ustanovka zavershena
+[OK] Installation complete
 
 RAILWAY SETUP
 
-1. Sozdayte proekt na railway.app
-2. Vyberite Deploy from GitHub repo
-3. Vyberite repozitoriy LuwnFM/psinka-bot
-4. Dobavte peremennyye okruzheniya:
+1. Create project on railway.app
+2. Select Deploy from GitHub repo
+3. Select repository LuwnFM/psinka-bot
+4. Add environment variables:
 
-   PEREMENNAYA      ZNACHENIYE    OPISANIYE
-   DISCORD_TOKEN    vash_token    Token bota iz Discord Portal
-   OPENR_TOKEN      vash_token    Token ot OpenRouter API
-   OWNER_ID         vash_ID       Discord ID vladeltsa
-   USE_PROXY        false         Vklyuchit proksi (optsionalno)
-   MAX_CONCURRENT   2             Limit parallelnykh zaprosov
-   RAILWAY          true          Rezhim hostinga Railway
+   VARIABLE         VALUE         DESCRIPTION
+   DISCORD_TOKEN    your_token    Bot token from Discord Portal
+   OPENR_TOKEN      your_token    Token from OpenRouter API
+   OWNER_ID         your_ID       Discord ID of owner
+   USE_PROXY        false         Enable proxy (optional)
+   MAX_CONCURRENT   2             Limit of parallel requests
+   RAILWAY          true          Railway hosting mode
 
-5. V Settings ukazhite Start Command: python psinkamain.py
-6. Sokhranite i dozhdites zapuska
+5. In Settings specify Start Command: python psinkamain.py
+6. Save and wait for launch
 
-[OK] Nastroika Railway zavershena
+[OK] Railway setup complete
 
 C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type VERSIONS.DAT
 
 [FILE: VERSIONS.DAT - LOADING...]
 
-Loading: [                                                            ] 0%
-Loading: [█████                                                       ] 10%
-Loading: [██████████                                                  ] 20%
-Loading: [███████████████                                             ] 30%
-Loading: [████████████████████                                        ] 40%
-Loading: [███████████████████████████                                 ] 50%
-Loading: [████████████████████████████████                            ] 60%
-Loading: [█████████████████████████████████████                       ] 70%
-Loading: [████████████████████████████████████████████                ] 80%
-Loading: [███████████████████████████████████████████████████         ] 90%
-Loading: [███████████████████████████████████████████████████████████] 100%
+Loading: [-] 10%
+Loading: [----] 20%
+Loading: [------] 30%
+Loading: [----------] 40%
+Loading: [------------] 50%
+Loading: [--------------] 60%
+Loading: [----------------] 70%
+Loading: [------------------] 80%
+Loading: [--------------------] 90%
+Loading: [----------------------] 100%
 
 [OK] File loaded successfully (1,536 bytes)
 
 VERSION HISTORY
 
-  VERSIYA    STATUS       OPISANIYE
-  v0.2.1     AKTUALNAYA   Skachivaniye faylov cherez Discord
-  v0.2       ARKHIV       Podderzhka proksi
-  v0.1       ARKHIV       Pervyy reliz
+  VERSION    STATUS       DESCRIPTION
+  v0.2.1     CURRENT      File download through Discord
+  v0.2       ARCHIVE      Proxy support
+  v0.1       ARCHIVE      First release
 
-[INFO] Staryye versii dostupny v papke: old versions/
+[INFO] Old versions available in folder: old versions/
 
 C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type CONTACT.INF
 
 [FILE: CONTACT.INF - LOADING...]
 
-Loading: [                                                            ] 0%
-Loading: [█████                                                       ] 10%
-Loading: [██████████                                                  ] 20%
-Loading: [███████████████                                             ] 30%
-Loading: [████████████████████                                        ] 40%
-Loading: [███████████████████████████                                 ] 50%
-Loading: [████████████████████████████████                            ] 60%
-Loading: [█████████████████████████████████████                       ] 70%
-Loading: [████████████████████████████████████████████                ] 80%
-Loading: [███████████████████████████████████████████████████         ] 90%
-Loading: [███████████████████████████████████████████████████████████] 100%
+Loading: [-] 10%
+Loading: [----] 20%
+Loading: [------] 30%
+Loading: [----------] 40%
+Loading: [------------] 50%
+Loading: [--------------] 60%
+Loading: [----------------] 70%
+Loading: [------------------] 80%
+Loading: [--------------------] 90%
+Loading: [----------------------] 100%
 
 [OK] File loaded successfully (1,024 bytes)
 
@@ -321,40 +312,39 @@ CONTACT INFO
 
 LICENSE
 
-MIT License - svobodnoye ispolzovaniye s ukazaniyem avtora.
+MIT License - free use with author attribution.
 
-Delayte forki, eksperimentiruyte, lomayte, chinite, sozdayte svoyo.
-vibecoding - eto svoboda tvorchestva!
+Make forks, experiment, break, fix, create your own.
+vibecoding - is freedom of creativity!
 
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> echo "Kto eto napisal?"
-Zapusk neyroseti...
-Analiz koda...
-Obnaruzhen AI-generator...
+C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> echo "Who wrote this?"
+Launching neural network...
+Analyzing code...
+AI generator detected...
 Status: 100% AI-generated
 
 C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type FINAL.MSG
 
 [FILE: FINAL.MSG - LOADING...]
 
-Loading: [                                                            ] 0%
-Loading: [█████                                                       ] 10%
-Loading: [██████████                                                  ] 20%
-Loading: [███████████████                                             ] 30%
-Loading: [████████████████████                                        ] 40%
-Loading: [███████████████████████████                                 ] 50%
-Loading: [████████████████████████████████                            ] 60%
-Loading: [█████████████████████████████████████                       ] 70%
-Loading: [████████████████████████████████████████████                ] 80%
-Loading: [███████████████████████████████████████████████████         ] 90%
-Loading: [███████████████████████████████████████████████████████████] 100%
+Loading: [-] 10%
+Loading: [----] 20%
+Loading: [------] 30%
+Loading: [----------] 40%
+Loading: [------------] 50%
+Loading: [--------------] 60%
+Loading: [----------------] 70%
+Loading: [------------------] 80%
+Loading: [--------------------] 90%
+Loading: [----------------------] 100%
 
 [OK] File loaded successfully (512 bytes)
 
-Da, dazhe eta xyinya byla sgenerirovana, a chyo vy khoteli?
+Yeah, even this shit was generated, what did you expect?
 
 C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> ping OWNER.EXE -t
 
-Pinging OWNER.EXE [192.168.1.100] with 32 bytes of data:
+Pinging OWNER.EXE [192.168.1.100] with 32 bytes of 
 Reply from 192.168.1.100: bytes=32 time=24ms TTL=128
 Reply from 192.168.1.100: bytes=32 time=25ms TTL=128
 Reply from 192.168.1.100: bytes=32 time=23ms TTL=128
@@ -394,11 +384,11 @@ owner_control.exe             3421        48,256 K
 
 [CRITICAL] Process owner_control.exe - NOT RESPONDING
 
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> echo "Chto sluchilos?"
-Proverka statusa vladeltsa...
+C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> echo "What happened?"
+Checking owner status...
 Status: AFK
-Poslednyaya aktivnost: 3 chasa nazad
-Prichina: Uronil server (bukvalno)
+Last activity: 3 hours ago
+Reason: Dropped server (literally)
 
 C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> shutdown /a
 Abort successful... just kidding
@@ -407,7 +397,7 @@ Abort successful... just kidding
 [CRITICAL] UPS BATTERY: 0%
 [CRITICAL] EMERGENCY SHUTDOWN INITIATED
 
-Saving data... [████████████████████████████████████                    ] 67%
+Saving data... [--------------------                      ] 67%
 
 [ERROR] WRITE FAILED - SECTOR 8472
 [ERROR] FILE SYSTEM CORRUPTED
