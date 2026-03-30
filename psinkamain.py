@@ -39,6 +39,54 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="псинка ", intents=intents)
 
 # ============================================================================
+# 🛡️ ПРОКСИ ДЛЯ ОБХОДА БЛОКИРОВОК (v0.2)
+# Используем только официальные API (ProxyScrape, Geonode)
+# ============================================================================
+
+FREE_PROXY_LIST = [
+    "http://103.152.112.162:80",
+    "http://185.217.136.234:8080",
+    "http://47.88.29.109:8080",
+    "http://103.167.135.110:80",
+    "http://185.162.230.55:80",
+]
+
+
+async def fetch_free_proxies(count: int = 20) -> List[str]:
+    """
+    Получает свежие прокси с официального API ProxyScrape.
+    Не нарушает ToS, так как это публичный API для свободного доступа.
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Официальный endpoint ProxyScrape для бесплатных прокси
+            url = f"https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all&limit={count}"
+            async with session.get(url, timeout=10) as response:
+                if response.status == 200:
+                    text = await response.text()
+                    proxies = [f"http://{p.strip()}" for p in text.split('\n') if p.strip() and ':' in p]
+                    if proxies:
+                        logger.info(f"🌐 Обновлён список прокси: {len(proxies)} шт. (ProxyScrape API)")
+                        return proxies
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось обновить прокси: {e}")
+    return FREE_PROXY_LIST
+
+
+def get_random_proxy() -> str | None:
+    """Возвращает случайный прокси, если включено в настройках."""
+    if not os.getenv('USE_PROXY', 'false').lower() == 'true':
+        return None
+
+    # 30% шанс использовать прокси для разнообразия трафика
+    if random.random() > 0.3:
+        proxy = random.choice(FREE_PROXY_LIST)
+        logger.debug(f"🔀 Используем прокси: {proxy}")
+        return proxy
+    return None
+
+
+# ============================================================================
 # 🛡️ БЕЗОПАСНАЯ ЗАПИСЬ ФАЙЛОВ
 # ============================================================================
 
@@ -56,6 +104,7 @@ def safe_write_file(filepath: str, content: str, max_size_mb: int = 5):
         logger.warning(f"⚠️ Не удалось записать {filepath}: {e} (это нормально на Railway)")
         return False
 
+
 def safe_read_json(filepath: str, default: Any = None):
     try:
         if os.path.exists(filepath):
@@ -64,6 +113,7 @@ def safe_read_json(filepath: str, default: Any = None):
     except Exception as e:
         logger.warning(f"⚠️ Не удалось прочитать {filepath}: {e}")
     return default
+
 
 # ============================================================================
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -109,6 +159,7 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
         logger.error(f"❌ g4f критическая ошибка {provider_name}/{model}: {type(e).__name__}: {error_msg}")
         return False, error_msg, elapsed
 
+
 async def get_openrouter_free_models() -> List[str]:
     openrouter_token = os.getenv('OPENR_TOKEN')
     if not openrouter_token:
@@ -116,7 +167,15 @@ async def get_openrouter_free_models() -> List[str]:
         return OPENROUTER_FREE_MODELS
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get("https://openrouter.ai/api/v1/models", headers={"Authorization": f"Bearer {openrouter_token}"}) as response:
+            # 🔧 v0.2: Добавлена поддержка прокси для запроса
+            proxy = get_random_proxy()
+            headers = {"Authorization": f"Bearer {openrouter_token}"}
+
+            async with session.get(
+                    "https://openrouter.ai/api/v1/models",
+                    headers=headers,
+                    proxy=proxy
+            ) as response:
                 if response.status == 200:
                     data = await response.json()
                     free_models = []
@@ -139,6 +198,7 @@ async def get_openrouter_free_models() -> List[str]:
         logger.warning(f"⚠️ Не удалось получить модели OpenRouter: {e}")
         return OPENROUTER_FREE_MODELS
 
+
 async def test_openrouter_model(model: str, prompt: str, timeout: float = 35.0):
     openrouter_token = os.getenv('OPENR_TOKEN')
     if not openrouter_token:
@@ -150,12 +210,17 @@ async def test_openrouter_model(model: str, prompt: str, timeout: float = 35.0):
         loop = asyncio.get_running_loop()
         google_models = ["gemma", "google/"]
         is_google_model = any(g in model.lower() for g in google_models)
+
         def make_request():
             messages = []
             if not is_google_model:
-                messages.append({"role": "system", "content": "Отвечай максимально кратко. Если это тест — просто напиши 'ок'."})
+                messages.append(
+                    {"role": "system", "content": "Отвечай максимально кратко. Если это тест — просто напиши 'ок'."})
             messages.append({"role": "user", "content": prompt})
-            return client.chat.completions.create(model=model, messages=messages, timeout=timeout, extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot", "X-OpenRouter-Title": "PsIInka Bot"})
+            return client.chat.completions.create(model=model, messages=messages, timeout=timeout,
+                                                  extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot",
+                                                                 "X-OpenRouter-Title": "PsIInka Bot"})
+
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -201,9 +266,11 @@ async def test_openrouter_model(model: str, prompt: str, timeout: float = 35.0):
         logger.error(f"❌ OpenRouter/{model} — ошибка: {type(e).__name__}: {e}")
         return False, str(e)[:100], elapsed
 
+
 def get_g4f_providers():
     providers = []
-    skip = {'Provider', 'BaseProvider', 'RetryProvider', 'RetryUntilSuccessful', 'CustomProvider', 'OpenaiChat', 'FlowAI', 'Vercel', 'Yqcloud'}
+    skip = {'Provider', 'BaseProvider', 'RetryProvider', 'RetryUntilSuccessful', 'CustomProvider', 'OpenaiChat',
+            'FlowAI', 'Vercel', 'Yqcloud'}
     for attr_name in dir(g4f.Provider):
         if attr_name.startswith('_') or attr_name in skip:
             continue
@@ -214,9 +281,11 @@ def get_g4f_providers():
         except:
             continue
     if not providers:
-        providers = ["PollinationsAI", "Perplexity", "PollinationsAI", "DeepInfra", "Together", "Qwen", "Grok", "Copilot"]
+        providers = ["PollinationsAI", "Perplexity", "PollinationsAI", "DeepInfra", "Together", "Qwen", "Grok",
+                     "Copilot"]
         logger.info("⚠️ Используем резервный список провайдеров")
     return providers
+
 
 def get_g4f_models():
     models = []
@@ -242,9 +311,11 @@ def get_g4f_models():
     except Exception as e:
         logger.warning(f"Не удалось получить модели автоматически: {e}")
     if not models:
-        models = ["gpt-4o", "gpt-4o-mini", "gpt-4", "llama-3-70b", "llama-3.1-70b", "qwen-2.5-72b", "deepseek-v3", "deepseek-r1", "gemini-2.0-flash", "mistral-7b", "mixtral-8x7b", "sonar", "sonar-pro"]
+        models = ["gpt-4o", "gpt-4o-mini", "gpt-4", "llama-3-70b", "llama-3.1-70b", "qwen-2.5-72b", "deepseek-v3",
+                  "deepseek-r1", "gemini-2.0-flash", "mistral-7b", "mixtral-8x7b", "sonar", "sonar-pro"]
         logger.info("⚠️ Используем резервный список моделей")
     return list(set(models))
+
 
 def save_test_results(results, total_combinations, elapsed_total, test_mode_name="unknown"):
     successful = [r for r in results if r['success']]
@@ -252,7 +323,9 @@ def save_test_results(results, total_combinations, elapsed_total, test_mode_name
     top_50 = []
     for idx, r in enumerate(successful_sorted[:50]):
         top_50.append({'provider': r['provider'], 'model': r['model'], 'time': r['time'], 'rank': idx + 1})
-    test_record = {'timestamp': datetime.now().isoformat(), 'test_mode_name': test_mode_name, 'total_combinations': total_combinations, 'successful_count': len(successful), 'elapsed_seconds': elapsed_total, 'top_combinations': top_50}
+    test_record = {'timestamp': datetime.now().isoformat(), 'test_mode_name': test_mode_name,
+                   'total_combinations': total_combinations, 'successful_count': len(successful),
+                   'elapsed_seconds': elapsed_total, 'top_combinations': top_50}
     history_file = 'test_history.json'
     history = safe_read_json(history_file, [])
     history.append(test_record)
@@ -271,8 +344,12 @@ def save_test_results(results, total_combinations, elapsed_total, test_mode_name
     logger.info(f"💾 Результаты теста сохранены (или пропущены на Railway)")
     return top_50
 
+
 def get_default_candidates() -> List[Tuple[str, str]]:
-    return [("PollinationsAI", "deepseek-v3"), ("PollinationsAI", "deepseek-r1"), ("PollinationsAI", "sonar"), ("DeepInfra", "llama-3.1-70b"), ("Together", "qwen-2.5-72b"), ("Perplexity", "sonar"), ("Perplexity", "sonar-pro"), ("HuggingSpace", "deepseek-v3")]
+    return [("PollinationsAI", "deepseek-v3"), ("PollinationsAI", "deepseek-r1"), ("PollinationsAI", "sonar"),
+            ("DeepInfra", "llama-3.1-70b"), ("Together", "qwen-2.5-72b"), ("Perplexity", "sonar"),
+            ("Perplexity", "sonar-pro"), ("HuggingSpace", "deepseek-v3")]
+
 
 def get_best_combinations_from_history(max_combinations: int = 5) -> List[Tuple[str, str]]:
     history_file = 'test_history.json'
@@ -298,11 +375,13 @@ def get_best_combinations_from_history(max_combinations: int = 5) -> List[Tuple[
         avg_time = sum(data['times']) / len(data['times'])
         avg_rank = sum(data['ranks']) / len(data['ranks'])
         stability_bonus = len(data['times']) * 0.1
-        scored_combinations.append({'provider': provider, 'model': model, 'avg_time': avg_time, 'avg_rank': avg_rank, 'appearances': len(data['times']), 'score': avg_time - stability_bonus})
+        scored_combinations.append({'provider': provider, 'model': model, 'avg_time': avg_time, 'avg_rank': avg_rank,
+                                    'appearances': len(data['times']), 'score': avg_time - stability_bonus})
     scored_combinations.sort(key=lambda x: x['score'])
     top_combos = scored_combinations[:max_combinations]
     logger.info(f"🏆 Выбрано {len(top_combos)} лучших комбинаций из истории тестов")
     return [(c['provider'], c['model']) for c in top_combos]
+
 
 def generate_test_report(results, total_tests):
     successful = [r for r in results if r['success']]
@@ -345,6 +424,7 @@ def generate_test_report(results, total_tests):
         report += "⚠️ **Полные логи ошибок:** файл `bot_errors.log`"
     return report
 
+
 def generate_test_report_embed(results, total_tests, elapsed_total, test_mode_name):
     successful = [r for r in results if r['success']]
     failed = [r for r in results if not r['success']]
@@ -357,9 +437,13 @@ def generate_test_report_embed(results, total_tests, elapsed_total, test_mode_na
         color = COLOR_WARNING
     else:
         color = COLOR_SUCCESS
-    embed = disnake.Embed(title="📊 Отчёт о тестировании моделей", description=f"**Режим:** `{test_mode_name}`\n**Время:** `{elapsed_total:.0f}с` ({elapsed_total / 60:.1f} мин)", color=color, timestamp=datetime.now())
+    embed = disnake.Embed(title="📊 Отчёт о тестировании моделей",
+                          description=f"**Режим:** `{test_mode_name}`\n**Время:** `{elapsed_total:.0f}с` ({elapsed_total / 60:.1f} мин)",
+                          color=color, timestamp=datetime.now())
     success_rate = (len(successful) / total_tests * 100) if total_tests > 0 else 0
-    embed.add_field(name="📊 Статистика", value=f"**Всего:** `{total_tests}`\n**✅ Успешно:** `{len(successful)}`\n**❌ Ошибок:** `{len(failed)}`\n**📈 Успех:** `{success_rate:.0f}%`", inline=True)
+    embed.add_field(name="📊 Статистика",
+                    value=f"**Всего:** `{total_tests}`\n**✅ Успешно:** `{len(successful)}`\n**❌ Ошибок:** `{len(failed)}`\n**📈 Успех:** `{success_rate:.0f}%`",
+                    inline=True)
     if successful:
         top_3 = sorted(successful, key=lambda x: x['time'] if x['time'] else 999)[:3]
         top_text = ""
@@ -383,7 +467,8 @@ def generate_test_report_embed(results, total_tests, elapsed_total, test_mode_na
             time_str = f"{r['time']:.2f}с" if r['time'] else "N/A"
             table_rows += f"{idx:<3} {provider_short:<16} {model_short:<18} {time_str:<7}\n"
         table_content = table_header + table_separator + table_rows
-        embed.add_field(name="✅ Рабочие (Топ-10)", value=f"```\n{table_content}```" if len(table_content) < 1024 else "⚠️ Смотрите файл `test_latest_report.txt`", inline=False)
+        embed.add_field(name="✅ Рабочие (Топ-10)", value=f"```\n{table_content}```" if len(
+            table_content) < 1024 else "⚠️ Смотрите файл `test_latest_report.txt`", inline=False)
     if failed:
         error_groups = {}
         for r in failed:
@@ -417,6 +502,7 @@ def generate_test_report_embed(results, total_tests, elapsed_total, test_mode_na
     embed.add_field(name="💡 Рекомендации", value=recommendations, inline=False)
     embed.set_footer(text="ПсИИнка бот | g4f тестирование")
     return embed
+
 
 # ============================================================================
 # СПИСКИ МОДЕЛЕЙ И ПРОВАЙДЕРОВ
@@ -454,6 +540,7 @@ QUICK_TEST_MODELS = [
     "mistral-7b", "mixtral-8x7b",
 ]
 
+
 # ============================================================================
 # СОБЫТИЯ И КОМАНДЫ БОТА
 # ============================================================================
@@ -465,12 +552,18 @@ async def on_ready():
     if IS_RAILWAY:
         logger.info("🚂 Запущен на Railway — оптимизации активны")
 
+    # 🔧 v0.2: Загрузка прокси при старте
+    if os.getenv('USE_PROXY', 'false').lower() == 'true':
+        asyncio.create_task(fetch_free_proxies())
+
+
 @bot.command()
 async def погавкай(ctx):
     try:
         await ctx.reply(f'Иди нахуй! У меня пинг {round(bot.latency * 1000)} мс')
     except Exception as e:
         logger.error(f"Ошибка в команде погавкай: {e}", exc_info=True)
+
 
 # ============================================================================
 # CLASS VIEW С КНОПКАМИ (БЕЗ ПОЛНОГО ТЕСТА)
@@ -529,6 +622,7 @@ class TestModeView(disnake.ui.View):
         except:
             pass
 
+
 # ============================================================================
 # ФУНКЦИЯ ЗАПУСКА ТЕСТА (БЕЗ ПОЛНОГО ТЕСТА)
 # ============================================================================
@@ -561,7 +655,8 @@ async def run_test_command(ctx, mode: str):
             BATCH_SIZE = 5
             timeout = 300.0
         elif mode == "openrouter":
-            await progress_msg.edit(content=f"🔄 **Тестирование моделей запущено**\n`Получаю актуальные бесплатные модели OpenRouter...`")
+            await progress_msg.edit(
+                content=f"🔄 **Тестирование моделей запущено**\n`Получаю актуальные бесплатные модели OpenRouter...`")
             all_models = await get_openrouter_free_models()
             providers_to_test = ["OpenRouter"]
             test_mode_name = "🟣 ТЕСТ OPENROUTER"
@@ -645,8 +740,11 @@ async def run_test_command(ctx, mode: str):
             if provider == "OpenRouter":
                 success, answer_or_error, elapsed = await test_openrouter_model(model, test_prompt, REQUEST_TIMEOUT)
             else:
-                success, answer_or_error, elapsed = await make_g4f_request(provider, model, test_prompt, REQUEST_TIMEOUT)
-            return {'success': success, 'time': elapsed if success else None, 'answer_len': len(answer_or_error) if success else 0, 'error': answer_or_error if not success else None}
+                success, answer_or_error, elapsed = await make_g4f_request(provider, model, test_prompt,
+                                                                           REQUEST_TIMEOUT)
+            return {'success': success, 'time': elapsed if success else None,
+                    'answer_len': len(answer_or_error) if success else 0,
+                    'error': answer_or_error if not success else None}
 
         async def process_combination(provider: str, model: str):
             nonlocal completed_count, last_heartbeat
@@ -666,16 +764,20 @@ async def run_test_command(ctx, mode: str):
                 else:
                     errors.append(res.get('error', 'Unknown'))
             async with combo_lock:
-                results.append({'provider': provider, 'model': model, 'time': min_time, 'success': success, 'response_length': 0 if not success else 100, 'error': errors[0] if errors and not success else None})
+                results.append({'provider': provider, 'model': model, 'time': min_time, 'success': success,
+                                'response_length': 0 if not success else 100,
+                                'error': errors[0] if errors and not success else None})
                 completed_count += 1
                 last_heartbeat = time.time()
                 if completed_count % BATCH_SIZE == 0:
                     await update_progress(completed_count, total_requests)
 
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+
         async def limited_task(coro):
             async with semaphore:
                 return await coro
+
         all_tasks = [limited_task(process_combination(p, m)) for p, m in all_combinations]
 
         try:
@@ -691,7 +793,8 @@ async def run_test_command(ctx, mode: str):
             pass
 
         elapsed_total = time.time() - start_time
-        await update_progress(completed_count, total_requests, "✅", f"⏱ Всего: {elapsed_total:.0f}с ({elapsed_total / 60:.1f} мин)")
+        await update_progress(completed_count, total_requests, "✅",
+                              f"⏱ Всего: {elapsed_total:.0f}с ({elapsed_total / 60:.1f} мин)")
         save_test_results(results, total_combinations, elapsed_total, test_mode_name)
         txt_report = generate_test_report(results, total_combinations)
         txt_report += f"\n⏱ **Время теста:** {elapsed_total:.0f}с ({elapsed_total / 60:.1f} мин)\n"
@@ -709,6 +812,7 @@ async def run_test_command(ctx, mode: str):
     except Exception as e:
         logger.error(f"Критическая ошибка в команде тест: {e}", exc_info=True)
         await ctx.send(f"[CRIT] {str(e)[:100]}")
+
 
 # ============================================================================
 # КОМАНДА "тест" С КНОПКАМИ (ОБНОВЛЁННОЕ ОПИСАНИЕ)
@@ -738,12 +842,17 @@ async def тест(ctx, mode: str = None):
         color=0xFF8844,
         timestamp=datetime.now()
     )
-    embed.add_field(name="📊 Что будет протестировано", value="• **Скорость ответа** каждой комбинации\n• **Стабильность соединения** с провайдерами\n• **Качество ответов** (проверка на русский язык)\n• **Работоспособность** моделей для команды `скажи`", inline=False)
-    embed.add_field(name="💾 Результаты", value="• `test_history.json` — история для команды `скажи`\n• `test_latest_report.txt` — последний отчёт", inline=False)
+    embed.add_field(name="📊 Что будет протестировано",
+                    value="• **Скорость ответа** каждой комбинации\n• **Стабильность соединения** с провайдерами\n• **Качество ответов** (проверка на русский язык)\n• **Работоспособность** моделей для команды `скажи`",
+                    inline=False)
+    embed.add_field(name="💾 Результаты",
+                    value="• `test_history.json` — история для команды `скажи`\n• `test_latest_report.txt` — последний отчёт",
+                    inline=False)
     embed.set_footer(text="🐾 ПсИИнка бот | g4f тестирование моделей")
     embed.set_thumbnail(url="https://i.imgur.com/7Q8vK9L.png")
     view = TestModeView(ctx)
     await ctx.send(embed=embed, view=view)
+
 
 @bot.command(name="кубик")
 async def кубик(ctx, *, max_value: str):
@@ -761,6 +870,7 @@ async def кубик(ctx, *, max_value: str):
         logger.error(f"Ошибка в команде кубик: {e}", exc_info=True)
         await ctx.send("❌ Внутренняя ошибка")
 
+
 @bot.command(name="лучшие")
 async def лучшие(ctx, test_type: str = "all"):
     try:
@@ -773,7 +883,8 @@ async def лучшие(ctx, test_type: str = "all"):
             await ctx.send("❌ История тестов пуста. Запустите `псинка тест quick` сначала.")
             return
         test_type = test_type.lower()
-        type_keywords = {"all": ["🟢", "🟣", "🔵", "БЫСТРЫЙ", "OPENROUTER", "АВТО", "ВСЕГО"], "quick": ["🟢", "БЫСТРЫЙ"], "openrouter": ["🟣", "OPENROUTER"], "auto": ["🔵", "АВТО", "АВТО-СКАНИРОВАНИЕ"]}
+        type_keywords = {"all": ["🟢", "🟣", "🔵", "БЫСТРЫЙ", "OPENROUTER", "АВТО", "ВСЕГО"], "quick": ["🟢", "БЫСТРЫЙ"],
+                         "openrouter": ["🟣", "OPENROUTER"], "auto": ["🔵", "АВТО", "АВТО-СКАНИРОВАНИЕ"]}
         keywords = type_keywords.get(test_type, type_keywords["all"])
         filtered_tests = []
         type_counts = {"🟢": 0, "🟣": 0, "🔵": 0}
@@ -810,7 +921,9 @@ async def лучшие(ctx, test_type: str = "all"):
             for combo in test.get('top_combinations', []):
                 key = (combo['provider'], combo['model'])
                 if key not in combination_stats:
-                    combination_stats[key] = {'times': [], 'ranks': [], 'test_count': 0, 'first_seen': test.get('timestamp', ''), 'last_seen': test.get('timestamp', '')}
+                    combination_stats[key] = {'times': [], 'ranks': [], 'test_count': 0,
+                                              'first_seen': test.get('timestamp', ''),
+                                              'last_seen': test.get('timestamp', '')}
                 combination_stats[key]['times'].append(combo['time'])
                 combination_stats[key]['ranks'].append(combo['rank'])
                 combination_stats[key]['test_count'] += 1
@@ -822,25 +935,32 @@ async def лучшие(ctx, test_type: str = "all"):
             min_time = min(stats['times'])
             max_time = max(stats['times'])
             stability = (max_time - min_time) / avg_time if avg_time > 0 else 0
-            aggregated_results.append({'provider': provider, 'model': model, 'avg_time': avg_time, 'min_time': min_time, 'max_time': max_time, 'avg_rank': avg_rank, 'test_count': stats['test_count'], 'stability': stability, 'first_seen': stats['first_seen'], 'last_seen': stats['last_seen']})
+            aggregated_results.append(
+                {'provider': provider, 'model': model, 'avg_time': avg_time, 'min_time': min_time, 'max_time': max_time,
+                 'avg_rank': avg_rank, 'test_count': stats['test_count'], 'stability': stability,
+                 'first_seen': stats['first_seen'], 'last_seen': stats['last_seen']})
         aggregated_results.sort(key=lambda x: x['avg_time'])
         top_results = aggregated_results[:15]
         if not top_results:
             await ctx.send("❌ Нет успешных комбинаций в истории.")
             return
-        embed = disnake.Embed(title="🏆 Лучшие комбинации (из test_history.json)", description=f"**Тип тестов:** `{test_type}`\n**Проанализировано тестов:** `{len(filtered_tests)}`\n**Всего комбинаций:** `{len(combination_stats)}`\n\n*Данные усреднены по последним 5 тестам каждого типа*", color=0x00FF88, timestamp=datetime.now())
+        embed = disnake.Embed(title="🏆 Лучшие комбинации (из test_history.json)",
+                              description=f"**Тип тестов:** `{test_type}`\n**Проанализировано тестов:** `{len(filtered_tests)}`\n**Всего комбинаций:** `{len(combination_stats)}`\n\n*Данные усреднены по последним 5 тестам каждого типа*",
+                              color=0x00FF88, timestamp=datetime.now())
         table_header = f"{'№':<3} {'Провайдер':<16} {'Модель':<18} {'Средн':<7} {'Мин':<7} {'Раз':<5}\n"
         table_separator = "—" * 62 + "\n"
         table_rows = ""
         for i, r in enumerate(top_results, 1):
-            medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟", "1️⃣1️⃣", "1️⃣2️⃣", "1️⃣3️⃣", "1️⃣4️⃣", "1️⃣5️⃣"]
+            medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟", "1️⃣1️⃣", "1️⃣2️⃣", "1️⃣3️⃣",
+                      "1️⃣4️⃣", "1️⃣5️⃣"]
             medal = medals[i - 1] if i <= 15 else f"{i}."
             provider_short = r['provider'][:16] if len(r['provider']) > 16 else r['provider']
             model_short = r['model'][:18] if len(r['model']) > 18 else r['model']
             stability_icon = "🟢" if r['stability'] < 0.2 else "🟡" if r['stability'] < 0.5 else "🔴"
             spread = f"{((r['max_time'] - r['min_time']) * 1000):.0f}мс"
             table_rows += f"{medal} `{provider_short:<16}` `{model_short:<18}` `{r['avg_time']:.2f}с` `{r['min_time']:.2f}с` {spread:<5} {stability_icon}\n"
-        embed.add_field(name="📊 Агрегированные результаты", value=f"```\n{table_header}{table_separator}{table_rows}```", inline=False)
+        embed.add_field(name="📊 Агрегированные результаты",
+                        value=f"```\n{table_header}{table_separator}{table_rows}```", inline=False)
         if top_results:
             best_combo = top_results[0]
             most_stable = min(top_results, key=lambda x: x['stability'])
@@ -860,6 +980,7 @@ async def лучшие(ctx, test_type: str = "all"):
         logger.error(f"Ошибка в команде лучшие: {e}", exc_info=True)
         await ctx.send(f"❌ Ошибка: {str(e)[:1900]}")
 
+
 @bot.command(name="скажи")
 async def скажи(ctx, *, prompt: str = None):
     try:
@@ -876,7 +997,8 @@ async def скажи(ctx, *, prompt: str = None):
             try:
                 logger.info(f"🔄 Попытка {attempt}/{max_retries} получить ответ через g4f...")
                 if attempt > 1:
-                    await msg.edit(content=f"Ответ от ПсИИнки...\n⏳ Загружаю ответ (Попытка {attempt}/{max_retries})...")
+                    await msg.edit(
+                        content=f"Ответ от ПсИИнки...\n⏳ Загружаю ответ (Попытка {attempt}/{max_retries})...")
                 response_text, provider, model = await chat_with_model(prompt, timeout=retry_timeout, attempt=attempt)
                 final_response = response_text
                 final_provider = provider
@@ -898,7 +1020,8 @@ async def скажи(ctx, *, prompt: str = None):
             logger.info("🔀 Все попытки g4f не удались, пробуем OpenRouter API...")
             await msg.edit(content=f"Ответ от ПсИИнки...\n⏳ Загружаю ответ через OpenRouter...")
             try:
-                openrouter_response, openrouter_provider, openrouter_model = await chat_via_openrouter(prompt, timeout=40.0)
+                openrouter_response, openrouter_provider, openrouter_model = await chat_via_openrouter(prompt,
+                                                                                                       timeout=40.0)
                 final_response = openrouter_response
                 final_provider = openrouter_provider
                 final_model = openrouter_model
@@ -926,6 +1049,7 @@ async def скажи(ctx, *, prompt: str = None):
         logger.error(f"Ошибка в команде скажи: {type(e).__name__}: {e}", exc_info=True)
         await ctx.send(f"⚠️ Ошибка: {str(e)[:1900]}")
 
+
 async def chat_with_model(prompt: str, timeout: float = 40.0, attempt: int = 1):
     optimized_candidates = get_best_combinations_from_history(max_combinations=3)
     default_candidates = get_default_candidates()
@@ -939,21 +1063,29 @@ async def chat_with_model(prompt: str, timeout: float = 40.0, attempt: int = 1):
             seen.add((p, m))
     candidate_index = (attempt - 1) % len(all_candidates) if all_candidates else 0
     current_candidate = all_candidates[candidate_index] if all_candidates else ("PollinationsAI", "deepseek-r1")
-    logger.info(f"🏎 Попытка {attempt}: 2 параллельных запроса (g4f-default + {current_candidate[0]}/{current_candidate[1]})")
+    logger.info(
+        f"🏎 Попытка {attempt}: 2 параллельных запроса (g4f-default + {current_candidate[0]}/{current_candidate[1]})")
+
     def is_russian(text: str) -> bool:
         if not text or len(text.strip()) < 3:
             return False
         cyrillic = len(re.findall(r'[а-яА-ЯёЁ]', text))
         total = len(re.findall(r'[а-яА-ЯёЁa-zA-Z]', text))
         return total > 0 and (cyrillic / total) >= 0.3
+
     def is_error_message(text: str) -> bool:
-        error_keywords = ['limit', 'limited', 'rate limit', 'too many requests', 'ip 请求', '限流', '限制', 'error', 'errore', 'try again', 'попробуйте', 'через', 'минут', 'мин', 'https://', 'http://', 'wechat', '微信', 'chat19.aichatos', '60 次', '每小时', 'ip request', 'temporarily']
+        error_keywords = ['limit', 'limited', 'rate limit', 'too many requests', 'ip 请求', '限流', '限制', 'error',
+                          'errore', 'try again', 'попробуйте', 'через', 'минут', 'мин', 'https://', 'http://', 'wechat',
+                          '微信', 'chat19.aichatos', '60 次', '每小时', 'ip request', 'temporarily']
         text_lower = text.lower()
         return any(kw in text_lower for kw in error_keywords)
+
     async def fetch(provider_name: str, model: str):
         try:
-            success, answer, elapsed = await make_g4f_request(provider_name, model, prompt, timeout=timeout, system_prompt="Ты помощник по имени Псинка. Отвечай ТОЛЬКО на русском языке, кратко и максимально по делу.")
-            logger.info(f"📡 g4f запрос {provider_name}/{model}: success={success}, elapsed={elapsed:.2f}s, answer_len={len(answer) if answer else 0}")
+            success, answer, elapsed = await make_g4f_request(provider_name, model, prompt, timeout=timeout,
+                                                              system_prompt="Ты помощник по имени Псинка. Отвечай ТОЛЬКО на русском языке, кратко и максимально по делу.")
+            logger.info(
+                f"📡 g4f запрос {provider_name}/{model}: success={success}, elapsed={elapsed:.2f}s, answer_len={len(answer) if answer else 0}")
             if not success or not answer:
                 logger.warning(f"❌ {provider_name}/{model} — не успешен: {answer[:100] if answer else 'нет ответа'}")
                 raise Exception(answer or "Пустой ответ")
@@ -968,13 +1100,17 @@ async def chat_with_model(prompt: str, timeout: float = 40.0, attempt: int = 1):
         except Exception as e:
             logger.error(f"❌ fetch() ошибка {provider_name}/{model}: {type(e).__name__}: {e}")
             raise
+
     async def fetch_default_g4f():
         try:
             logger.info("🎯 Приоритетный запрос: g4f deepseek-r1 (без провайдера)...")
             client = g4f.client.AsyncClient()
-            messages = [{"role": "system", "content": "Ты помощник по имени Псинка. Отвечай ТОЛЬКО на русском языке, кратко и максимально по делу."}, {"role": "user", "content": prompt}]
+            messages = [{"role": "system",
+                         "content": "Ты помощник по имени Псинка. Отвечай ТОЛЬКО на русском языке, кратко и максимально по делу."},
+                        {"role": "user", "content": prompt}]
             start = time.time()
-            response = await asyncio.wait_for(client.chat.completions.create(model="deepseek-r1", messages=messages), timeout=timeout)
+            response = await asyncio.wait_for(client.chat.completions.create(model="deepseek-r1", messages=messages),
+                                              timeout=timeout)
             if response and hasattr(response, 'choices') and response.choices:
                 answer = response.choices[0].message.content
                 if answer and answer.strip():
@@ -996,7 +1132,9 @@ async def chat_with_model(prompt: str, timeout: float = 40.0, attempt: int = 1):
         except Exception as e:
             logger.error(f"❌ g4f-default/deepseek-r1 — ошибка: {type(e).__name__}: {e}")
             raise
-    tasks = [asyncio.create_task(fetch_default_g4f()), asyncio.create_task(fetch(current_candidate[0], current_candidate[1]))]
+
+    tasks = [asyncio.create_task(fetch_default_g4f()),
+             asyncio.create_task(fetch(current_candidate[0], current_candidate[1]))]
     logger.info(f"🚀 Запущено 2 параллельных запроса (таймаут {timeout}с)...")
     try:
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED, timeout=timeout + 5.0)
@@ -1020,13 +1158,16 @@ async def chat_with_model(prompt: str, timeout: float = 40.0, attempt: int = 1):
         logger.error(f"Ошибка в попытке {attempt}: {type(e).__name__}: {e}")
         raise TimeoutError(f"Попытка {attempt} не удалась: {str(e)}")
 
+
 async def chat_via_openrouter(prompt: str, timeout: float = 45.0):
     openrouter_token = os.getenv('OPENR_TOKEN')
     if not openrouter_token:
         logger.error("❌ OPENR_TOKEN не найден в .env")
         raise Exception("OpenRouter API ключ не настроен")
     priority_models = get_openrouter_models_from_history(max_models=3)
-    default_models = ["liquid/lfm-2.5-1.2b-instruct:free", "nvidia/nemotron-3-super-120b-a12b:free", "stepfun/step-3.5-flash:free", "arcee-ai/trinity-large-preview:free", "nvidia/nemotron-3-nano-30b-a3b:free"]
+    default_models = ["liquid/lfm-2.5-1.2b-instruct:free", "nvidia/nemotron-3-super-120b-a12b:free",
+                      "stepfun/step-3.5-flash:free", "arcee-ai/trinity-large-preview:free",
+                      "nvidia/nemotron-3-nano-30b-a3b:free"]
     models_to_try = []
     for m in priority_models:
         if m not in models_to_try:
@@ -1043,12 +1184,17 @@ async def chat_via_openrouter(prompt: str, timeout: float = 45.0):
             loop = asyncio.get_running_loop()
             google_models = ["gemma", "google/"]
             is_google_model = any(g in model.lower() for g in google_models)
+
             def make_request():
                 messages = []
                 if not is_google_model:
-                    messages.append({"role": "system", "content": "Ты помощник по имени Псинка. Отвечай ТОЛЬКО на русском языке, кратко и максимально по делу."})
+                    messages.append({"role": "system",
+                                     "content": "Ты помощник по имени Псинка. Отвечай ТОЛЬКО на русском языке, кратко и максимально по делу."})
                 messages.append({"role": "user", "content": prompt})
-                return client.chat.completions.create(model=model, messages=messages, timeout=timeout, extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot", "X-OpenRouter-Title": "PsIInka Bot"})
+                return client.chat.completions.create(model=model, messages=messages, timeout=timeout,
+                                                      extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot",
+                                                                     "X-OpenRouter-Title": "PsIInka Bot"})
+
             max_retries = 2
             for attempt in range(max_retries):
                 try:
@@ -1086,6 +1232,7 @@ async def chat_via_openrouter(prompt: str, timeout: float = 45.0):
     logger.error("❌ Все модели OpenRouter не ответили")
     raise Exception("OpenRouter: ни одна модель не ответила")
 
+
 def get_openrouter_models_from_history(max_models: int = 3) -> List[str]:
     history_file = 'test_history.json'
     history = safe_read_json(history_file, [])
@@ -1112,14 +1259,18 @@ def get_openrouter_models_from_history(max_models: int = 3) -> List[str]:
         max_time = max(stats['times'])
         stability = (max_time - min_time) / avg_time if avg_time > 0 else 0
         score = avg_time + (stability * 0.5) - (stats['appearances'] * 0.1)
-        scored_models.append({'model': model, 'avg_time': avg_time, 'stability': stability, 'appearances': stats['appearances'], 'score': score})
+        scored_models.append(
+            {'model': model, 'avg_time': avg_time, 'stability': stability, 'appearances': stats['appearances'],
+             'score': score})
     scored_models.sort(key=lambda x: x['score'])
     top_models = [m['model'] for m in scored_models[:max_models]]
     logger.info(f"🏆 Найдено {len(top_models)} стабильных моделей OpenRouter из истории:")
     for i, m in enumerate(top_models, 1):
         model_data = next(x for x in scored_models if x['model'] == m)
-        logger.info(f"  #{i}: {m} — {model_data['avg_time']:.2f}с (стабильность: {model_data['stability']:.1%}, тестов: {model_data['appearances']})")
+        logger.info(
+            f"  #{i}: {m} — {model_data['avg_time']:.2f}с (стабильность: {model_data['stability']:.1%}, тестов: {model_data['appearances']})")
     return top_models
+
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -1128,6 +1279,7 @@ async def on_command_error(ctx, error):
         await ctx.send(f"⚠️ Ошибка: {str(error)}")
     except:
         pass
+
 
 if __name__ == "__main__":
     try:
