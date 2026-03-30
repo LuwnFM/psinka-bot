@@ -209,33 +209,33 @@ Loading: [----------------------] 100%
 
 BOT COMMANDS
 
-Prefix: psinka
+Prefix: псинка
 
-  psinka pogavkay         - check bot ping
+  псинка погавкай         - check bot ping
 
-  psinka kubik X          - roll dice (from 1 to X)
+  псинка кубик X          - roll dice (from 1 to X)
 
-  psinka test             - AI models testing menu
+  псинка тест             - AI models testing menu
 
-  psinka skazhi vopros    - request to artificial intelligence
+  псинка скажи [вопрос]    - request to artificial intelligence
 
-  psinka luchshiye        - statistics of successful combinations
+  псинка лучшие        - statistics of successful combinations
 
-  psinka skachat_logi     - download log file (owner only)
+  псинка скачать_логи     - download log file (owner only)
 
-  psinka skachat_istoriyu - download test history (owner only)
+  псинка скачать_историю - download test history (owner only)
 
 TEST MODES:
 
-  Ekspress      - 5 providers x 1 request     - ~15 seconds
+  Экспресс      - 5 providers x 1 request     - ~15 seconds
 
-  Bystryy       - 8 providers x 11 models     - ~5 minutes
+  Быстрый       - 8 providers x 11 models     - ~5 minutes
 
   OpenRouter    - Free models                 - ~7 minutes
 
-  Vsyo          - g4f + OpenRouter together   - ~10 minutes
+  Всё          - g4f + OpenRouter together   - ~10 minutes
 
-  Avto          - Auto-scanning               - ~10 minutes
+  Авто          - Auto-scanning               - ~10 minutes
 
 C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type WARNINGS.TXT
 
