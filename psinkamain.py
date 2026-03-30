@@ -1280,6 +1280,33 @@ async def on_command_error(ctx, error):
     except:
         pass
 
+@bot.command(name="скачать_логи")
+async def скачать_логи(ctx):
+    """Скачивает файл логов (только для владельца)"""
+    # 🔧 Замените на ваш Discord ID
+    OWNER_ID = int(os.getenv('OWNER_ID', 0))
+    if ctx.author.id != OWNER_ID and OWNER_ID != 0:
+        await ctx.send("❌ Доступ запрещён")
+        return
+
+    if os.path.exists('bot_errors.log'):
+        await ctx.send(file=disnake.File('bot_errors.log'))
+    else:
+        await ctx.send("❌ Файл логов не найден")
+
+
+@bot.command(name="скачать_историю")
+async def скачать_историю(ctx):
+    """Скачивает test_history.json (только для владельца)"""
+    OWNER_ID = int(os.getenv('OWNER_ID', 0))
+    if ctx.author.id != OWNER_ID and OWNER_ID != 0:
+        await ctx.send("❌ Доступ запрещён")
+        return
+
+    if os.path.exists('test_history.json'):
+        await ctx.send(file=disnake.File('test_history.json'))
+    else:
+        await ctx.send("❌ История тестов пуста")
 
 if __name__ == "__main__":
     try:
