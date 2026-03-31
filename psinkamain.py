@@ -18,7 +18,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 
 # ============================================================================
-# 🔧 НАСТРОЙКИ И БАЗА ДАННЫХ (NEON TECH)
+#  НАСТРОЙКИ И БАЗА ДАННЫХ (NEON TECH)
 # ============================================================================
 
 load_dotenv()
@@ -146,8 +146,7 @@ logger = logging.getLogger(__name__)
 intents = disnake.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = commands.Bot(command_prefix="!",
-                   intents=intents)  # Префикс теперь не важен для слэш-команд, но нужен для fallback
+bot = commands.Bot(command_prefix="!", intents=intents)
 
 DEFAULT_FALLBACKS = [("PollinationsAI", "deepseek-r1"), ("DeepInfra", "llama-3.1-70b")]
 EXCLUDED_OR_MODELS = ["liquid/lfm-2.5-1.2b-instruct:free"]
@@ -183,14 +182,13 @@ def get_random_proxy(use_proxy: bool) -> Optional[str]:
     """Возвращает прокси только если use_proxy=True"""
     if not use_proxy:
         return None
-    # Если прокси включен, всегда берем случайный (шанс 100% при выборе опции)
     proxy = random.choice(FREE_PROXY_LIST)
     logger.debug(f"🔀 Используем прокси: {proxy}")
     return proxy
 
 
 # ============================================================================
-# 🔒 ПРОВЕРКА ДОСТУПА
+# 🔒 ПРОВЕРКА ДОСТУПА (ДЛЯ ВСЕХ КОМАНД КРОМЕ КУБИКА)
 # ============================================================================
 
 async def check_access(interaction: disnake.CommandInteraction) -> bool:
@@ -209,12 +207,12 @@ async def check_access(interaction: disnake.CommandInteraction) -> bool:
     if any(role.id == REQUIRED_ROLE_ID for role in interaction.author.roles):
         return True
 
-    await interaction.response.send_message(" У вас нет доступа к этой команде.", ephemeral=True)
+    await interaction.response.send_message("❌ У вас нет доступа к этой команде.", ephemeral=True)
     return False
 
 
 # ============================================================================
-# 🤖 ЗАПРОСЫ К МОДЕЛЯМ (С ПОДДЕРЖКОЙ ПРОКСИ)
+# 🤖 ЗАПРОСЫ К МОДЕЛЯМ
 # ============================================================================
 
 async def make_g4f_request(provider_name: str, model: str, prompt: str,
@@ -229,11 +227,6 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
 
         client = g4f.client.AsyncClient()
         provider_arg = getattr(g4f.Provider, provider_name, None) if provider_name else None
-
-        # Примечание: g4f.AsyncClient не имеет нативного аргумента proxy в стандартной реализации.
-        # Если прокси критичен для g4f, обычно это решается через环境变量 или патчинг aiohttp.
-        # В данном коде мы передаем proxy_url для логирования и потенциального использования в будущих версиях g4f.
-        # Для OpenRouter прокси работает ниже.
 
         response = await asyncio.wait_for(
             client.chat.completions.create(model=model, messages=messages, provider=provider_arg),
@@ -259,13 +252,6 @@ async def test_openrouter_single(model: str, prompt: str, timeout: float = 35.0,
 
     start = time.time()
     try:
-        # Подготовка сессии с прокси если нужно
-        connector = None
-        if proxy_url:
-            connector = aiohttp.TCPConnector(verify_ssl=False)
-            # Создаем временную сессию для прокси
-            # OpenAI клиент использует httpx, поэтому прокси передаем иначе
-
         client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_token)
         loop = asyncio.get_running_loop()
 
@@ -274,32 +260,10 @@ async def test_openrouter_single(model: str, prompt: str, timeout: float = 35.0,
         messages.append({"role": "user", "content": prompt})
 
         def make_request():
-            # Передача прокси в OpenAI клиент (через httpx прокси)
-            proxies_dict = {"http://": proxy_url, "https://": proxy_url} if proxy_url else None
-            # Примечание: стандартный OpenAI клиент Python не принимает proxy напрямую в create().
-            # Нужно использовать http_client или глобальные настройки.
-            # Для упрощения в этом примере, если proxy_url есть, мы логируем это,
-            # но реальная интеграция прокси в OpenAI Python SDK требует кастомного HTTP клиента.
-            # Здесь эмулируем логику: если прокси нужен, он должен быть настроен на уровне системы или через env,
-            # либо мы используем aiohttp напрямую для OpenRouter API вместо OpenAI SDK.
-
-            # РЕАЛИЗАЦИЯ ЧЕРЕЗ AIOHTTP ДЛЯ ПОЛНОЙ ПОДДЕРЖКИ ПРОКСИ:
-            import json
-            # Это сложная часть, так как OpenAI SDK удобен, но плохо дружит с динамическими прокси.
-            # Для надежности сделаем прямой запрос через aiohttp, если нужен прокси.
-            if proxy_url:
-                # Прямой запрос через aiohttp с прокси
-                # (Упрощенная реализация для примера, в продакшене лучше вынести в отдельный класс)
-                pass
-
             return client.chat.completions.create(
                 model=model, messages=messages, timeout=timeout,
                 extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot", "X-OpenRouter-Title": "PsIInka Bot"}
             )
-
-        # Если прокси включен, используем обертку или ожидаем, что пользователь знает о ограничениях SDK
-        # В данной версии кода мы передаем proxy_url в лог, но OpenAI SDK может его игнорировать без доп. настроек.
-        # Для полной работы прокси с OpenRouter лучше использовать aiohttp напрямую.
 
         response = await asyncio.wait_for(loop.run_in_executor(None, make_request), timeout=timeout)
 
@@ -314,7 +278,7 @@ async def test_openrouter_single(model: str, prompt: str, timeout: float = 35.0,
 
 
 # ============================================================================
-# 🔥 ФАЗА РАЗМИНКИ (WARM-UP) С ПРОКСИ
+# 🔥 ФАЗА РАЗМИНКИ (WARM-UP)
 # ============================================================================
 
 async def run_warmup_phase(ctx, progress_msg, duration_seconds: int, use_proxy: bool):
@@ -344,13 +308,11 @@ async def run_warmup_phase(ctx, progress_msg, duration_seconds: int, use_proxy: 
 
         if provider == "OpenRouter":
             if model in EXCLUDED_OR_MODELS:
-                idx += 1;
+                idx += 1
                 continue
-            # Для OpenRouter прокси передается явно
             success, _, lat = await test_openrouter_single(model, test_prompt, timeout=15.0,
                                                            system_prompt=system_prompt, proxy_url=current_proxy)
         else:
-            # Для G4F прокси пока логически поддерживается, но зависит от реализации g4f
             success, _, lat = await make_g4f_request(provider, model, test_prompt, timeout=15.0,
                                                      system_prompt=system_prompt, proxy_url=current_proxy)
             latency_ms = int(lat * 1000) if success else 0
@@ -380,32 +342,30 @@ async def run_warmup_phase(ctx, progress_msg, duration_seconds: int, use_proxy: 
 
 
 # ============================================================================
-# 💬 СЛЭШ-КОМАНДА "/скажи"
+# 💬 СЛЭШ-КОМАНДА "/скажи" (ТРЕБУЕТ РОЛЬ)
 # ============================================================================
 
 @bot.slash_command(name="скажи", description="Запрос к ИИ с выбором использования прокси")
-@disnake.option("вопрос", description="Ваш вопрос к боту", required=True)
-@disnake.option("прокси", description="Использовать прокси для этого запроса?", choices=["Да", "Нет"], required=False,
+@commands.param("вопрос", description="Ваш вопрос к боту", required=True)
+@commands.param("прокси", description="Использовать прокси для этого запроса?", choices=["Да", "Нет"], required=False,
                 default="Нет")
 async def slash_say(interaction: disnake.CommandInteraction, вопрос: str, прокси: str):
     if not await check_access(interaction):
         return
 
     use_proxy = (прокси == "Да")
-    proxy_status_text = "с прокси 🟢" if use_proxy else "без прокси 🔴"
+    proxy_status_text = "с прокси " if use_proxy else "без прокси 🔴"
 
     await interaction.response.defer()
     msg = await interaction.edit_original_response(
         content=f"🐕 ПсИИнка готовится ({proxy_status_text})...\n Диагностика и прогрев моделей (~2 мин)...")
 
     try:
-        # 1. ФАЗА РАЗМИНКИ (2 минуты)
         await run_warmup_phase(interaction, msg, duration_seconds=120, use_proxy=use_proxy)
 
         await msg.edit(
-            content=f"✅ **Диагностика завершена!** ({proxy_status_text})\n Выбираю лучшую модель...\n⏳ Генерирую ответ...")
+            content=f"✅ **Диагностика завершена!** ({proxy_status_text})\n Выбираю лучшую модель...\n Генерирую ответ...")
 
-        # 2. ВЫБОР ЛУЧШЕЙ МОДЕЛИ
         best_candidates = db_manager.get_best_models(limit=1)
         final_response = None
         final_provider = None
@@ -424,7 +384,6 @@ async def slash_say(interaction: disnake.CommandInteraction, вопрос: str, 
                 final_provider = prov
                 final_model = mod
 
-        # 3. ФОЛБЭК НА OPENROUTER
         if not final_response:
             logger.warning("⚠️ G4F не ответил, пробуем OpenRouter...")
             or_models = [PRIORITY_OR_MODEL, "meta-llama/llama-3.3-70b-instruct:free", "openrouter/free"]
@@ -461,13 +420,6 @@ async def slash_say(interaction: disnake.CommandInteraction, вопрос: str, 
         await interaction.followup.send(f"️ Критическая ошибка: {str(e)[:100]}", ephemeral=True)
 
 
-import re
-import random
-import math
-import disnake
-from typing import List, Tuple, Optional, Dict, Any
-
-
 # ============================================================================
 # 🎲 ДВИЖОК КУБИКОВ (DICE ENGINE)
 # ============================================================================
@@ -475,8 +427,8 @@ from typing import List, Tuple, Optional, Dict, Any
 class DiceResult:
     def __init__(self):
         self.total = 0.0
-        self.dice_rolls: List[int] = []  # Список всех выпавших значений
-        self.details: List[str] = []  # Описание этапов (взрывы, удержания)
+        self.dice_rolls: List[int] = []
+        self.details: List[str] = []
         self.successes = 0
         self.failures = 0
         self.botches = 0
@@ -485,39 +437,32 @@ class DiceResult:
         self.simplified = False
         self.no_results = False
         self.unsorted = False
-        self.set_results: List[float] = []  # Для хранения результатов каждого сета в режиме "N XdY"
+        self.set_results: List[float] = []
 
 
 class DiceParser:
     def __init__(self):
-        # Алиасы ТОЛЬКО для D&D и универсальных механик
         self.aliases: Dict[str, str] = {
             "dndstats": "6 4d6 k3",
             "attack": "1d20",
             "skill": "1d20",
             "save": "1d20",
-            "+d20": "2d20 d1",  # Преимущество (Advantage)
-            "-d20": "2d20 kl1",  # Недостаток (Disadvantage)
-            # Можно добавить +dX и -dX для других граней, если нужно, но запрос был про D&D
+            "+d20": "2d20 d1",
+            "-d20": "2d20 kl1",
         }
 
     def parse(self, command_str: str) -> List[DiceResult]:
-        """Разбирает строку команды и возвращает список результатов"""
         results = []
         original_command = command_str.strip()
 
         if not original_command:
             return results
 
-        # Обработка алиасов в начале строки
-        # Разбиваем на слова, чтобы найти первый токен
         parts = original_command.split()
         if parts:
             first_word = parts[0].lower()
             if first_word in self.aliases:
-                # Заменяем алиас на его расширение
                 expansion = self.aliases[first_word]
-                # Если алиас ожидает модификатор (как attack +5), нам нужно склеить остальное
                 rest_of_command = " ".join(parts[1:])
                 command_str = f"{expansion} {rest_of_command}".strip()
             else:
@@ -525,7 +470,6 @@ class DiceParser:
         else:
             command_str = original_command
 
-        # Разделение на множественные независимые броски (;)
         roll_sets_raw = command_str.split(';')
 
         for roll_set_raw in roll_sets_raw:
@@ -537,7 +481,7 @@ class DiceParser:
             if result:
                 results.append(result)
 
-            if len(results) >= 4:  # Ограничение Discord API
+            if len(results) >= 4:
                 break
 
         return results
@@ -545,8 +489,6 @@ class DiceParser:
     def process_single_roll_set(self, roll_str: str) -> Optional[DiceResult]:
         result = DiceResult()
 
-        # 1. Извлечение флагов команд (s, nr, p, ul)
-        # Ищем целые слова, чтобы не спутать с числами
         flags = re.findall(r'\b(s|nr|p|ul)\b', roll_str, re.IGNORECASE)
         for f in flags:
             f_low = f.lower()
@@ -559,20 +501,17 @@ class DiceParser:
             elif f_low == 'ul':
                 result.unsorted = True
 
-        # 2. Комментарий (! текст)
         comment_match = re.search(r'!\s*(.+)$', roll_str)
         if comment_match:
             result.comment = comment_match.group(1).strip()
             roll_str = roll_str[:comment_match.start()]
 
-        # 3. Очистка строки от флагов и комментариев для математического парсинга
         clean_roll = re.sub(r'\b(s|nr|p|ul)\b', '', roll_str, flags=re.IGNORECASE)
         clean_roll = re.sub(r'!.+$', '', clean_roll).strip()
 
         if not clean_roll:
             return None
 
-        # 4. Проверка на набор бросков (N XdY), где N - количество повторений
         set_count = 1
         set_match = re.match(r'^(\d+)\s+(.+)', clean_roll)
         if set_match:
@@ -584,25 +523,17 @@ class DiceParser:
             except ValueError as e:
                 raise ValueError(str(e))
 
-        # 5. Вычисление выражения
-        # Поддержка операторов +, -, *, / между группами кубиков или чисел
-        # Разбиваем по операторам, сохраняя их
         tokens = re.split(r'(\+|\-|\*|\/)', clean_roll)
-
-        # Убираем пустые токены по краям
         tokens = [t for t in tokens if t.strip()]
 
         if not tokens:
             return None
 
-        # Логика вычисления слева направо
-        # Сначала получаем значение первого терма
         try:
             val, logs = self.evaluate_term(tokens[0].strip(), result)
             current_total = val
             all_logs = logs
 
-            # Проходим по парам [Оператор, Терм]
             for i in range(1, len(tokens), 2):
                 if i + 1 >= len(tokens):
                     break
@@ -618,39 +549,22 @@ class DiceParser:
                 elif op == '*':
                     current_total *= val
                 elif op == '/':
-                    if val == 0:
-                        raise ZeroDivisionError("Деление на ноль!")
+                    if val == 0: raise ZeroDivisionError("Деление на ноль!")
                     current_total /= val
 
                 all_logs.extend(logs)
 
-            # Обработка режимов "Наборов" (Sets)
             if set_count > 1:
-                result.set_results = []
-                total_sum = 0.0
-                # Нам нужно пересчитать выражение set_count раз.
-                # Так как evaluate_term меняет объект result (добавляет детали),
-                # для чистоты логов в режиме сетов мы можем либо накапливать всё,
-                # либо показывать только итог. Здесь покажем сумму всех сетов и детализацию первого (или общую).
-                # Для простоты: выполним цикл, суммируем тоталы.
-
-                # Сбрасываем временные логи для чистоты, если нужно, но оставим детали первого броска как пример
-                # или просто суммируем числа.
-
-                # Первый бросок уже сделан выше (val = current_total initially).
-                # Но в цикле ниже мы сделаем всё заново для корректности рандома.
                 result.set_results = []
                 total_sum = 0.0
                 combined_details = []
 
                 for k in range(set_count):
                     temp_res = DiceResult()
-                    # Пересчитываем выражение
                     sub_val, sub_logs = self._calculate_expression(clean_roll, temp_res)
                     result.set_results.append(sub_val)
                     total_sum += sub_val
                     if k == 0:
-                        # Берем детали и логи только от первого броска для отображения, чтобы не спамить
                         result.details = temp_res.details
                         result.dice_rolls = temp_res.dice_rolls
                         result.successes = temp_res.successes
@@ -669,7 +583,6 @@ class DiceParser:
             raise e
 
     def _calculate_expression(self, expr: str, res_obj: DiceResult) -> Tuple[float, List]:
-        """Вспомогательная функция для пересчета выражения (для циклов сетов)"""
         tokens = re.split(r'(\+|\-|\*|\/)', expr)
         tokens = [t for t in tokens if t.strip()]
         if not tokens: return 0, []
@@ -698,53 +611,36 @@ class DiceParser:
         return current, all_logs
 
     def evaluate_term(self, term: str, res_obj: DiceResult) -> Tuple[float, List]:
-        """Вычисляет один терм (например, '3d6e6k2+5')"""
-        if not term:
-            return 0, []
+        if not term: return 0, []
 
-        # Проверка на статическое число
         try:
             val = float(term)
             return val, [val]
         except ValueError:
             pass
 
-        # Парсинг кубиков: NdS [модификаторы]
-        # Регулярка: (кол-во)d(грани)(остальное)
         match = re.match(r'^(\d*)d(\d+)(.*)$', term, re.IGNORECASE)
         if not match:
-            # Попытка обработать скобки или другие сложные случаи здесь не реализована для краткости
             raise ValueError(f"Непонятный формат: '{term}'. Используйте формат NdY (напр. 2d6).")
 
         num_dice = int(match.group(1)) if match.group(1) else 1
         sides = int(match.group(2))
         modifiers_str = match.group(3).strip()
 
-        if sides > 1000:
-            raise ValueError("Максимум 1000 граней!")
-        if num_dice > 100:
-            raise ValueError("Слишком много кубиков (макс 100)!")
+        if sides > 1000: raise ValueError("Максимум 1000 граней!")
+        if num_dice > 100: raise ValueError("Слишком много кубиков (макс 100)!")
 
-        # Генерация базовых бросков
         rolls = [random.randint(1, sides) for _ in range(num_dice)]
 
-        # Применяем модификаторы по порядку
-        # 1. Rerolls
         rolls = self.apply_rerolls(rolls, sides, modifiers_str, res_obj)
-
-        # 2. Exploding
         rolls = self.apply_exploding(rolls, sides, modifiers_str, res_obj)
-
-        # 3. Drop / Keep
         rolls = self.apply_keep_drop(rolls, modifiers_str, res_obj)
 
-        # 4. Success/Failure logic (меняет итоговое значение)
         if re.search(r'\bt\d+', modifiers_str, re.IGNORECASE) or re.search(r'\bf\d+', modifiers_str, re.IGNORECASE):
             successes, failures, botches = self.calculate_successes(rolls, modifiers_str, sides)
             res_obj.successes = successes
             res_obj.failures = failures
             res_obj.botches = botches
-            # В режиме успехов итог = успехи - провалы
             final_val = successes - failures
             return final_val, rolls
 
@@ -752,11 +648,7 @@ class DiceParser:
 
     def apply_rerolls(self, rolls: List[int], sides: int, mods: str, res: DiceResult) -> List[int]:
         new_rolls = rolls.copy()
-        # Паттерны: irX (бесконечно), rX (один раз)
-        patterns = [
-            (r'ir(\d+)', True),
-            (r'r(\d+)', False)
-        ]
+        patterns = [(r'ir(\d+)', True), (r'r(\d+)', False)]
 
         for pattern, is_infinite in patterns:
             match = re.search(pattern, mods, re.IGNORECASE)
@@ -771,47 +663,29 @@ class DiceParser:
                             res.details.append(f"Переброс {val} -> {new_val} (<= {threshold})")
                             new_rolls[i] = new_val
                             changed = True
-                            if not is_infinite:
-                                break  # Для 'r' каждый кубик перебрасывается макс 1 раз за весь вызов функции?
-                                # Обычно 'r' означает один шанс на переброс.
-                    if not changed or not is_infinite:
-                        break
+                            if not is_infinite: break
+                    if not changed or not is_infinite: break
                     iterations += 1
-                    if iterations > 100: break  # Защита от зависания
+                    if iterations > 100: break
         return new_rolls
 
     def apply_exploding(self, rolls: List[int], sides: int, mods: str, res: DiceResult) -> List[int]:
-        # Работаем с копией, но будем добавлять новые кубики в конец списка
         final_rolls = rolls.copy()
-
-        patterns = [
-            (r'ie(\d+)?', True),  # Infinite explode
-            (r'e(\d+)?', False)  # Single explode
-        ]
+        patterns = [(r'ie(\d+)?', True), (r'e(\d+)?', False)]
 
         for pattern, is_infinite in patterns:
             match = re.search(pattern, mods, re.IGNORECASE)
             if match:
                 threshold = int(match.group(1)) if match.group(1) else sides
-
                 i = 0
-                # Проходим по списку, который может расти
-                limit = 1000  # Общая защита от бесконечного цикла
+                limit = 1000
                 count = 0
-
                 while i < len(final_rolls) and count < limit:
                     val = final_rolls[i]
                     if val >= threshold:
                         extra = random.randint(1, sides)
                         res.details.append(f"Взрыв ({val}) -> +{extra}")
                         final_rolls.append(extra)
-                        if not is_infinite:
-                            # Для обычного 'e' обычно взрывается только исходный кубик один раз.
-                            # Новые кубики не проверяются, если это не 'ie'.
-                            # Но если мы хотим строгое соответствие: 'e' взрывает один раз при попадании порога.
-                            # Просто увеличиваем индекс и идем дальше, новый кубик в конце не трогаем (если не ie).
-                            pass
-                            # Если is_infinite, новый кубик будет проверен, когда i дойдет до него
                     i += 1
                     count += 1
         return final_rolls
@@ -819,7 +693,6 @@ class DiceParser:
     def apply_keep_drop(self, rolls: List[int], mods: str, res: DiceResult) -> List[int]:
         working_rolls = rolls.copy()
 
-        # Drop Lowest (dX)
         match_d = re.search(r'd(\d+)', mods, re.IGNORECASE)
         if match_d:
             count = int(match_d.group(1))
@@ -829,7 +702,6 @@ class DiceParser:
                 working_rolls = working_rolls[count:]
                 res.details.append(f"Сброшено низких ({count}): {dropped}")
 
-        # Keep Highest (kX)
         match_k = re.search(r'k(\d+)', mods, re.IGNORECASE)
         if match_k:
             count = int(match_k.group(1))
@@ -839,7 +711,6 @@ class DiceParser:
                 working_rolls = kept
                 res.details.append(f"Оставлено высоких ({count}): {kept}")
 
-        # Keep Lowest (klX)
         match_kl = re.search(r'kl(\d+)', mods, re.IGNORECASE)
         if match_kl:
             count = int(match_kl.group(1))
@@ -860,17 +731,14 @@ class DiceParser:
         fail_match = re.search(r'f(\d+)', mods, re.IGNORECASE)
         botch_match = re.search(r'b(\d+)?', mods, re.IGNORECASE)
 
-        target = int(target_match.group(1)) if target_match else (sides + 1)  # Если цель не указана, успехов не будет
+        target = int(target_match.group(1)) if target_match else (sides + 1)
         fail_thresh = int(fail_match.group(1)) if fail_match else 0
         botch_thresh = int(botch_match.group(1)) if botch_match and botch_match.group(1) else 1
 
         for val in rolls:
-            if val >= target:
-                successes += 1
-            if fail_thresh > 0 and val <= fail_thresh:
-                failures += 1
-            if val <= botch_thresh:
-                botches += 1
+            if val >= target: successes += 1
+            if fail_thresh > 0 and val <= fail_thresh: failures += 1
+            if val <= botch_thresh: botches += 1
 
         return successes, failures, botches
 
@@ -879,22 +747,18 @@ dice_engine = DiceParser()
 
 
 # ============================================================================
-# 🤖 BOT COMMANDS (DISNAKE)
+# 🎲 СЛЭШ-КОМАНДА "/кубик" (ДОСТУПНА ВСЕМ!)
 # ============================================================================
 
-# Предположим, что bot уже определен где-то выше
-# bot = commands.Bot(...)
-
 @bot.slash_command(name="кубик", description="Бросок кубиков (D&D стиль)")
-@disnake.option(
+@commands.param(
     "формула",
     description="Формула броска. Примеры: 2d6, 3d6+5, 4d6e6k3, dndstats, attack +5",
     required=False,
     default=None
 )
 async def slash_cube(interaction: disnake.CommandInteraction, формула: str = None):
-    # Здесь должна быть ваша проверка прав доступа
-    # if not await check_access(interaction): return
+    # ПРОВЕРКА ДОСТУПА УБРАНА - КОМАНДА ДЛЯ ВСЕХ
 
     if not формула or формула.strip() == "":
         embed = generate_help_embed()
@@ -916,35 +780,22 @@ async def slash_cube(interaction: disnake.CommandInteraction, формула: st
 
         for i, res in enumerate(results):
             prefix = f"Результат {i + 1}: " if len(results) > 1 else ""
-
-            # Формирование строки результата
             sum_val = res.total
 
-            # Если это режим успехов
             if res.successes != 0 or res.failures != 0:
                 sum_display = f"**{res.successes} Усп.**"
-                if res.failures > 0:
-                    sum_display += f" - {res.failures} Пров."
-                if res.botches > 0:
-                    sum_display += f" | ⚠️ {res.botches} Ботч"
+                if res.failures > 0: sum_display += f" - {res.failures} Пров."
+                if res.botches > 0: sum_display += f" | ⚠️ {res.botches} Ботч"
             else:
-                # Округляем float до 2 знаков, если нужно
                 if isinstance(sum_val, float) and not sum_val.is_integer():
                     sum_val = round(sum_val, 2)
                 sum_display = f"**{int(sum_val) if isinstance(sum_val, float) and sum_val.is_integer() else sum_val}**"
 
-            # Отображение самих кубиков
             dice_str = ""
             if not res.no_results and not res.simplified:
                 rolls_to_show = res.dice_rolls
-
-                # Если это наборы (sets), rolls_to_show может быть списком списков или просто итоговым списком первого сета
-                # В текущей реализации для sets мы берем логи первого сета.
-
                 if not res.unsorted and rolls_to_show and isinstance(rolls_to_show[0], (int, float)):
                     rolls_to_show = sorted(rolls_to_show, reverse=True)
-
-                # Ограничиваем вывод, чтобы не разрывать сообщение
                 display_limit = 25
                 if len(rolls_to_show) > display_limit:
                     dice_str = ", ".join(map(str, rolls_to_show[:display_limit])) + "..."
@@ -952,12 +803,9 @@ async def slash_cube(interaction: disnake.CommandInteraction, формула: st
                     dice_str = ", ".join(map(str, rolls_to_show))
 
             line = f"{prefix}{sum_display}"
-            if dice_str:
-                line += f" `({dice_str})`"
-            if res.comment:
-                line += f" — _{res.comment}_"
+            if dice_str: line += f" `({dice_str})`"
+            if res.comment: line += f" — _{res.comment}_"
 
-            # Если были сеты, добавим инфо о них
             if res.set_results and len(res.set_results) > 1:
                 sets_preview = ", ".join(
                     [str(int(x) if isinstance(x, float) and x.is_integer() else round(x, 1)) for x in
@@ -970,7 +818,7 @@ async def slash_cube(interaction: disnake.CommandInteraction, формула: st
             if res.details and not res.simplified:
                 detail_text += f" Детали: {'; '.join(res.details)}\n"
 
-        main_embed.description = total_text[:4096]  # Limit embed description
+        main_embed.description = total_text[:4096]
 
         if detail_text:
             main_embed.add_field(name="Лог событий", value=detail_text[:1024], inline=False)
@@ -985,51 +833,43 @@ async def slash_cube(interaction: disnake.CommandInteraction, формула: st
     except Exception as e:
         logger.error(f"Ошибка в команде кубик: {e}", exc_info=True)
         await interaction.followup.send(
-            f"❌ Ошибка: {str(e)[:150]}\nИспользуйте `/кубик help` для справки.",
+            f"❌ Ошибка: {str(e)[:150]}\nИспользуйте `/кубик` без аргументов для справки.",
             ephemeral=True
         )
 
 
 def generate_help_embed() -> disnake.Embed:
     embed = disnake.Embed(title="🎲 Справка по кубикам", color=0x00FF88)
-
     embed.add_field(name="📜 Основной синтаксис", value=(
         "`XdY` — X кубиков с Y гранями (напр. `2d6`)\n"
         "`+ - * /` — Математика (напр. `3d6+5`)\n"
         "`N XdY` — N повторений броска (напр. `6 4d6`)\n"
         "`A ; B` — Несколько разных бросков (макс 4)"
     ), inline=False)
-
-    embed.add_field(name="⚡ Модификаторы", value=(
+    embed.add_field(name=" Модификаторы", value=(
         "**Взрывы:** `e6` (один раз), `ie6` (бесконечно)\n"
         "**Удержание:** `k3` (лучшие 3), `kl3` (худшие 3)\n"
         "**Сброс:** `d1` (убрать 1 худший)\n"
         "**Переброс:** `r2` (<=2), `ir2` (бесконечно)\n"
         "**Успехи:** `t7` (цель 7+), `f1` (провал <=1)"
     ), inline=False)
-
     embed.add_field(name="️ D&D Алиасы", value=(
-        "`dndstats` — Генерация статов (6 раз 4d6 drop lowest)\n"
+        "`dndstats` — Генерация статов\n"
         "`attack +5` — Атака (1d20+5)\n"
-        "`skill -2` — Проверка навыка\n"
-        "`save +3` — Спасбросок\n"
-        "`+d20` — Преимущество (Advantage)\n"
-        "`-d20` — Помеха (Disadvantage)"
+        "`+d20` — Преимущество\n"
+        "`-d20` — Помеха"
     ), inline=False)
-
-    embed.add_field(name="🔧 Утилиты", value=(
+    embed.add_field(name=" Утилиты", value=(
         "`s` — Краткий вывод\n"
-        "`nr` — Скрыть значения кубиков\n"
-        "`p` — Приватный результат\n"
-        "`! текст` — Добавить комментарий"
+        "`nr` — Скрыть значения\n"
+        "`p` — Приватно\n"
+        "`! текст` — Комментарий"
     ), inline=False)
-
     return embed
 
 
-
 # ============================================================================
-# 📊 СЛЭШ-КОМАНДА "/статус"
+# 📊 СЛЭШ-КОМАНДА "/статус" (ТРЕБУЕТ РОЛЬ)
 # ============================================================================
 
 @bot.slash_command(name="статус", description="Показать статистику бота и БД")
@@ -1062,11 +902,11 @@ async def slash_status(interaction: disnake.CommandInteraction):
 
 
 # ============================================================================
-# 🧪 СЛЭШ-КОМАНДА "/тест"
+#  СЛЭШ-КОМАНДА "/тест" (ТРЕБУЕТ РОЛЬ)
 # ============================================================================
 
 @bot.slash_command(name="тест", description="Быстрая проверка доступности моделей")
-@disnake.option("прокси", description="Использовать прокси для теста?", choices=["Да", "Нет"], required=False,
+@commands.param("прокси", description="Использовать прокси для теста?", choices=["Да", "Нет"], required=False,
                 default="Нет")
 async def slash_test(interaction: disnake.CommandInteraction, прокси: str):
     if not await check_access(interaction):
@@ -1080,8 +920,6 @@ async def slash_test(interaction: disnake.CommandInteraction, прокси: str)
         content=f" Быстрая проверка доступности моделей ({proxy_status_text})...")
 
     current_proxy = get_random_proxy(use_proxy)
-
-    # Тестируем одну модель с выбранным режимом прокси
     success, ans, lat = await make_g4f_request("PollinationsAI", "deepseek-r1", "ok", timeout=10,
                                                proxy_url=current_proxy)
 
@@ -1094,10 +932,10 @@ async def slash_test(interaction: disnake.CommandInteraction, прокси: str)
 
 
 # ============================================================================
-# 🛡️ АДМИН КОМАНДА (ЛОГИ)
+# ️ АДМИН КОМАНДА (ЛОГИ)
 # ============================================================================
 
-@bot.command(name="скачать_ошибки")  # Оставляем как префиксную для владельца, или можно сделать слэш
+@bot.command(name="скачать_ошибки")
 async def скачать_ошибки(ctx):
     if ctx.author.id != OWNER_ID:
         await ctx.send("❌ Доступ запрещён.", ephemeral=True)
@@ -1116,14 +954,12 @@ async def скачать_ошибки(ctx):
 async def on_ready():
     logger.info(f" Бот {bot.user} готов! (Railway: {IS_RAILWAY})")
     if REQUIRED_ROLE_ID == 0:
-        logger.warning("⚠️ ВНИМАНИЕ: ROLE_ID не установлен. Бот отвечает ВСЕМ.")
+        logger.warning("️ ВНИМАНИЕ: ROLE_ID не установлен. Доступ открыт всем (кроме админок).")
     else:
         logger.info(f" Ограничение доступа включено. Role ID: {REQUIRED_ROLE_ID}")
 
-    # Загрузка прокси при старте (список обновляется)
     asyncio.create_task(fetch_free_proxies())
 
-    # Синхронизация слэш-команд (важно!)
     try:
         await bot.sync_commands()
         logger.info("✅ Слэш-команды синхронизированы.")
@@ -1138,7 +974,7 @@ async def on_command_error(ctx, error):
     with open('bot_errors.log', 'a', encoding='utf-8') as f:
         f.write(f"\n[{datetime.now()}] ERROR: {error}\n")
 
-    if hasattr(ctx, 'author'):  # Для префиксных команд
+    if hasattr(ctx, 'author'):
         if ctx.author.id == OWNER_ID:
             await ctx.send(f"️ Произошла ошибка: {str(error)[:100]}", delete_after=10)
 
