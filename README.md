@@ -1,4 +1,3 @@
-```markdown
 <div align="center">
 
 # 🤖 PsIInka Bot
@@ -447,4 +446,3 @@ PREFERRED_MODELS = [
 <sub>🤖 *P.S. Даже этот README мог быть сгенерирован ИИ... или нет?* 😉</sub>
 
 </div>
-```
