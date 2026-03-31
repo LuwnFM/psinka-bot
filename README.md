@@ -11,8 +11,6 @@
 [![Status](https://img.shields.io/badge/Status-🟢_Active-brightgreen)](#)
 [![Vibecoding](https://img.shields.io/badge/Style-vibecoding-ff69b4?logo=retroarch)](#)
 
-![MS-DOS Style](https://img.shields.io/badge/Theme-MS_DOS_7.10-orange?logo=terminal)
-
 </div>
 
 ---
