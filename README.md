@@ -1,582 +1,446 @@
-PsIInka Bot v0.2.1 - File Report (c) 2026 LuwnFM
-MS-DOS 7.10 Terminal Output - vibecoding project
+<div align="center">
 
-C:\> cd /d \\SERVER\GITHUB\LUWNFM\PSINKA-BOT
+# 🤖 PsIInka Bot
 
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> dir
+> 🧪 *Experimental vibecoding project — coding by intuition, no strict rules*
 
- Volume in drive C is GITHUB
- Volume Serial Number is 1A2B-3C4D
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
+[![Discord](https://img.shields.io/badge/Discord-Bot-5865F2?logo=discord&logoColor=white)](https://discord.com/developers/applications)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/LuwnFM/psinka-bot?label=latest&color=blue)](https://github.com/LuwnFM/psinka-bot/releases)
+[![Status](https://img.shields.io/badge/Status-🟢_Active-brightgreen)](#)
+[![Vibecoding](https://img.shields.io/badge/Style-vibecoding-ff69b4?logo=retroarch)](#)
 
- Directory of C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT
+</div>
 
- 2026-01-15  10:48    <DIR>          .
- 2026-01-15  10:48    <DIR>          ..
- 2026-01-15  10:42            15,234 PSINKAMAIN.PY
- 2026-01-15  10:43             2,456 REQUIREMENTS.TXT
- 2026-01-15  10:44             8,192 README.TXT
- 2026-01-15  10:45             1,024 CONFIG.ENV
- 2026-01-15  10:46             4,096 TECHSPEC.TXT
- 2026-01-15  10:47             2,048 COMMANDS.LST
- 2026-01-15  10:48             3,072 WARNINGS.TXT
- 2026-01-15  10:48               512 FINAL.MSG
+---
 
-                8 file(s)         36,624 bytes
-                2 dir(s)      1,048,576 bytes free
+> ⚠️ **Внимание**  
+> Проект в стиле *vibecoding* — версии могут быть нестабильны, код может меняться без предупреждения. Используй на свой страх и риск 🎲
 
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type README.TXT
+> 🔐 **Конфиденциальность**  
+> Файл `.env` с токенами **никогда не загружай в репо**! Используй шаблон `.env.example` и переменные окружения.
 
-[FILE: README.TXT - LOADING...]
+---
 
-Loading: [-] 10%
+## 🗂️ Оглавление
 
-Loading: [----] 20%
+<details>
+<summary>📋 Нажми, чтобы раскрыть навигацию</summary>
 
-Loading: [------] 30%
+1. [⚡ Быстрый старт](#-быстрый-старт)
+2. [⚙️ Архитектура бота](#️-архитектура-бота)
+3. [🎮 Справочник команд](#-справочник-команд)
+4. [🧪 Тестирование моделей](#-тестирование-моделей)
+5. [🗣️ Механика `скажи`](#️-механика-псинка-скажи)
+6. [📦 Файлы и данные](#-файлы-и-данные)
+7. [🔧 Настройка .env](#-настройка-env)
+8. [🚨 Обработка ошибок](#-обработка-ошибок)
+9. [🔄 Версии и обновления](#-версии-и-обновления)
+10. [❓ FAQ](#-faq)
+11. [🎯 Шпаргалка по командам](#-шпаргалка-по-командам)
 
-Loading: [----------] 40%
+</details>
 
-Loading: [------------] 50%
+---
 
-Loading: [--------------] 60%
+## ⚡ Быстрый старт
 
-Loading: [----------------] 70%
+```bash
+# 1. Клонируй репо
+git clone https://github.com/LuwnFM/psinka-bot.git
+cd psinka-bot
 
-Loading: [------------------] 80%
+# 2. Установи зависимости
+pip install -r requirements.txt
 
-Loading: [--------------------] 90%
+# 3. Настрой .env (скопируй из .env.example)
+cp .env.example .env
+# → Открой .env и вставь свои токены
 
-Loading: [----------------------] 100%
+# 4. Запусти бота
+python psinkamain.py
+```
 
-[OK] File loaded successfully (8,192 bytes)
+> 💡 **Совет для Railway**: Добавь переменную `RAILWAY=true` и укажи `python psinkamain.py` как Start Command.
 
-PsIInka Bot - Experimental vibecoding Project
+---
 
-[ABOUT PROJECT]
+## ⚙️ Архитектура бота
 
-This is an experimental project in vibecoding style - coding by intuition,
-without strict rules and methodologies. We try, test, make mistakes and
-find working solutions through experiments.
-
-Bot created for testing AI models through g4f and OpenRouter API with
-ability to bypass blocks and auto-select best providers.
-
-[WARNING] ATTENTION: This project may change without notice.
-
-[WARNING] Versions may be unstable. Use at your own risk.
-
-[NOTE] IF YOU DIG UP THIS BOT - WRITE REVIEWS!
-
-       Author loves to read how his creation lives in the wild.
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type TECHSPEC.TXT
-
-[FILE: TECHSPEC.TXT - LOADING...]
-
-Loading: [-] 10%
-
-Loading: [----] 20%
-
-Loading: [------] 30%
-
-Loading: [----------] 40%
-
-Loading: [------------] 50%
-
-Loading: [--------------] 60%
-
-Loading: [----------------] 70%
-
-Loading: [------------------] 80%
-
-Loading: [--------------------] 90%
-
-Loading: [----------------------] 100%
-
-[OK] File loaded successfully (4,096 bytes)
-
-TECHNICAL SPECIFICATIONS
-
-MEMORY (RAM):
-
-  Base consumption:             250-350 MB
-
-  During testing:               400-600 MB
-
-  Peak (full test):             700+ MB
-
-  Recommended:                  512 MB minimum
-
-PROCESSOR (CPU):
-
-  Idle:                         ~0.1 vCPU
-
-  During requests:              0.5-1.5 vCPU
-
-  During testing:               2-4 vCPU
-
-TRAFFIC:
-
-  Base exchange (Discord):      ~10-50 MB/day
-
-  Request to g4f:               ~0.5-2 MB per request
-
-  Request to OpenRouter:        ~0.1-0.5 MB per request
-
-  Testing (express):            ~50-100 MB
-
-  Testing (quick):              ~200-500 MB
-
-  Testing (all):                ~500 MB - 1 GB
-
-DISK:
-
-  Bot code:                     ~150 KB
-
-  Logs (bot_errors.log):        up to 5 MB (limited)
-
-  Test history:                 up to 5 MB (limited)
-
-  Temporary files:              up to 10 MB
-
-  Total recommended:            50-100 MB
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type CONFIG.ENV
-
-[FILE: CONFIG.ENV - LOADING...]
-
-Loading: [-] 10%
-
-Loading: [----] 20%
-
-Loading: [------] 30%
-
-Loading: [----------] 40%
-
-Loading: [------------] 50%
-
-Loading: [--------------] 60%
-
-Loading: [----------------] 70%
-
-Loading: [------------------] 80%
-
-Loading: [--------------------] 90%
-
-[ERROR] READ ERROR AT SECTOR 1847
-
-[ERROR] FILE CORRUPTED - POSSIBLE UNAUTHORIZED ACCESS DETECTED
-
-[ERROR] CANNOT DISPLAY SENSITIVE DATA
-
-[WARNING] This is file with personal variables. Does not load intentionally.
-
-[WARNING] Create your own .env file using template:
-
-  DISCORD_TOKEN=your_bot_token
-  OPENR_TOKEN=your_openrouter_token
-  OWNER_ID=your_discord_id
-  USE_PROXY=false
-  MAX_CONCURRENT=2
-
-[OK] Continuing...
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type COMMANDS.LST
-
-[FILE: COMMANDS.LST - LOADING...]
-
-Loading: [-] 10%
-
-Loading: [----] 20%
-
-Loading: [------] 30%
-
-Loading: [----------] 40%
-
-Loading: [------------] 50%
-
-Loading: [--------------] 60%
-
-Loading: [----------------] 70%
-
-Loading: [------------------] 80%
-
-Loading: [--------------------] 90%
-
-Loading: [----------------------] 100%
-
-[OK] File loaded successfully (2,048 bytes)
-
-BOT COMMANDS
-
-Prefix: psinka
-
-  psinka pogavkay         - check bot ping
-
-  psinka kubik X          - roll dice (from 1 to X)
-
-  psinka test             - AI models testing menu
-
-  psinka skazhi vopros    - request to artificial intelligence
-
-  psinka luchshiye        - statistics of successful combinations
-
-  psinka skachat_logi     - download log file (owner only)
-
-  psinka skachat_istoriyu - download test history (owner only)
-
-TEST MODES:
-
-  Ekspress      - 5 providers x 1 request     - ~15 seconds
-
-  Bystryy       - 8 providers x 11 models     - ~5 minutes
-
-  OpenRouter    - Free models                 - ~7 minutes
-
-  Vsyo          - g4f + OpenRouter together   - ~10 minutes
-
-  Avto          - Auto-scanning               - ~10 minutes
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type WARNINGS.TXT
-
-[FILE: WARNINGS.TXT - LOADING...]
-
-Loading: [-] 10%
-
-Loading: [----] 20%
-
-Loading: [------] 30%
-
-Loading: [----------] 40%
-
-Loading: [------------] 50%
-
-Loading: [--------------] 60%
-
-Loading: [----------------] 70%
-
-Loading: [------------------] 80%
-
-Loading: [--------------------] 90%
-
-Loading: [----------------------] 100%
-
-[OK] File loaded successfully (3,072 bytes)
-
-SYSTEM WARNINGS
-
-[!!] EXPERIMENTAL PROJECT
-
-This project created in vibecoding style and not intended for
-production without additional testing.
-
-[!!] API MAY CHANGE
-
-g4f and OpenRouter may change their API without notice.
-Bot may stop working after updates.
-
-[!!] TEMPORARY FILES
-
-On Railway filesystem is temporary. Logs and test history
-disappear on bot restart. Use download commands to save data.
-
-[!!] PROXY
-
-Free proxies are unstable. Use at your own risk.
-For production recommended paid proxies.
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type INSTALL.GDE
-
-[FILE: INSTALL.GDE - LOADING...]
-
-Loading: [-] 10%
-
-Loading: [----] 20%
-
-Loading: [------] 30%
-
-Loading: [----------] 40%
-
-Loading: [------------] 50%
-
-Loading: [--------------] 60%
-
-Loading: [----------------] 70%
-
-Loading: [------------------] 80%
-
-Loading: [--------------------] 90%
-
-Loading: [----------------------] 100%
-
-[OK] File loaded successfully (5,120 bytes)
-
-INSTALLATION GUIDE
-
-1. Clone repository:
-
-   C:\> git clone https://github.com/LuwnFM/psinka-bot.git
-
-   C:\> cd psinka-bot
-
-2. Install dependencies:
-
-   C:\> pip install -r requirements.txt
-
-3. Create .env file:
-
-   DISCORD_TOKEN=your_bot_token
-   OPENR_TOKEN=your_openrouter_token
-   OWNER_ID=your_discord_id
-   USE_PROXY=false
-   MAX_CONCURRENT=2
-
-4. Run bot:
-
-   C:\> python psinkamain.py
-
-[OK] Installation complete
-
-RAILWAY SETUP
-
-1. Create project on railway.app
-
-2. Select Deploy from GitHub repo
-
-3. Select repository LuwnFM/psinka-bot
-
-4. Add environment variables:
-
-   VARIABLE         VALUE         DESCRIPTION
-
-   DISCORD_TOKEN    your_token    Bot token from Discord Portal
-
-   OPENR_TOKEN      your_token    Token from OpenRouter API
-
-   OWNER_ID         your_ID       Discord ID of owner
-
-   USE_PROXY        false         Enable proxy (optional)
-
-   MAX_CONCURRENT   2             Limit of parallel requests
-
-   RAILWAY          true          Railway hosting mode
-
-5. In Settings specify Start Command: python psinkamain.py
-
-6. Save and wait for launch
-
-[OK] Railway setup complete
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type VERSIONS.DAT
-
-[FILE: VERSIONS.DAT - LOADING...]
-
-Loading: [-] 10%
-
-Loading: [----] 20%
-
-Loading: [------] 30%
-
-Loading: [----------] 40%
-
-Loading: [------------] 50%
-
-Loading: [--------------] 60%
-
-Loading: [----------------] 70%
-
-Loading: [------------------] 80%
-
-Loading: [--------------------] 90%
-
-Loading: [----------------------] 100%
-
-[OK] File loaded successfully (1,536 bytes)
-
-VERSION HISTORY
-
-  VERSION    STATUS       DESCRIPTION
-
-  v0.2.1     CURRENT      File download through Discord
-
-  v0.2       ARCHIVE      Proxy support
-
-  v0.1       ARCHIVE      First release
-
-[INFO] Old versions available in folder: old versions/
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type CONTACT.INF
-
-[FILE: CONTACT.INF - LOADING...]
-
-Loading: [-] 10%
-
-Loading: [----] 20%
-
-Loading: [------] 30%
-
-Loading: [----------] 40%
-
-Loading: [------------] 50%
-
-Loading: [--------------] 60%
-
-Loading: [----------------] 70%
-
-Loading: [------------------] 80%
-
-Loading: [--------------------] 90%
-
-Loading: [----------------------] 100%
-
-[OK] File loaded successfully (1,024 bytes)
-
-CONTACT INFO
-
-  GitHub:      https://github.com/LuwnFM/psinka-bot
-
-  Releases:    https://github.com/LuwnFM/psinka-bot/releases
-
-  Changelog:   https://github.com/LuwnFM/psinka-bot/blob/main/CHANGELOG.md
-
-LICENSE
-
-MIT License - free use with author attribution.
-
-Make forks, experiment, break, fix, create your own.
-
-vibecoding - is freedom of creativity!
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> echo "Who wrote this?"
-
-Launching neural network...
-
-Analyzing code...
-
-AI generator detected...
-
-Status: 100% AI-generated
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> type FINAL.MSG
-
-[FILE: FINAL.MSG - LOADING...]
-
-Loading: [-] 10%
-
-Loading: [----] 20%
-
-Loading: [------] 30%
-
-Loading: [----------] 40%
-
-Loading: [------------] 50%
-
-Loading: [--------------] 60%
-
-Loading: [----------------] 70%
-
-Loading: [------------------] 80%
-
-Loading: [--------------------] 90%
-
-Loading: [----------------------] 100%
-
-[OK] File loaded successfully (512 bytes)
-
-Yeah, even this shit was generated, what did you expect?
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> ping OWNER.EXE -t
-
-Pinging OWNER.EXE [192.168.1.100] with 32 bytes of 
-
-Reply from 192.168.1.100: bytes=32 time=24ms TTL=128
-
-Reply from 192.168.1.100: bytes=32 time=25ms TTL=128
-
-Reply from 192.168.1.100: bytes=32 time=23ms TTL=128
-
-Reply from 192.168.1.100: bytes=32 time=87ms TTL=128
-
-Reply from 192.168.1.100: bytes=32 time=156ms TTL=128
-
-Reply from 192.168.1.100: bytes=32 time=312ms TTL=128
-
-Request timed out.
-
-Request timed out.
-
-Request timed out.
-
-[WARNING] Connection unstable...
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> netstat -an
-
-Active Connections
-
-  Proto  Local Address          Foreign Address        State
-
-  TCP    0.0.0.0:80             0.0.0.0:0              LISTENING
-
-  TCP    0.0.0.0:443            0.0.0.0:0              LISTENING
-
-  TCP    192.168.1.50:52847     192.168.1.100:80       ESTABLISHED
-
-  UDP    0.0.0.0:53             *:*
-
-  UDP    0.0.0.0:67             *:*
-
-[WARNING] Server load critical: 98%
-
-[WARNING] Memory usage: 1,987 MB / 2,048 MB
-
-[WARNING] CPU temperature: 87C
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> tasklist
-
-Image Name                     PID    Memory Usage
-
-SYSTEM                           4         1,024 K
-
-smss.exe                       256         2,048 K
-
-csrss.exe                      312         4,096 K
-
-python.exe                    1847       587,432 K
-
-discord_gateway.exe           2104       124,568 K
-
-g4f_worker.exe                2847       256,892 K
-
-owner_control.exe             3421        48,256 K
-
-[CRITICAL] Process owner_control.exe - NOT RESPONDING
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> echo "What happened?"
-
-Checking owner status...
-
-Status: AFK
-
-Last activity: 3 hours ago
-
-Reason: Dropped server (literally)
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> shutdown /a
-
-Abort successful... just kidding
-
-[CRITICAL] POWER LOSS DETECTED
-
-[CRITICAL] UPS BATTERY: 0%
-
-[CRITICAL] EMERGENCY SHUTDOWN INITIATED
-
-Saving data... [--------------------                      ] 67%
-
-[ERROR] WRITE FAILED - SECTOR 8472
-
-[ERROR] FILE SYSTEM CORRUPTED
-
-[ERROR] CANNOT SAVE STATE
-
-C:\SERVER\GITHUB\LUWNFM\PSINKA-BOT> █
+```
+C:> SYSTEM_DIAGNOSTIC.EXE /full
+[OK] Загрузка модулей...
+[✓] g4f connector
+[✓] OpenRouter API
+[✓] Discord.py handler
+[✓] Logging system
+```
+
+### 🔄 Схема обработки запроса `псинка скажи`:
+
+```mermaid
+graph TD
+    A[Пользователь: псинка скажи] --> B{Попытка #1: g4f}
+    B -->|✓ Успех| C[Ответ пользователю]
+    B -->|✗ Ошибка| D{Попытка #2: g4f}
+    D -->|✓ Успех| C
+    D -->|✗ Ошибка| E{Попытка #3: g4f}
+    E -->|✓ Успех| C
+    E -->|✗ Ошибка| F[Фолбэк: OpenRouter]
+    F -->|✓ Успех| C
+    F -->|✗ Ошибка| G[Сообщение об ошибке]
+```
+
+> ⚠️ *Mermaid-диаграммы работают на GitHub Desktop, на мобильном могут отображаться как код.*
+
+### 🧠 Система приоритетов моделей:
+
+| 🔥 Уровень | Провайдер | Модели | Критерий |
+|------------|-----------|--------|----------|
+| **Tier 1** | `g4f` | `gpt-4`, `claude-3`, `llama-3` | Скорость + качество |
+| **Tier 2** | `g4f` | `mixtral`, `qwen`, `gemini` | Стабильность |
+| **Tier 3** | `OpenRouter` | `free/*` модели | Доступность |
+| **Fallback** | Любой | Первая рабочая | "Хоть что-то" |
+
+> 💡 Бот **автоматически переключается** между уровнями при ошибках, таймаутах или нерусском ответе.
+
+---
+
+## 🎮 Справочник команд
+
+### 👤 Базовые команды (для всех)
+
+| Команда | Синтаксис | Описание | Пример ответа |
+|---------|-----------|----------|--------------|
+| 🐕 `погавкай` | `псинка погавкай` | Проверка пинга бота | `Иди нахуй! У меня пинг 234 мс` |
+| 🎲 `кубик` | `псинка кубик <число>` | Бросок кубика 1..N | `🎲 Выпало 17 из 20` |
+| 💬 `скажи` | `псинка скажи <вопрос>` | Запрос к ИИ с авто-фолбэком | Ответ от модели + инфо о провайдере |
+| 🧪 `тест` | `псинка тест [режим]` | Запуск тестирования моделей | Отчёт по доступным моделям |
+| 📊 `лучшие` | `псинка лучшие [тип]` | Статистика успешных комбинаций | Топ-10 рабочих связок |
+
+### 🔐 Команды владельца (`OWNER_ID`)
+
+| Команда | Описание | Файл |
+|---------|----------|------|
+| 📁 `скачать_логи` | Скачать `bot_errors.log` | Логи ошибок бота |
+| 📁 `скачать_историю` | Скачать `test_history.json` | История тестов и статистика |
+
+> 🔐 Проверка: `ctx.author.id == int(os.getenv('OWNER_ID'))`
+
+---
+
+## 🧪 Тестирование моделей (`псинка тест`)
+
+### 📊 Сравнение режимов:
+
+| Режим | 🎯 Провайдеры | 🤖 Модели | ⏱️ Время | 📋 Назначение |
+|-------|--------------|----------|---------|--------------|
+| 🚀 **Экспресс** | 5 | 1 на провайдер | ~15 сек | Быстрая диагностика |
+| ⚡ **Быстрый** | 8 | 11 на провайдер | ~5 мин | Проверка рабочих комбинаций |
+| 🆓 **OpenRouter** | 1 | Все free-модели | ~7 мин | Тест только OR free |
+| 🔮 **Всё** | 8+1 | Все доступные | ~10 мин | Полное сканирование |
+| 🔄 **Авто** | Динамически | Динамически | ~10 мин | Бот сам подбирает |
+
+### 🔍 Алгоритм тестирования:
+
+```python
+# Псевдокод механики
+for provider in available_providers:
+    for model in provider.models:
+        try:
+            response = await query(provider, model, test_prompt)
+            if validate(response):  # русский + не пустой
+                save_success(provider, model, response_time)
+        except Exception as e:
+            save_failure(provider, model, type(e).__name__)
+```
+
+### 📈 Структура `test_history.json`:
+
+```json
+{
+  "test_id": "abc123",
+  "timestamp": "2026-03-30T14:30:00Z",
+  "mode": "быстрый",
+  "results": [
+    {
+      "provider": "g4f",
+      "model": "gpt-4",
+      "success": true,
+      "response_time_ms": 2340,
+      "response_lang": "ru",
+      "error": null
+    }
+  ],
+  "stats": {
+    "total_combinations": 88,
+    "successful": 23,
+    "failed": 65,
+    "avg_response_time": 3421
+  }
+}
+```
+
+---
+
+## 🗣️ Механика `псинка скажи` — детально
+
+### 🔁 Алгоритм с повторными попытками:
+
+```
+[Запрос пользователя]
+       │
+       ▼
+┌─────────────────┐
+│ Попытка 1/3     │
+│ g4f: gpt-4      │ → ✗ Таймаут (60с)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Попытка 2/3     │
+│ g4f: claude-3   │ → ✗ Нерусский ответ
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Попытка 3/3     │
+│ g4f: llama-3    │ → ✗ Ошибка провайдера
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ [Фолбэк]        │
+│ OpenRouter:     │
+│ free/llama-3    │ → ✓ Успех! (2.4с)
+└────────┬────────┘
+         │
+         ▼
+[Форматированный ответ пользователю]
+```
+
+### ⏱️ Таймауты и лимиты:
+
+| Параметр | Значение | Описание |
+|----------|----------|----------|
+| `max_retries` | `3` | Попыток на g4f перед фолбэком |
+| `retry_timeout` | `60 сек` | Таймаут одной попытки g4f |
+| `openrouter_timeout` | `40 сек` | Таймаут запроса к OpenRouter |
+| `max_concurrent` | `2` | Лимит параллельных запросов (из `.env`) |
+
+### ✅ Валидация ответа:
+
+Ответ считается **успешным**, если:
+1. ✅ Не пустой и не `None`
+2. ✅ Содержит кириллицу (проверка на русский язык)
+3. ✅ Не содержит ошибок типа `"Unable to load"` или `"Access denied"`
+
+---
+
+## 📦 Файлы и данные
+
+### 🗂️ Структура проекта:
+
+```
+psinka-bot/
+├── 📄 psinkamain.py          # Основной код бота
+├── 📄 requirements.txt       # Зависимости Python
+├── 🔐 .env.example           # Шаблон переменных окружения
+├── 🚫 .gitignore             # Исключения для Git
+├── 📄 README.md              # Этот файл
+├── 📄 CHANGELOG.md           # История версий
+├── 📋 bot_errors.log         # Логи ошибок (авто-ротация)
+├── 📊 test_history.json      # История тестов (авто-очистка)
+└── 📁 old versions/          # Архив старых версий
+```
+
+### 💾 Ограничения хостинга (Railway):
+
+> ⚠️ **Файловая система временная!**  
+> При перезапуске бота **удаляются**:
+> - `bot_errors.log` (если >5 MB)
+> - `test_history.json` (если >5 MB)
+> - Все временные файлы
+
+✅ **Решение**: Используй команды `скачать_логи` и `скачать_историю` для сохранения данных.
+
+---
+
+## 🔧 Настройка .env
+
+| Переменная | Обязательна | Пример | Описание |
+|------------|-------------|--------|----------|
+| `DISCORD_TOKEN` | ✅ | `MTIz...ABC` | Токен бота из [Discord Developer Portal](https://discord.com/developers/applications) |
+| `OPENR_TOKEN` | ✅ | `sk-or-v1-...` | API-ключ от [OpenRouter](https://openrouter.ai) |
+| `OWNER_ID` | ✅ | `123456789012345678` | Discord ID владельца (для админ-команд) |
+| `USE_PROXY` | ❌ | `true` / `false` | Включить прокси для g4f (нестабильно) |
+| `MAX_CONCURRENT` | ❌ | `2` | Лимит параллельных запросов к ИИ |
+| `RAILWAY` | ❌ | `true` | Режим хостинга Railway (авто-определение) |
+
+> 🔐 **Важно**: Никогда не коммить `.env` с реальными токенами! Используй `.gitignore`.
+
+---
+
+## 🚨 Обработка ошибок и логирование
+
+### 📋 Типы ошибок:
+
+| Тип ошибки | Действие бота | Пример лога |
+|------------|---------------|-------------|
+| `TimeoutError` | Повтор → фолбэк на OpenRouter | `⏰ Таймаут попытки #2` |
+| `ConnectionError` | Пропуск провайдера | `🔌 Нет соединения с g4f` |
+| `InvalidResponse` | Отклонение ответа | `❌ Ответ не на русском` |
+| `RateLimit` | Пауза 30 сек + повтор | `⏳ Лимит запросов` |
+| `Unknown` | Лог + уведомление владельца | `❓ Неизвестная ошибка: ...` |
+
+### 📄 Формат логов (`bot_errors.log`):
+
+```
+[2026-03-30 14:32:18] ERROR in command 'скажи':
+  User: LuwnFM#1234 (ID: 987654321)
+  Prompt: "Расскажи анекдот"
+  Attempt: 2/3
+  Provider: g4f/claude-3
+  Error: TimeoutError: Request timed out after 60s
+  Fallback: OpenRouter/meta-llama-3-8b-instruct:free
+  Result: Success (2.4s)
+```
+
+---
+
+## 🔄 Версии и обновления
+
+### 📦 Текущая версия: `v0.2.1`
+
+| Версия | Дата | 🎯 Ключевые изменения |
+|--------|------|----------------------|
+| `v0.2.1` | Мар 2026 | ✅ Скачивание файлов, авто-ротация логов |
+| `v0.2` | Мар 2026 | 🌐 Поддержка прокси, улучшенная обработка ошибок |
+| `v0.1` | Мар 2026 | 🎉 Первый релиз: базовые команды + g4f + OpenRouter |
+
+### ♻️ Как обновить бота:
+
+```bash
+# 1. Останови бота
+# 2. Скачай новую версию
+git pull origin main
+
+# 3. Установи зависимости (если изменились)
+pip install -r requirements.txt
+
+# 4. Перезапусти
+python psinkamain.py
+```
+
+> 💡 **Совет**: Перед обновлением сделай бэкап `.env` и скачай логи!
+
+---
+
+## ❓ FAQ
+
+<details>
+<summary>❓ Почему бот иногда отвечает долго?</summary>
+
+Бот использует **каскадную систему запросов**:
+1. Сначала пробует быстрые бесплатные провайдеры (g4f)
+2. Если не вышло — переключается на OpenRouter
+3. Каждая попытка имеет таймаут (до 60 сек)
+
+✅ **Решение**: Используй `псинка тест экспресс` перед важными запросами.
+</details>
+
+<details>
+<summary>❓ Как добавить новую модель в приоритет?</summary>
+
+Открой `psinkamain.py` и найди список `PREFERRED_MODELS`:
+```python
+PREFERRED_MODELS = [
+    ("g4f", "gpt-4"),      # 🔥 Приоритет 1
+    ("g4f", "claude-3"),   # 🔥 Приоритет 2
+    ("openrouter", "free/meta-llama-3"), # 🆓 Фолбэк
+]
+```
+Добавь новую пару `(провайдер, модель)` в нужное место списка.
+</details>
+
+<details>
+<summary>❓ Можно ли использовать бота в коммерческих проектах?</summary>
+
+✅ **Да**, лицензия MIT разрешает:
+- Использовать в коммерческих и личных проектах
+- Модифицировать код под свои нужды
+- Распространять форки
+
+⚠️ **Но**: 
+- Укажи автора (`LuwnFM`) в соответствии с лицензией
+- Помни, что g4f и OpenRouter имеют свои условия использования
+- Бот в стиле *vibecoding* — тестируй перед продакшеном!
+</details>
+
+<details>
+<summary>❓ Почему тесты показывают разные результаты?</summary>
+
+Бесплатные провайдеры (особенно g4f) **нестабильны**:
+- Модели могут временно отключаться
+- Скорость зависит от нагрузки на сервера
+- Некоторые провайдеры блокируют частые запросы
+
+✅ **Совет**: Запускай тесты в разное время суток и усредняй результаты.
+</details>
+
+---
+
+## 🎯 Шпаргалка по командам (быстрый доступ)
+
+<details>
+<summary>📋 Нажми, чтобы скопировать все команды</summary>
+
+```
+🐕 ПИНГ:
+псинка погавкай
+
+🎲 КУБИК:
+псинка кубик 6
+псинка кубик 20
+псинка кубик 100
+
+💬 ЗАПРОС К ИИ:
+псинка скажи Как дела?
+псинка скажи Напиши код на Python
+псинка скажи Расскажи анекдот
+
+🧪 ТЕСТИРОВАНИЕ:
+псинка тест экспресс    # ~15 сек
+псинка тест быстрый     # ~5 мин
+псинка тест openrouter  # ~7 мин
+псинка тест всё         # ~10 мин
+псинка тест авто        # умный выбор
+
+📊 СТАТИСТИКА:
+псинка лучшие           # все провайдеры
+псинка лучшие g4f       # только g4f
+псинка лучшие openrouter # только OpenRouter
+
+🔐 ВЛАДЕЛЕЦ:
+псинка скачать_логи
+псинка скачать_историю
+```
+
+</details>
+
+---
+
+<div align="center">
+
+## ⭐ Поддержка проекта
+
+[![Star](https://img.shields.io/github/stars/LuwnFM/psinka-bot?style=social)](https://github.com/LuwnFM/psinka-bot)
+[![Fork](https://img.shields.io/github/forks/LuwnFM/psinka-bot?style=social)](https://github.com/LuwnFM/psinka-bot/fork)
+
+> 🐕 *Поставь ⭐ — это лучшая поддержка для вибекодера!*  
+> 🎨 *Форкай, ломай, чини, создавай — vibecoding это свобода!*
+
+<sub>🤖 *P.S. Даже этот README мог быть сгенерирован ИИ... или нет?* 😉</sub>
+
+</div>
