@@ -18,7 +18,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 
 # ============================================================================
-#  НАСТРОЙКИ И БАЗА ДАННЫХ (NEON TECH)
+# 🔧 НАСТРОЙКИ И БАЗА ДАННЫХ (NEON TECH)
 # ============================================================================
 
 load_dotenv()
@@ -346,15 +346,17 @@ async def run_warmup_phase(ctx, progress_msg, duration_seconds: int, use_proxy: 
 # ============================================================================
 
 @bot.slash_command(name="скажи", description="Запрос к ИИ с выбором использования прокси")
-@commands.param("вопрос", description="Ваш вопрос к боту", required=True)
-@commands.param("прокси", description="Использовать прокси для этого запроса?", choices=["Да", "Нет"], required=False,
-                default="Нет")
-async def slash_say(interaction: disnake.CommandInteraction, вопрос: str, прокси: str):
+async def slash_say(
+        interaction: disnake.CommandInteraction,
+        вопрос: str = commands.Param(description="Ваш вопрос к боту", min_length=1),
+        прокси: str = commands.Param(description="Использовать прокси для этого запроса?", choices=["Да", "Нет"],
+                                     default="Нет")
+):
     if not await check_access(interaction):
         return
 
     use_proxy = (прокси == "Да")
-    proxy_status_text = "с прокси " if use_proxy else "без прокси 🔴"
+    proxy_status_text = "с прокси 🟢" if use_proxy else "без прокси 🔴"
 
     await interaction.response.defer()
     msg = await interaction.edit_original_response(
@@ -557,8 +559,6 @@ class DiceParser:
             if set_count > 1:
                 result.set_results = []
                 total_sum = 0.0
-                combined_details = []
-
                 for k in range(set_count):
                     temp_res = DiceResult()
                     sub_val, sub_logs = self._calculate_expression(clean_roll, temp_res)
@@ -751,13 +751,10 @@ dice_engine = DiceParser()
 # ============================================================================
 
 @bot.slash_command(name="кубик", description="Бросок кубиков (D&D стиль)")
-@commands.param(
-    "формула",
-    description="Формула броска. Примеры: 2d6, 3d6+5, 4d6e6k3, dndstats, attack +5",
-    required=False,
-    default=None
-)
-async def slash_cube(interaction: disnake.CommandInteraction, формула: str = None):
+async def slash_cube(
+        interaction: disnake.CommandInteraction,
+        формула: str = commands.Param(description="Формула (2d6, 3d6+5, dndstats)", default=None)
+):
     # ПРОВЕРКА ДОСТУПА УБРАНА - КОМАНДА ДЛЯ ВСЕХ
 
     if not формула or формула.strip() == "":
@@ -902,13 +899,14 @@ async def slash_status(interaction: disnake.CommandInteraction):
 
 
 # ============================================================================
-#  СЛЭШ-КОМАНДА "/тест" (ТРЕБУЕТ РОЛЬ)
+# 🧪 СЛЭШ-КОМАНДА "/тест" (ТРЕБУЕТ РОЛЬ)
 # ============================================================================
 
 @bot.slash_command(name="тест", description="Быстрая проверка доступности моделей")
-@commands.param("прокси", description="Использовать прокси для теста?", choices=["Да", "Нет"], required=False,
-                default="Нет")
-async def slash_test(interaction: disnake.CommandInteraction, прокси: str):
+async def slash_test(
+        interaction: disnake.CommandInteraction,
+        прокси: str = commands.Param(description="Использовать прокси?", choices=["Да", "Нет"], default="Нет")
+):
     if not await check_access(interaction):
         return
 
