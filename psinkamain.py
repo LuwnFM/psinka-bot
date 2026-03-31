@@ -950,19 +950,16 @@ async def скачать_ошибки(ctx):
 
 @bot.event
 async def on_ready():
-    logger.info(f" Бот {bot.user} готов! (Railway: {IS_RAILWAY})")
+    logger.info(f"🐕 Бот {bot.user} готов! (Railway: {IS_RAILWAY})")
     if REQUIRED_ROLE_ID == 0:
-        logger.warning("️ ВНИМАНИЕ: ROLE_ID не установлен. Доступ открыт всем (кроме админок).")
+        logger.warning("⚠️ ВНИМАНИЕ: ROLE_ID не установлен. Доступ открыт всем (кроме админок).")
     else:
-        logger.info(f" Ограничение доступа включено. Role ID: {REQUIRED_ROLE_ID}")
+        logger.info(f"🔒 Ограничение доступа включено. Role ID: {REQUIRED_ROLE_ID}")
 
     asyncio.create_task(fetch_free_proxies())
+    # disnake автоматически регистрирует слэш-команды — sync_commands не нужен!
 
-    try:
-        await bot.sync_commands()
-        logger.info("✅ Слэш-команды синхронизированы.")
-    except Exception as e:
-        logger.error(f"Ошибка синхронизации команд: {e}")
+
 
 
 @bot.event
