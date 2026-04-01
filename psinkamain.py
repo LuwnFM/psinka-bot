@@ -635,6 +635,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
     try:
         await interaction.response.defer()
         
+        # 🐕 СОБАЧИЙ СТИЛЬ: Начало обработки
         status_embed = disnake.Embed(
             title="🐕 ПсИИнка слушает...",
             description="*виляет хвостом* Сейчас прогавкаю ответ, хозяин! ⏳",
@@ -692,17 +693,37 @@ async def slash_say(interaction: disnake.CommandInteraction,
             await msg.edit(embed=error_embed)
             return
         
-        response_embed = disnake.Embed(
-            title="🐕 ПсИИнка прогавкал ответ!",
-            description=f"*виляет хвостом* Держи, хозяин:\n\n{final_response[:4000]}",
-            color=0x00FF88,
-            timestamp=datetime.now()
-        )
-        response_embed.add_field(name="📊 Источник", value=f"**Прогавкал через:** `{final_prov}`\n**Модель:** `{final_mod}`\n**Время:** `{lat:.2f}с`", inline=True)
-        response_embed.add_field(name="🔧 Информация", value=f"Длина ответа: `{len(final_response)} симв.`\nПрокси: `{прокси}`", inline=True)
-        response_embed.set_footer(text="ПсИИнка бот | AI Assistant 🐾")
+        # 🐕 СОБАЧИЙ СТИЛЬ: Успешный ответ (БЕЗ EMBED, с разбивкой на части)
+        await msg.delete()  # Удаляем сообщение со статусом
         
-        await msg.edit(embed=response_embed)
+        # Заголовок ответа
+        header_text = f"🐕 **ПсИИнка прогавкал ответ!**\n"
+        header_text += f"*виляет хвостом* Держи, хозяин:\n\n"
+        header_text += f"📊 **Источник:** `{final_prov}` / `{final_mod}`\n"
+        header_text += f"⏱ **Время:** `{lat:.2f}с` | 📏 **Длина:** `{len(final_response)} симв.`\n"
+        header_text += f"🔀 **Прокси:** `{прокси}`\n"
+        header_text += f"{'─' * 40}\n\n"
+        
+        # Разбиваем ответ на части по 1900 символов (оставляем запас для header)
+        MAX_CHUNK_SIZE = 1900
+        chunks = []
+        
+        # Первая часть с заголовком
+        first_chunk = header_text + final_response[:MAX_CHUNK_SIZE - len(header_text)]
+        chunks.append(first_chunk)
+        
+        # Остальные части
+        remaining = final_response[MAX_CHUNK_SIZE - len(header_text):]
+        while remaining:
+            chunks.append(remaining[:MAX_CHUNK_SIZE])
+            remaining = remaining[MAX_CHUNK_SIZE:]
+        
+        # Отправляем сообщения цепочкой
+        first_msg = await interaction.channel.send(chunks[0])
+        
+        # Последующие сообщения отвечают на предыдущее
+        for i in range(1, len(chunks)):
+            await interaction.channel.send(chunks[i], reference=first_msg, mention_author=False)
         
     except Exception as e:
         logger.error(f"Critical error in /say: {e}", exc_info=True)
