@@ -635,7 +635,6 @@ async def slash_say(interaction: disnake.CommandInteraction,
     try:
         await interaction.response.defer()
         
-        # 🐕 СОБАЧИЙ СТИЛЬ: Начало обработки
         status_embed = disnake.Embed(
             title="🐕 ПсИИнка слушает...",
             description="*виляет хвостом* Сейчас прогавкаю ответ, хозяин! ⏳",
@@ -662,7 +661,6 @@ async def slash_say(interaction: disnake.CommandInteraction,
         
         for idx, (prov, mod) in enumerate(queue):
             try:
-                # 🐕 СОБАЧИЙ СТИЛЬ: Процесс перебора
                 status_embed.description = f"*рычит на нейросети* Попытка {idx + 1}/{len(queue)}: `{prov}` / `{mod}`"
                 status_embed.set_field_at(0, name="📡 Статус", value=f"ПсИИнка лает на **{prov}**... 🐕", inline=False)
                 await msg.edit(embed=status_embed)
@@ -684,7 +682,6 @@ async def slash_say(interaction: disnake.CommandInteraction,
                 continue
 
         if not final_response:
-            # 🐕 СОБАЧИЙ СТИЛЬ: Ошибка
             error_embed = disnake.Embed(
                 title="❌ ПсИИнка устал...",
                 description="*повесил уши* Ни одна нейросеть не ответила, хозяин... 🐕",
@@ -695,7 +692,6 @@ async def slash_say(interaction: disnake.CommandInteraction,
             await msg.edit(embed=error_embed)
             return
         
-        # 🐕 СОБАЧИЙ СТИЛЬ: Успешный ответ
         response_embed = disnake.Embed(
             title="🐕 ПсИИнка прогавкал ответ!",
             description=f"*виляет хвостом* Держи, хозяин:\n\n{final_response[:4000]}",
@@ -737,7 +733,6 @@ async def slash_cube(interaction: disnake.CommandInteraction,
         if not results:
             raise ValueError("Не удалось разобрать формулу. Используйте `/кубик` для справки.")
         
-        # 🐕 СОБАЧИЙ СТИЛЬ: Результат броска
         output_embed = disnake.Embed(
             title="🎲 ПсИИнка бросил кубики!",
             description=f"*подбрасывает лапой* Формула: `{формула}` 🐾",
@@ -779,7 +774,6 @@ async def slash_cube(interaction: disnake.CommandInteraction,
         
     except Exception as e:
         logger.error(f"Error in /cube: {e}", exc_info=True)
-        # 🐕 СОБАЧИЙ СТИЛЬ: Ошибка броска
         error_embed = disnake.Embed(
             title="❌ ПсИИнка не понял...",
             description=f"*склонил голову набок* Не могу разобрать: `{формула}` 🐕",
@@ -795,7 +789,6 @@ async def slash_bark(interaction: disnake.CommandInteraction):
         ping_ms = round(bot.latency * 1000)
         status = "🟢" if ping_ms < 100 else "🟡" if ping_ms < 300 else "🔴"
         
-        # 🐕 СОБАЧИЙ СТИЛЬ: Пинг (как в старом коде, но мягче)
         embed = disnake.Embed(
             title="🐕 Гав! ПсИИнка на связи!",
             description=f"{status} **Пинг:** `{ping_ms} мс` *тяв!*",
@@ -818,7 +811,6 @@ async def slash_status(interaction: disnake.CommandInteraction):
         
         top = db_manager.get_top_models(10)
         
-        # 🐕 СОБАЧИЙ СТИЛЬ: Статус системы
         embed = disnake.Embed(
             title="📊 ПсИИнка отчитывается",
             description="*виляет хвостом* Вот моя статистика, хозяин! 🐕",
@@ -941,7 +933,6 @@ async def slash_test(interaction: disnake.CommandInteraction):
     try:
         if not await check_access(interaction): return
         
-        # 🐕 СОБАЧИЙ СТИЛЬ: Меню теста
         embed = disnake.Embed(
             title="🛠 ПсИИнка: Проверка нейросетей",
             description="""**Выбери, что потестим, хозяин:** 🐕\n\n*виляет хвостом и ждёт команду*
@@ -974,7 +965,6 @@ async def slash_test(interaction: disnake.CommandInteraction):
 # ============================================================================
 
 async def run_mass_test(channel):
-    """Запускает полное сканирование комбинаций"""
     progress_embed = disnake.Embed(
         title="🔄 ПсИИнка сканирует...",
         description="*нюхает* G4F + Groq + OpenRouter... 🐕",
@@ -1151,7 +1141,6 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
         BATCH_SIZE = 35
         total_batches = (len(messages_data) + BATCH_SIZE - 1) // BATCH_SIZE
         
-        # 🐕 СОБАЧИЙ СТИЛЬ: Прогресс анализа
         progress_embed = disnake.Embed(
             title="🔍 ПсИИнка нюхает канал",
             description=f"*принюхивается* Канал: `#{канал.name}`\nПериод: `{days_to_check} дней` 🐕\nСообщений: `{len(messages_data)}`",
@@ -1304,9 +1293,11 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
         header_embed.add_field(name="Период", value=f"{days_to_check} дней", inline=True)
         header_embed.add_field(name="Сообщений проверено", value=f"`{len(messages_data)}`", inline=True)
         
-        await status_msg.edit(content=report_parts[0][:1800], embed=header_embed)
+        # 🔧 ИСПРАВЛЕНИЕ: Редактируем исходное сообщение ТОЛЬКО эмбедом (без текста отчёта)
+        await status_msg.edit(content=None, embed=header_embed)
         
-        for part in report_parts[1:]:
+        # 🔧 ОТПРАВЛЯЕМ части отчёта отдельными сообщениями следом
+        for part in report_parts:
             await interaction.channel.send(part)
         
         await interaction.channel.send("✅ ПсИИнка закончил! *виляет хвостом* 🐕")
