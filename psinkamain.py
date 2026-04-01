@@ -336,45 +336,49 @@ async def test_openrouter_single(model: str, prompt: str, timeout: float = 35.0,
     except Exception as e:
         return False, str(e)[:100], time.time() - start
 
-async def test_groq_single(models: list, prompt: str, timeout: float = 35.0, system_prompt: str = None):
+async def test_groq_single(models: list, prompt: str, timeout: float = 15.0, system_prompt: str = None):
+    """Тестирует список моделей Groq по очереди, пока одна не ответит."""
     groq_token = os.getenv('GROQ_TOKEN')
-    if not groq_token: return False, "No GROQ Token", 0.0
+    if not groq_token:
+        return False, "No GROQ Token", 0.0
+    
+    from groq import Groq
+    client = Groq(api_key=groq_token)
+    
+    start = time.time()
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+
+    last_error = "No models tried"
     
     for model in models:
-        start = time.time()
-        messages = []
-        if system_prompt: messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
-        
-        client = Groq(api_key=groq_token)
-        
-        def sync_call():
-            return client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.7,
-                max_tokens=2048,
-                timeout=int(timeout)
-            )
-
         try:
             response = await asyncio.wait_for(
-                asyncio.to_thread(sync_call),
+                client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.5,
+                    max_tokens=256
+                ),
                 timeout=timeout
             )
+            
             if response.choices and len(response.choices) > 0:
-                answer = response.choices[0].message.content
-                if answer and answer.strip():
-                    return True, answer.strip(), time.time() - start
-            logger.warning(f"Groq model {model} returned empty answer")
-        except asyncio.TimeoutError:
-            logger.warning(f"Groq model {model} timed out")
-            continue
+                elapsed = time.time() - start
+                content = response.choices[0].message.content
+                # Обрезаем длинный ответ для теста
+                if len(content) > 150:
+                    content = content[:147] + "..."
+                return True, f"{model}: {content}", elapsed
+            
         except Exception as e:
-            logger.warning(f"Groq model {model} error: {str(e)[:50]}")
+            last_error = f"{model}: {str(e)}"
             continue
-    
-    return False, "Все модели GROQ не ответили", time.time() - start
+            
+    elapsed = time.time() - start
+    return False, f"All failed: {last_error}", elapsed
 
 async def heartbeat_keeper():
     while True:
@@ -838,55 +842,51 @@ async def slash_status(interaction: disnake.CommandInteraction):
 # ============================================================================
 
 class TestModeView(disnake.ui.View):
-    def __init__(self, ctx):
-        super().__init__(timeout=300)
-        self.ctx = ctx
+    def __init__(self):
+        super().__init__(timeout=None)
+        # Кнопки определяются декораторами ниже
+
+    @disnake.ui.button(label="🧪 G4F Free", style=disnake.ButtonStyle.green, custom_id="test_g4f")
+    async def test_g4f_btn(self, button: disnake.ui.Button, interaction: disnake.Interaction):
+        await interaction.response.defer()
+        res = await test_g4f_single(TEST_PROMPT)
+        status = "✅" if res[0] else "❌"
+        msg = f"{status} {res[1]} ({res[2]:.2f}s)"
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @disnake.ui.button(label="🦅 Groq Cloud", style=disnake.ButtonStyle.blurple, custom_id="test_groq")
+    async def test_groq_btn(self, button: disnake.ui.Button, interaction: disnake.Interaction):
+        await interaction.response.defer()
+        # Используем приоритетные модели Groq
+        res = await test_groq_single(GROQ_PRIORITY_MODELS, TEST_PROMPT, system_prompt="Ты тестовый ИИ. Ответь кратко.")
+        status = "✅" if res[0] else "❌"
+        msg = f"{status} {res[1]} ({res[2]:.2f}s)"
+        await interaction.followup.send(msg, ephemeral=True)
+
+    @disnake.ui.button(label="🌐 OpenRouter", style=disnake.ButtonStyle.gray, custom_id="test_or")
+    async def test_or_btn(self, button: disnake.ui.Button, interaction: disnake.Interaction):
+        await interaction.response.defer()
+        res = await test_openrouter_single(OR_PRIORITY_MODELS, TEST_PROMPT, system_prompt="Ты тестовый ИИ. Ответь кратко.")
+        status = "✅" if res[0] else "❌"
+        msg = f"{status} {res[1]} ({res[2]:.2f}s)"
+        await interaction.followup.send(msg, ephemeral=True)
     
-    @disnake.ui.button(label="⚡ Экспресс G4F", style=disnake.ButtonStyle.green, custom_id="test_express")
-    async def express_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
+    # Кнопка полного цикла (если она у вас есть, убедитесь что она вызывает все три функции)
+    @disnake.ui.button(label="🔄 Полный цикл", style=disnake.ButtonStyle.red, custom_id="test_all")
+    async def test_all_btn(self, button: disnake.ui.Button, interaction: disnake.Interaction):
         await interaction.response.defer()
-        log_analysis("TEST: Express G4F started", "INFO")
-        start = time.time()
-        ok, ans, lat = await make_g4f_request("PollinationsAI", "deepseek-r1", "ответь \"ок\" если прочитал текст, не отвечай ничего другого", timeout=15.0)
-        elapsed = time.time() - start
-        status = "✅ Успех" if ok else f"❌ Ошибка: {ans}"
-        log_analysis(f"TEST Result: {status}, Time: {elapsed:.2f}s", "INFO")
-        await interaction.channel.send(f"✅ Экспресс тест G4F:\nСтатус: {status}\n⏱ Время: {elapsed:.2f}с\n📝 Ответ: {ans[:100]}")
-
-    @disnake.ui.button(label="🦅 Groq Cloud", style=disnake.ButtonStyle.orange, custom_id="test_groq")
-    async def groq_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
-        await interaction.response.defer()
-        log_analysis("TEST: Groq Cloud started", "INFO")
-        start = time.time()
-        ok, ans, lat = await test_groq_single(GROQ_PRIORITY_MODELS, "ответь \"ок\" если прочитал текст, не отвечай ничего другого", timeout=15.0)
-        elapsed = time.time() - start
-        status = "✅ Успех" if ok else f"❌ Ошибка: {ans}"
-        log_analysis(f"TEST Groq Result: {status}, Time: {elapsed:.2f}s", "INFO")
-        await interaction.channel.send(f"✅ Тест Groq Cloud:\nСтатус: {status}\n⏱ Время: {elapsed:.2f}с\n📝 Ответ: {ans[:100] if ans else 'Нет ответа'}")
-
-    @disnake.ui.button(label="🌐 OpenRouter", style=disnake.ButtonStyle.blurple, custom_id="test_openrouter")
-    async def openrouter_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
-        await interaction.response.defer()
-        log_analysis("TEST: OpenRouter started", "INFO")
-        start = time.time()
-        ok, ans, lat = await test_openrouter_single(OPENROUTER_PRIORITY, "ответь \"ок\" если прочитал текст, не отвечай ничего другого", timeout=15.0)
-        elapsed = time.time() - start
-        status = "✅ Успех" if ok else f"❌ Ошибка: {ans}"
-        log_analysis(f"TEST OR Result: {status}, Time: {elapsed:.2f}s", "INFO")
-        await interaction.channel.send(f"✅ Тест OpenRouter:\nСтатус: {status}\n⏱ Время: {elapsed:.2f}с\n📝 Ответ: {ans[:100] if ans else 'Нет ответа'}")
-
-    @disnake.ui.button(label="🎯 Полный цикл", style=disnake.ButtonStyle.red, custom_id="test_all")
-    async def all_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
-        await interaction.response.defer()
-        await interaction.channel.send("✅ Запуск полного теста (G4F + Groq + OR)...")
-        log_analysis("TEST: Full cycle started", "INFO")
-        ok1, _, l1 = await make_g4f_request("PollinationsAI", "deepseek-r1", "ok", timeout=20.0)
-        ok2, _, l2 = await test_groq_single(GROQ_PRIORITY_MODELS, "ok", timeout=20.0)
-        ok3, _, l3 = await test_openrouter_single(OPENROUTER_PRIORITY, "ok", timeout=20.0)
+        report = []
         
-        res = f"G4F: {'✅' if ok1 else '❌'} | Groq: {'✅' if ok2 else '❌'} | OR: {'✅' if ok3 else '❌'}"
-        log_analysis(f"TEST Full Result: {res}", "INFO")
-        await interaction.channel.send(res)
+        r1 = await test_g4f_single(TEST_PROMPT)
+        report.append(f"G4F: {'✅' if r1[0] else '❌'} {r1[2]:.2f}s")
+        
+        r2 = await test_groq_single(GROQ_PRIORITY_MODELS, TEST_PROMPT, system_prompt="Ты тестовый ИИ.")
+        report.append(f"Groq: {'✅' if r2[0] else '❌'} {r2[2]:.2f}s")
+        
+        r3 = await test_openrouter_single(OR_PRIORITY_MODELS, TEST_PROMPT, system_prompt="Ты тестовый ИИ.")
+        report.append(f"OR: {'✅' if r3[0] else '❌'} {r3[2]:.2f}s")
+        
+        await interaction.followup.send("\n".join(report), ephemeral=True)
 
 @bot.slash_command(name="тест", description="Тестирование провайдеров")
 async def slash_test(interaction: disnake.CommandInteraction):
