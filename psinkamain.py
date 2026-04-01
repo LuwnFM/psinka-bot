@@ -234,6 +234,17 @@ GROQ_PRIORITY_MODELS = [
     "moonshotai/kimi-k2-instruct-0905",
 ]
 
+# OpenRouter модели с приоритетами
+OR_PRIORITY_MODELS = [
+    OPENROUTER_PRIORITY,
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-3-27b-it:free",
+    "qwen/qwen3-32b:free",
+]
+
+# Тестовый промпт для проверки провайдеров
+TEST_PROMPT = "Привет! Ответь кратко: как дела?"
+
 async def fetch_free_proxies(count: int = 20) -> List[str]:
     try:
         async with aiohttp.ClientSession() as session:
@@ -269,6 +280,10 @@ async def check_access(interaction: disnake.CommandInteraction, allowed_role_nam
 # ============================================================================
 # 🤖 ЗАПРОСЫ К МОДЕЛЯМ
 # ============================================================================
+
+async def test_g4f_single(prompt: str, timeout: float = 40.0) -> Tuple[bool, str, float]:
+    """Тестирует g4f с моделью по умолчанию."""
+    return await make_g4f_request(None, "deepseek-r1", prompt, timeout=timeout)
 
 async def make_g4f_request(provider_name: str, model: str, prompt: str,
                            timeout: float = 40.0, system_prompt: str = None, proxy_url: str = None) -> Tuple[bool, str, float]:
