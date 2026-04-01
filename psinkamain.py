@@ -8,9 +8,10 @@ import time
 import math
 import csv
 import io
+import asyncio
+import traceback
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
-import asyncio
 from typing import Tuple, List, Dict, Any, Optional
 from disnake.ext import commands
 from openai import OpenAI
@@ -20,7 +21,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
 
 # ============================================================================
-# 🔧 НАСТРОЙКИ И БАЗА ДАННЫХ
+# 🔧 НАСТРОЙКИ И БАЗА ДАННЫХ (NEON TECH OPTIMIZED)
 # ============================================================================
 
 load_dotenv()
@@ -44,16 +45,16 @@ class ModelSuccessLog(Base):
 
 def init_db():
     if not DATABASE_URL:
-        logging.warning("⚠️ DATABASE_URL не найден.")
+        logging.warning("⚠️ DATABASE_URL не найден. Работа с БД отключена (экономия ресурсов).")
         return None, None
     try:
-        engine = create_engine(DATABASE_URL, echo=False, future=True, pool_pre_ping=True)
+        engine = create_engine(DATABASE_URL, echo=False, future=True, pool_pre_ping=True, pool_size=5, max_overflow=10)
         Base.metadata.create_all(engine)
         SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-        logging.info("✅ База данных подключена.")
+        logging.info("✅ База данных Neon подключена.")
         return engine, SessionLocal
     except Exception as e:
-        logging.error(f"❌ Ошибка БД: {e}")
+        logging.error(f"❌ Ошибка подключения к БД: {e}")
         return None, None
 
 db_engine, SessionLocal = init_db()
@@ -63,7 +64,9 @@ class DBManager:
         self.SessionLocal = session_factory
 
     def log_success(self, provider: str, model: str, latency_ms: int):
-        if not self.SessionLocal: return
+        """Записывает успех ТОЛЬКО после реального ответа пользователю. Никакой разминки."""
+        if not self.SessionLocal: 
+            return
         session = self.SessionLocal()
         try:
             record = session.query(ModelSuccessLog).filter_by(provider=provider, model_name=model).first()
@@ -72,22 +75,28 @@ class DBManager:
                 record.avg_latency_ms = int((record.avg_latency_ms * (record.success_count - 1) + latency_ms) / record.success_count)
                 record.last_success_at = datetime.now(timezone.utc)
             else:
-                record = ModelSuccessLog(provider=provider, model_name=model, success_count=1, last_success_at=datetime.now(timezone.utc), avg_latency_ms=latency_ms)
+                record = ModelSuccessLog(provider=provider, model_name=model, success_count=1, 
+                                         last_success_at=datetime.now(timezone.utc), avg_latency_ms=latency_ms)
                 session.add(record)
             session.commit()
             self._cleanup_old_records(session)
         except Exception as e:
             session.rollback()
+            logging.error(f"Ошибка записи в БД: {e}")
         finally:
             session.close()
 
     def _cleanup_old_records(self, session):
-        count = session.query(ModelSuccessLog).count()
-        if count > 200:
-            old_ids = session.query(ModelSuccessLog.id).order_by(ModelSuccessLog.last_success_at.asc()).limit(count - 200).all()
-            if old_ids:
-                session.query(ModelSuccessLog).filter(ModelSuccessLog.id.in_([x[0] for x in old_ids])).delete(synchronize_session=False)
-                session.commit()
+        """Оставляет только последние 200 записей для экономии места и скорости"""
+        try:
+            count = session.query(ModelSuccessLog).count()
+            if count > 200:
+                old_ids = session.query(ModelSuccessLog.id).order_by(ModelSuccessLog.last_success_at.asc()).limit(count - 200).all()
+                if old_ids:
+                    session.query(ModelSuccessLog).filter(ModelSuccessLog.id.in_([x[0] for x in old_ids])).delete(synchronize_session=False)
+                    session.commit()
+        except:
+            pass
 
     def get_top_models(self, limit: int = 10) -> List[Tuple[str, str, int]]:
         if not self.SessionLocal: return []
@@ -114,6 +123,7 @@ class DBManager:
                 writer.writerow([r.id, r.provider, r.model_name, r.success_count, r.avg_latency_ms, r.last_success_at])
             return output.getvalue()
         except Exception as e:
+            logging.error(f"Ошибка экспорта CSV: {e}")
             return None
         finally:
             session.close()
@@ -131,7 +141,7 @@ class DBManager:
 db_manager = DBManager(SessionLocal)
 
 # ============================================================================
-# 🔧 ЛОГИРОВАНИЕ
+# 🔧 ЛОГИРОВАНИЕ (ИСПРАВЛЕНО ДЛЯ СКАЧИВАНИЯ)
 # ============================================================================
 
 logging.basicConfig(
@@ -143,6 +153,17 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+ANALYSIS_LOG_FILE = "analysis_debug.log"
+analysis_logger = logging.getLogger("analysis_debug")
+analysis_logger.setLevel(logging.INFO)
+if not analysis_logger.handlers:
+    fh = logging.FileHandler(ANALYSIS_LOG_FILE, mode='w', encoding='utf-8')
+    fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    analysis_logger.addHandler(fh)
+
+def log_analysis(msg: str, level: str = "INFO"):
+    getattr(analysis_logger, level.lower())(msg)
 
 intents = disnake.Intents.default()
 intents.message_content = True
@@ -175,7 +196,7 @@ async def fetch_free_proxies(count: int = 20) -> List[str]:
                     text = await response.text()
                     proxies = [f"http://{p.strip()}" for p in text.split('\n') if p.strip() and ':' in p]
                     if proxies:
-                        logger.info(f" Обновлён список прокси: {len(proxies)} шт.")
+                        logger.info(f"🌐 Обновлён список прокси: {len(proxies)} шт.")
                         return proxies
     except Exception as e:
         logger.warning(f"⚠️ Не удалось обновить прокси: {e}")
@@ -193,11 +214,13 @@ async def check_access(interaction: disnake.CommandInteraction, allowed_role_nam
         return False
     user_role_names = [role.name for role in interaction.author.roles]
     if any(role_name in user_role_names for role_name in allowed_role_names): return True
-    await interaction.response.send_message(f"❌ Нет роли ({', '.join(allowed_role_names)}).", ephemeral=True)
+    if REQUIRED_ROLE_ID == 0 and any(role_name in user_role_names for role_name in allowed_role_names): return True
+    
+    await interaction.response.send_message(f"❌ Нет доступа.", ephemeral=True)
     return False
 
 # ============================================================================
-#  ЗАПРОСЫ К МОДЕЛЯМ
+# 🤖 ЗАПРОСЫ К МОДЕЛЯМ
 # ============================================================================
 
 async def make_g4f_request(provider_name: str, model: str, prompt: str,
@@ -268,25 +291,11 @@ async def test_openrouter_single(model: str, prompt: str, timeout: float = 35.0,
 
 async def heartbeat_keeper():
     while True:
-        await asyncio.sleep(15)
+        await asyncio.sleep(60)
         logger.debug("💓 Heartbeat OK")
 
-async def run_passive_warmup(ctx, duration_seconds: int = 30):
-    logger.info(" Warmup start...")
-    start_time = time.time()
-    candidates = PRIORITY_TIER_1 + PRIORITY_TIER_2
-    idx = 0
-    while (time.time() - start_time) < duration_seconds and idx < len(candidates):
-        prov, mod = candidates[idx]
-        try:
-            success, _, _ = await make_g4f_request(prov, mod, "ok", timeout=10.0, system_prompt="Reply ok.")
-            if success: db_manager.log_success(prov, mod, 100)
-        except: pass
-        idx += 1
-        await asyncio.sleep(0.5)
-
 # ============================================================================
-# 🎲 ДВИЖОК КУБИКОВ (ВОЗВРАЩЕН КЛАСС DiceResult)
+# 🎲 ДВИЖОК КУБИКОВ (Базовый из Кода 1)
 # ============================================================================
 
 class DiceResult:
@@ -294,15 +303,7 @@ class DiceResult:
         self.total = 0.0
         self.dice_rolls: List[int] = []
         self.details: List[str] = []
-        self.successes = 0
-        self.failures = 0
-        self.botches = 0
-        self.is_private = False
         self.comment = ""
-        self.simplified = False
-        self.no_results = False
-        self.unsorted = False
-        self.set_results: List[float] = []
 
 class DiceParser:
     def __init__(self):
@@ -340,44 +341,46 @@ async def slash_say(interaction: disnake.CommandInteraction, вопрос: str =
     if not await check_access(interaction): return
     try:
         await interaction.response.defer()
-        msg = await interaction.edit_original_response(content=" Обработка...")
+        msg = await interaction.edit_original_response(content="⏳ Обработка...")
         
         queue = PRIORITY_TIER_1 + PRIORITY_TIER_2
         queue.append(("OpenRouter", OPENROUTER_PRIORITY))
         queue.append(("g4f-default", "deepseek-r1"))
-        queue.append(("g4f-default", "deepseek-v3"))
         
         system_prompt = "Ты Псинка. Отвечай кратко на русском."
         final_response = None
         final_prov = "?"
         final_mod = "?"
+        use_proxy = (прокси == "Да")
+        proxy_url = get_random_proxy(use_proxy)
         
         for prov, mod in queue:
             try:
                 if prov == "OpenRouter":
-                    ok, ans, _ = await test_openrouter_single(mod, вопрос, timeout=45.0, system_prompt=system_prompt)
+                    ok, ans, lat = await test_openrouter_single(mod, вопрос, timeout=45.0, system_prompt=system_prompt, proxy_url=proxy_url)
                 else:
-                    ok, ans, _ = await make_g4f_request(prov, mod, вопрос, timeout=45.0, system_prompt=system_prompt)
+                    ok, ans, lat = await make_g4f_request(prov, mod, вопрос, timeout=45.0, system_prompt=system_prompt, proxy_url=proxy_url)
                 
                 if ok and ans:
                     final_response = ans
                     final_prov, final_mod = prov, mod
-                    db_manager.log_success(prov, mod, 0)
+                    db_manager.log_success(prov, mod, int(lat * 1000))
                     break
             except Exception as e:
                 logger.warning(f"Error {prov}/{mod}: {e}")
 
         if not final_response:
-            await msg.edit(content="❌ Не удалось получить ответ.")
+            await msg.edit(content="❌ Не удалось получить ответ ни от одной модели.")
             return
         
         await msg.edit(content=f"🐕 Ответ ({final_prov}/{final_mod}):\n{final_response[:1900]}")
     except Exception as e:
         logger.error(f"Critical error in /say: {e}", exc_info=True)
+        err_msg = f"❌ Ошибка: {str(e)[:100]}"
         if interaction.response.is_done():
-            await interaction.followup.send(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
+            await interaction.followup.send(err_msg, ephemeral=True)
         else:
-            await interaction.response.send_message(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
+            await interaction.response.send_message(err_msg, ephemeral=True)
 
 @bot.slash_command(name="кубик", description="Бросок кубиков")
 async def slash_cube(interaction: disnake.CommandInteraction, формула: str = None):
@@ -389,7 +392,7 @@ async def slash_cube(interaction: disnake.CommandInteraction, формула: st
         results = dice_engine.parse(формула)
         if not results: raise ValueError("Не удалось разобрать.")
         txt = "\n".join([f"**{r.total}** `({', '.join(map(str, r.dice_rolls))})`" for r in results])
-        await interaction.followup.send(f" Результат:\n{txt}")
+        await interaction.followup.send(f"🎲 Результат:\n{txt}")
     except Exception as e:
         logger.error(f"Error in /cube: {e}", exc_info=True)
         await interaction.followup.send(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
@@ -397,7 +400,7 @@ async def slash_cube(interaction: disnake.CommandInteraction, формула: st
 @bot.slash_command(name="погавкай", description="Пинг")
 async def slash_bark(interaction: disnake.CommandInteraction):
     try:
-        await interaction.response.send_message(f' Пинг: {round(bot.latency * 1000)} мс')
+        await interaction.response.send_message(f'🐕 Пинг: {round(bot.latency * 1000)} мс')
     except Exception as e:
         logger.error(f"Error in /bark: {e}", exc_info=True)
 
@@ -407,15 +410,16 @@ async def slash_status(interaction: disnake.CommandInteraction):
         if not await check_access(interaction): return
         await interaction.response.defer()
         top = db_manager.get_top_models(3)
-        txt = "\n".join([f"{i+1}. `{p}` / `{m}`" for i,(p,m,_) in enumerate(top)]) if top else "Нет данных"
-        embed = disnake.Embed(title=" Статус", description=txt, color=0x00FF88)
+        txt = "\n".join([f"{i+1}. `{p}` / `{m}` (Lat: {lat}ms)" for i,(p,m,lat) in enumerate(top)]) if top else "Нет данных (используйте /скажи)"
+        embed = disnake.Embed(title="📊 Статус", description=txt, color=0x00FF88)
+        embed.add_field(name="Режим", value="Экономия ресурсов (No Warmup)", inline=False)
         await interaction.edit_original_response(embed=embed)
     except Exception as e:
         logger.error(f"Error in /status: {e}", exc_info=True)
         await interaction.followup.send(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
 
 # ============================================================================
-# 🧪 ТЕСТ (ИСПРАВЛЕНЫ ЭМОДЗИ)
+# 🧪 ТЕСТ (ВОССТАНОВЛЕНО + ЛОГИРОВАНИЕ)
 # ============================================================================
 
 class TestModeView(disnake.ui.View):
@@ -423,31 +427,45 @@ class TestModeView(disnake.ui.View):
         super().__init__(timeout=300)
         self.ctx = ctx
     
-    @disnake.ui.button(label="⚡ Экспресс", style=disnake.ButtonStyle.green, emoji="", custom_id="test_express")
+    @disnake.ui.button(label="⚡ Экспресс G4F", style=disnake.ButtonStyle.green, custom_id="test_express")
     async def express_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
-        await interaction.channel.send("✅ Экспресс тест запущен.")
+        log_analysis("TEST: Express G4F started", "INFO")
+        start = time.time()
+        ok, ans, lat = await make_g4f_request("PollinationsAI", "deepseek-r1", "ping", timeout=15.0)
+        elapsed = time.time() - start
+        status = "✅ Успех" if ok else f"❌ Ошибка: {ans}"
+        log_analysis(f"TEST Result: {status}, Time: {elapsed:.2f}s", "INFO")
+        await interaction.channel.send(f"✅ Экспресс тест: {status}\nВремя: {elapsed:.2f}с\nОтвет: {ans[:50]}")
 
-    @disnake.ui.button(label="⚡ Быстрый", style=disnake.ButtonStyle.green, emoji="⚡", custom_id="test_quick")
-    async def quick_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
-        await interaction.response.defer()
-        await interaction.channel.send("✅ Быстрый тест запущен.")
-
-    @disnake.ui.button(label="🌐 OpenRouter", style=disnake.ButtonStyle.blurple, emoji="🔮", custom_id="test_openrouter")
+    @disnake.ui.button(label="🌐 OpenRouter", style=disnake.ButtonStyle.blurple, custom_id="test_openrouter")
     async def openrouter_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
-        await interaction.channel.send("✅ OpenRouter тест запущен.")
+        log_analysis("TEST: OpenRouter started", "INFO")
+        start = time.time()
+        ok, ans, lat = await test_openrouter_single(OPENROUTER_PRIORITY, "ping", timeout=15.0)
+        elapsed = time.time() - start
+        status = "✅ Успех" if ok else f"❌ Ошибка: {ans}"
+        log_analysis(f"TEST OR Result: {status}, Time: {elapsed:.2f}s", "INFO")
+        await interaction.channel.send(f"✅ OpenRouter тест: {status}\nВремя: {elapsed:.2f}с")
 
-    @disnake.ui.button(label="🎯 Всё", style=disnake.ButtonStyle.red, emoji="🎲", custom_id="test_all")
+    @disnake.ui.button(label="🎯 Полный цикл", style=disnake.ButtonStyle.red, custom_id="test_all")
     async def all_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
-        await interaction.channel.send("✅ Полный тест запущен.")
+        await interaction.channel.send("✅ Запуск полного теста (G4F + OR)...")
+        log_analysis("TEST: Full cycle started", "INFO")
+        ok1, _, l1 = await make_g4f_request("PollinationsAI", "deepseek-r1", "ok", timeout=20.0)
+        ok2, _, l2 = await test_openrouter_single(OPENROUTER_PRIORITY, "ok", timeout=20.0)
+        
+        res = f"G4F: {'✅' if ok1 else '❌'} | OR: {'✅' if ok2 else '❌'}"
+        log_analysis(f"TEST Full Result: {res}", "INFO")
+        await interaction.channel.send(res)
 
-@bot.slash_command(name="тест", description="Тестирование")
+@bot.slash_command(name="тест", description="Тестирование провайдеров")
 async def slash_test(interaction: disnake.CommandInteraction):
     try:
         if not await check_access(interaction): return
-        embed = disnake.Embed(title="Выбор режима", description="Нажмите кнопку:", color=0xFF8844)
+        embed = disnake.Embed(title="Выбор режима теста", description="Нажмите кнопку для проверки:", color=0xFF8844)
         view = TestModeView(interaction)
         await interaction.response.send_message(embed=embed, view=view)
     except Exception as e:
@@ -458,26 +476,14 @@ async def slash_test(interaction: disnake.CommandInteraction):
             await interaction.response.send_message(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
 
 # ============================================================================
-# 🔍 АНАЛИЗ (ПОЛНЫЙ ФУНКЦИОНАЛ + ПРОКСИ ФОЛЛБЕК)
+# 🔍 АНАЛИЗ (ПОЛНЫЙ ФУНКЦИОНАЛ + ЛОГИРОВАНИЕ В ФАЙЛ)
 # ============================================================================
-
-ANALYSIS_LOG_FILE = "analysis_debug.log"
-analysis_logger = logging.getLogger("analysis_debug")
-analysis_logger.setLevel(logging.DEBUG)
-if not analysis_logger.handlers:
-    fh = logging.FileHandler(ANALYSIS_LOG_FILE, mode='w', encoding='utf-8')
-    fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    analysis_logger.addHandler(fh)
-
-def log_analysis(msg: str, level: str = "INFO"):
-    getattr(analysis_logger, level.lower())(msg)
 
 async def collect_all_messages_debug(channel, days_limit: int, max_per_source: int = 400):
     after_date = datetime.now(timezone.utc) - timedelta(days=days_limit)
     all_messages = []
-    log_analysis(f"Старт сбора #{channel.name} за {days_limit} дней.", "INFO")
+    log_analysis(f"Start collecting #{channel.name} for {days_limit} days.", "INFO")
     
-    # Основной канал
     try:
         async for message in channel.history(limit=max_per_source, after=after_date):
             if message.is_system() or message.author == bot.user or not message.content.strip(): continue
@@ -486,11 +492,10 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
                 "content": message.content[:1500], "author": str(message.author),
                 "url": message.jump_url, "source": f"#{channel.name}", "created_at": message.created_at
             })
-        log_analysis(f"✅ Основной канал: {len(all_messages)} сообщ.", "INFO")
+        log_analysis(f"✅ Main channel: {len(all_messages)} msgs.", "INFO")
     except Exception as e:
-        log_analysis(f"❌ Ошибка основного канала: {e}", "ERROR")
+        log_analysis(f"❌ Main channel error: {e}", "ERROR")
 
-    # Ветки
     if hasattr(channel, 'threads'):
         for thread in channel.threads:
             if not hasattr(thread, 'history'): continue
@@ -504,7 +509,7 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
                         "url": message.jump_url, "source": f"Thread: {thread.name}", "created_at": message.created_at
                     })
                     count += 1
-                log_analysis(f"✅ Ветка {thread.name}: {count} сообщ.", "INFO")
+                log_analysis(f"✅ Thread {thread.name}: {count} msgs.", "INFO")
                 await asyncio.sleep(0.5)
             except: pass
     
@@ -521,7 +526,7 @@ def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
         except: pass
     return [msg for msg in original_data if msg['id'] in found_ids]
 
-@bot.slash_command(name="анализ", description="Анализ канала")
+@bot.slash_command(name="анализ", description="Анализ канала на нарушения")
 async def slash_analyze(interaction: disnake.CommandInteraction, канал: disnake.TextChannel = commands.Param(), период: str = commands.Param(choices=["За последние 7 дней", "За последние 21 день"])):
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Только владелец.", ephemeral=True)
@@ -530,7 +535,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
     days_to_check = 7 if "7 дней" in период else 21
     await interaction.response.defer()
     
-    log_analysis(f"Начало анализа {канал.name} ({days_to_check} дн.)", "INFO")
+    log_analysis(f"=== START ANALYSIS: {канал.name} ({days_to_check} days) ===", "INFO")
     
     try:
         messages_data = await collect_all_messages_debug(канал, days_to_check, max_per_source=400)
@@ -544,12 +549,9 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
         
         all_violations = []
         
-        # Очереди
         main_queue = PRIORITY_TIER_1 + PRIORITY_TIER_2
-        or_fallback = [OPENROUTER_PRIORITY, "meta-llama/llama-3.3-70b-instruct:free", "qwen/qwen-2.5-72b-instruct:free"]
-        g4f_fallback = [("g4f-default", "deepseek-r1"), ("g4f-default", "deepseek-v3")]
-        
-        # Полный список для прокси-фоллбека
+        or_fallback = [OPENROUTER_PRIORITY, "meta-llama/llama-3.3-70b-instruct:free"]
+        g4f_fallback = [("g4f-default", "deepseek-r1")]
         proxy_queue = main_queue + [("OpenRouter", m) for m in or_fallback] + g4f_fallback
 
         for i in range(0, len(messages_data), BATCH_SIZE):
@@ -561,13 +563,10 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
             final_answer = None
             success = False
             used_provider = "Unknown"
-            use_proxy_mode = False
 
-            # Helper for async execution in thread
             def run_async_in_thread(async_func, *args, **kwargs):
                 return asyncio.run(async_func(*args, **kwargs))
 
-            # Функция попытки запроса
             async def try_request(prov, mod, use_proxy=False):
                 proxy_str = get_random_proxy(True) if use_proxy else None
                 if prov == "OpenRouter":
@@ -592,7 +591,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
                         success = True
                         break
                 except Exception as e:
-                    log_analysis(f"Ошибка {prov}/{mod}: {e}", "DEBUG")
+                    log_analysis(f"Error {prov}/{mod}: {e}", "DEBUG")
                     continue
 
             # 2. OpenRouter резерв
@@ -610,34 +609,16 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
                             break
                     except: continue
 
-            # 3. G4F Default резерв
+            # 3. ПРОКСИ РЕЖИМ (Крайний случай)
             if not success:
-                for prov, mod in g4f_fallback:
-                    try:
-                        ok, ans, _ = await asyncio.wait_for(
-                            asyncio.to_thread(run_async_in_thread, try_request, prov, mod, False),
-                            timeout=55.0
-                        )
-                        if ok:
-                            final_answer = ans
-                            used_provider = f"{prov} ({mod})"
-                            success = True
-                            break
-                    except: continue
-
-            # 4. КРАЙНИЙ СЛУЧАЙ: ПРОКСИ РЕЖИМ
-            if not success:
-                log_analysis(f"️ Пакет {current_batch}: Все обычные методы failed. Активация PROXY MODE.", "WARNING")
-                await status_msg.edit(content=f"🔄 Анализ: [{bar}] {percent}% ({current_batch-1}/{total_batches})\n⚠️ ОШИБКИ. ПОДКЛЮЧЕНИЕ ЧЕРЕЗ ПРОКСИ...")
+                log_analysis(f"⚠️ Batch {current_batch}: Normal failed. Activating PROXY MODE.", "WARNING")
+                await status_msg.edit(content=f"🔄 Анализ: [{bar}] {percent}%\n⚠️ ОШИБКИ. ПОДКЛЮЧЕНИЕ ЧЕРЕЗ ПРОКСИ...")
                 
                 for prov, mod in proxy_queue:
                     try:
-                        # Обновляем статус с указанием прокси
-                        await status_msg.edit(content=f"🔄 Анализ: [{bar}] {percent}% ({current_batch-1}/{total_batches})\n Прокси: {prov}...")
-                        
                         ok, ans, _ = await asyncio.wait_for(
-                            asyncio.to_thread(run_async_in_thread, try_request, prov, mod, True), # True = use proxy
-                            timeout=60.0 # Чуть больше таймаут для прокси
+                            asyncio.to_thread(run_async_in_thread, try_request, prov, mod, True),
+                            timeout=60.0
                         )
                         if ok:
                             final_answer = ans
@@ -651,13 +632,12 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
             if not success:
                 final_answer = "NONE"
                 used_provider = "NO_RESPONSE"
-                log_analysis(f"❌ Пакет {current_batch}: Полностью неудачно даже с прокси.", "ERROR")
+                log_analysis(f"❌ Batch {current_batch}: FAILED completely.", "ERROR")
 
             batch_violations = parse_ai_response(final_answer, batch_data)
             all_violations.extend(batch_violations)
-            log_analysis(f"Пакет {current_batch}: {used_provider}. Найдено: {len(batch_violations)}", "INFO")
+            log_analysis(f"Batch {current_batch}: {used_provider}. Found: {len(batch_violations)}", "INFO")
 
-            # Финиш пакета
             percent = int((current_batch / total_batches) * 100)
             bar = "█" * int(10 * current_batch // total_batches) + "░" * (10 - int(10 * current_batch // total_batches))
             await status_msg.edit(content=f"🔄 Анализ: [{bar}] {percent}% ({current_batch}/{total_batches})\n✅ Пакет #{current_batch} готов")
@@ -667,9 +647,9 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
         
         if not all_violations:
             await status_msg.edit(content="✅ Нарушений не найдено.")
+            log_analysis("Analysis finished: No violations.", "INFO")
             return
 
-        # Отправка отчета
         report_parts = []
         current_part = []
         current_len = 0
@@ -691,22 +671,26 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
         for part in report_parts[1:]:
             await interaction.channel.send(part)
         await interaction.channel.send("✅ Анализ полностью завершен.")
+        log_analysis(f"Analysis finished: {len(all_violations)} violations reported.", "INFO")
 
     except Exception as e:
-        log_analysis(f"CRITICAL ERROR: {e}", "ERROR")
-        import traceback
-        log_analysis(traceback.format_exc(), "ERROR")
+        error_trace = traceback.format_exc()
+        log_analysis(f"CRITICAL ERROR: {e}\n{error_trace}", "ERROR")
         logger.error(f"Critical error in /analyze: {e}", exc_info=True)
-        await interaction.followup.send(f"❌ Критическая ошибка. Лог сохранен. `/скачать_анализ`\nОшибка: {str(e)[:100]}", ephemeral=True)
+        await interaction.followup.send(f"❌ Критическая ошибка. Лог сохранен.\nОшибка: {str(e)[:100]}", ephemeral=True)
 
 # ============================================================================
-# 💾 АДМИН КОМАНДЫ: СКАЧАТЬ ФАЙЛЫ
+# 💾 АДМИН КОМАНДЫ: СКАЧАТЬ ФАЙЛЫ (ИСПРАВЛЕНО ЛОГГИРОВАНИЕ)
 # ============================================================================
 
 @bot.slash_command(name="скачать_анализ", description="Скачать лог анализа")
 async def slash_download_analysis_log(interaction: disnake.CommandInteraction):
     if interaction.author.id != OWNER_ID: return
     await interaction.response.defer()
+    for handler in analysis_logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            handler.flush()
+            
     if os.path.exists(ANALYSIS_LOG_FILE):
         await interaction.followup.send(file=disnake.File(ANALYSIS_LOG_FILE))
     else:
@@ -720,10 +704,12 @@ async def slash_download_logs(interaction: disnake.CommandInteraction):
     
     await interaction.response.defer()
     
-    # Принудительная запись буфера
-    for handler in logging.getLogger().handlers:
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
         if isinstance(handler, logging.FileHandler):
             handler.flush()
+    
+    await asyncio.sleep(0.1)
     
     if os.path.exists('bot_errors.log'):
         await interaction.followup.send(file=disnake.File('bot_errors.log'))
@@ -753,6 +739,7 @@ async def slash_download_db(interaction: disnake.CommandInteraction):
 @bot.event
 async def on_ready():
     logger.info(f"Bot {bot.user} ready! (Railway: {IS_RAILWAY})")
+    logger.info("🚀 MODE: NO WARMUP (DB SAVING ENABLED)")
     if REQUIRED_ROLE_ID == 0: 
         logger.info("Mode: Role 'Псарь' access.")
     else: 
@@ -765,12 +752,15 @@ async def on_ready():
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound): return
     
-    # Логирование ошибки
     logger.error(f"Command error {ctx.command}: {error}", exc_info=True)
     
-    # Запись в файл вручную, если basic_config не сработал мгновенно
-    with open('bot_errors.log', 'a', encoding='utf-8') as f:
-        f.write(f"\n[{datetime.now()}] ERROR: {type(error).__name__}: {error}\n")
+    try:
+        with open('bot_errors.log', 'a', encoding='utf-8') as f:
+            f.write(f"\n[{datetime.now()}] ERROR: {type(error).__name__}: {error}\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        print(f"Failed to write to log file: {e}")
     
     if hasattr(ctx, 'author') and ctx.author.id == OWNER_ID:
         try: 
@@ -782,7 +772,7 @@ async def on_command_error(ctx, error):
         except: pass
 
 if __name__ == "__main__":
-    logger.info("🚀 Start PsIInka Bot v0.4.7-FullRestore")
+    logger.info("🚀 Start PsIInka Bot v1.0-Optimized-NoWarmup")
     try:
         bot.run(os.getenv("DISCORD_TOKEN"))
     except Exception as e:
