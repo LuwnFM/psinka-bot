@@ -16,6 +16,7 @@ from typing import Tuple, List, Dict, Any, Optional
 from disnake.ext import commands
 from openai import OpenAI
 import aiohttp
+from groq import Groq
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, UniqueConstraint, func
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
@@ -191,6 +192,8 @@ ANALYSIS_SYSTEM_PROMPT = """
 - Спам пингами (@everyone, @here, массовые упоминания)
 - Обсуждение механик вне игрового контекста
 - Личные оскорбления и токсичность
+- Слишком короткие посты: пост должен быть не менее 4 компьютерных строк ИЛИ 6 телефонных строк. 
+  Одиночные фразы типа "@user - Ссылка", "Привет", "Ок" без описания действий/мыслей — нарушение.
 
 📤 ФОРМАТ ОТВЕТА:
 Верни ТОЛЬКО ID сообщений через запятую (например: 5, 12, 28) или NONE если нарушений нет.
@@ -203,6 +206,26 @@ ANALYSIS_SYSTEM_PROMPT = """
 FREE_PROXY_LIST = [
     "http://103.152.112.162:80", "http://185.217.136.234:8080",
     "http://47.88.29.109:8080", "http://103.167.135.110:80", "http://185.162.230.55:80",
+]
+
+# GROQ модели с приоритетами (отсортировано по предпочтению на основе лимитов)
+# Tier 1: Лучшие по балансу скорость/качество/лимиты
+# - meta-llama/llama-4-scout-17b-16e-instruct: 30 RPM, 1K RPD, 30K TPM, 500K TPD
+# - qwen/qwen3-32b: 60 RPM, 1K RPD, 6K TPM, 500K TPD (лучший TPM лимит)
+# - llama-3.3-70b-versatile: 30 RPM, 1K RPD, 12K TPM, 100K TPD
+GROQ_PRIORITY_MODELS = [
+    # Tier 1: Топ модели
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "qwen/qwen3-32b",
+    "llama-3.3-70b-versatile",
+    # Tier 2: Быстрые легкие модели с высокими лимитами
+    "llama-3.1-8b-instant",       # 30 RPM, 14.4K RPD, 6K TPM, 500K TPD
+    "groq/compound-mini",         # 30 RPM, 250 RPD, 70K TPM, No limit TPD
+    # Tier 3: Специализированные модели
+    "groq/compound",              # 30 RPM, 250 RPD, 70K TPM, No limit TPD
+    "allam-2-7b",                 # 30 RPM, 7K RPD, 6K TPM, 500K TPD
+    "moonshotai/kimi-k2-instruct",# 60 RPM, 1K RPD, 10K TPM, 300K TPD
+    "moonshotai/kimi-k2-instruct-0905",
 ]
 
 async def fetch_free_proxies(count: int = 20) -> List[str]:
@@ -292,6 +315,38 @@ async def test_openrouter_single(model: str, prompt: str, timeout: float = 35.0,
             messages=messages, 
             timeout=int(timeout),
             extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot", "X-OpenRouter-Title": "PsIInka Bot"}
+        )
+
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(sync_call),
+            timeout=timeout
+        )
+        if response.choices and len(response.choices) > 0:
+            answer = response.choices[0].message.content
+            if answer and answer.strip():
+                return True, answer.strip(), time.time() - start
+        return False, "Пустой ответ", time.time() - start
+    except Exception as e:
+        return False, str(e)[:100], time.time() - start
+
+async def test_groq_single(model: str, prompt: str, timeout: float = 35.0, system_prompt: str = None):
+    groq_token = os.getenv('GROQ_TOKEN')
+    if not groq_token: return False, "No GROQ Token", 0.0
+    start = time.time()
+    messages = []
+    if system_prompt: messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    
+    client = Groq(api_key=groq_token)
+    
+    def sync_call():
+        return client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=2048,
+            timeout=int(timeout)
         )
 
     try:
@@ -649,6 +704,9 @@ async def slash_say(interaction: disnake.CommandInteraction, вопрос: str =
         msg = await interaction.edit_original_response(content="⏳ Обработка...")
         
         queue = PRIORITY_TIER_1 + PRIORITY_TIER_2
+        # Добавляем GROQ между g4f и OpenRouter
+        for groq_model in GROQ_PRIORITY_MODELS[:3]:  # Топ-3 модели GROQ
+            queue.append(("Groq", groq_model))
         queue.append(("OpenRouter", OPENROUTER_PRIORITY))
         queue.append(("g4f-default", "deepseek-r1"))
         
@@ -663,6 +721,8 @@ async def slash_say(interaction: disnake.CommandInteraction, вопрос: str =
             try:
                 if prov == "OpenRouter":
                     ok, ans, lat = await test_openrouter_single(mod, вопрос, timeout=45.0, system_prompt=system_prompt, proxy_url=proxy_url)
+                elif prov == "Groq":
+                    ok, ans, lat = await test_groq_single(mod, вопрос, timeout=45.0, system_prompt=system_prompt)
                 else:
                     ok, ans, lat = await make_g4f_request(prov, mod, вопрос, timeout=45.0, system_prompt=system_prompt, proxy_url=proxy_url)
                 
@@ -891,9 +951,11 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
         all_violations = []
         
         main_queue = PRIORITY_TIER_1 + PRIORITY_TIER_2
+        # Добавляем GROQ модели в основную очередь
+        groq_queue = [("Groq", m) for m in GROQ_PRIORITY_MODELS[:5]]  # Топ-5 моделей GROQ
         or_fallback = [OPENROUTER_PRIORITY, "meta-llama/llama-3.3-70b-instruct:free"]
         g4f_fallback = [("g4f-default", "deepseek-r1")]
-        proxy_queue = main_queue + [("OpenRouter", m) for m in or_fallback] + g4f_fallback
+        proxy_queue = main_queue + groq_queue + [("OpenRouter", m) for m in or_fallback] + g4f_fallback
 
         for i in range(0, len(messages_data), BATCH_SIZE):
             batch_data = messages_data[i : i + BATCH_SIZE]
@@ -912,6 +974,8 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
                 proxy_str = get_random_proxy(True) if use_proxy else None
                 if prov == "OpenRouter":
                     return await test_openrouter_single(mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
+                elif prov == "Groq":
+                    return await test_groq_single(mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
                 else:
                     return await make_g4f_request(prov, mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT, proxy_url=proxy_str)
 
@@ -935,7 +999,22 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
                     log_analysis(f"Error {prov}/{mod}: {e}", "DEBUG")
                     continue
 
-            # 2. OpenRouter резерв
+            # 2. GROQ резерв (если не сработала основная очередь g4f)
+            if not success:
+                for groq_model in GROQ_PRIORITY_MODELS:
+                    try:
+                        ok, ans, _ = await asyncio.wait_for(
+                            asyncio.to_thread(run_async_in_thread, try_request, "Groq", groq_model, False),
+                            timeout=55.0
+                        )
+                        if ok:
+                            final_answer = ans
+                            used_provider = f"Groq ({groq_model})"
+                            success = True
+                            break
+                    except: continue
+
+            # 3. OpenRouter резерв
             if not success:
                 for or_model in or_fallback:
                     try:
@@ -950,7 +1029,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
                             break
                     except: continue
 
-            # 3. ПРОКСИ РЕЖИМ (Крайний случай)
+            # 4. ПРОКСИ РЕЖИМ (Крайний случай)
             if not success:
                 log_analysis(f"⚠️ Batch {current_batch}: Normal failed. Activating PROXY MODE.", "WARNING")
                 await status_msg.edit(content=f"🔄 Анализ: [{bar}] {percent}%\n⚠️ ОШИБКИ. ПОДКЛЮЧЕНИЕ ЧЕРЕЗ ПРОКСИ...")
