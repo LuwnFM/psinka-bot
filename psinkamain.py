@@ -803,7 +803,7 @@ def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
     results = [msg for msg in original_data if msg['id'] in found_ids]
     return results
 
-# # ============================================================================
+# # # ============================================================================
 # 🔍 СЛЭШ-КОМАНДА "/анализ" (ПАКЕТНЫЙ АНАЛИЗ + ПРОГРЕСС + НАДЕЖНОСТЬ)
 # ============================================================================
 
@@ -1113,4 +1113,4 @@ if __name__ == "__main__":
         logger.info("🚀 Запуск PsIInka Bot v0.4.2-RoleFix...")
         bot.run(os.getenv("DISCORD_TOKEN"))
     except Exception as e:
-        logger.critical(f"💥 Критическая ошибка при запуске: {e}", exc_info=True)
+        logger.critical(f"💥 Критическая ошибка при запуске: {e}", exc_info=True) 
