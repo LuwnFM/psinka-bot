@@ -171,26 +171,28 @@ OPENROUTER_PRIORITY = "nvidia/nemotron-3-super-120b-a12b:free"
 # ============================================================================
 
 ANALYSIS_SYSTEM_PROMPT = """
-Ты — аналитик модерации для RolePlay сервера в Discord.
-Твоя задача: Проанализировать предоставленный список сообщений и выявить ТОЛЬКО сообщения, нарушающие правила РП (оффтоп).
+Ты — строгий модератор RolePlay сервера. Твоя цель — найти ЛЮБОЙ оффтоп в предоставленном списке сообщений.
+Список сообщений ограничен по объему, анализируй КАЖДОЕ сообщение внимательно.
 
-Критерии нарушения (Оффтоп):
-1. Пинги пользователей отдельными сообщениями без контекста игры.
-2. Попрошайничество постов ("кто напишет?", "нужен партнер", "ответьте мне").
-3. OOC (Out of Character) обсуждения: разговоры о жизни, обсуждение сюжета вне ролей, споры, флуд.
-4. Сообщения, начинающиеся с "//", "((", "))", "[OOC]", но также и те, где контекст явно не игровой, даже без маркеров.
-5. Короткие сообщения типа "ок", "+", "привет", если они не являются частью игрового действия.
+ЧТО СЧИТАТЬ НАРУШЕНИЕМ (ОФФТОП):
+1. Обсуждение вне роли (OOC): реальные жизни, споры, флуд, обсуждение механик игры.
+2. Маркеры OOC: "//", "((", "))", "[OOC]", ((текст)), даже если текст короткий.
+3. Попрошайничество: "кто ответит?", "нужен пост", "пните меня".
+4. Бессмысленные короткие сообщения: "ок", "+", "привет", смайлики отдельным сообщением, если это не часть действия.
+5. Пинги людей без игрового контекста.
 
-Что НЕ является нарушением:
-- Длинные художественные описания действий персонажа.
-- Диалоги персонажей в рамках сюжета.
-- Игровые броски кубиков (если они в контексте).
+ЧТО НЕ ТРОГАТЬ:
+- Художественные описания действий персонажа.
+- Диалоги персонажей.
 
-ФОРМАТ ОТВЕТА (СТРОГО):
-Верни только список ID сообщений из входных данных, которые являются нарушениями.
-Формат: числа через запятую. Например: 1, 5, 12.
-Если нарушений нет, верни слово: NONE.
-НЕ пиши никаких объяснений, вступлений, заключений или дополнительного текста. Только цифры или NONE.
+ВАЖНО:
+Если видишь сообщение, которое хоть немного похоже на оффтоп — включай его в отчет. Лучше ложная тревога, чем пропуск нарушения.
+
+ФОРМАТ ОТВЕТА (СТРОГО ТОЛЬКО ЦИФРЫ):
+Верни ID сообщений (числа из начала строки), которые являются нарушениями.
+Пример ответа: 1, 5, 8
+Если нарушений нет, напиши: NONE
+Никакого другого текста, пояснений или вводных слов писать НЕЛЬЗЯ.
 """
 
 # ============================================================================
@@ -640,27 +642,29 @@ def log_analysis(msg: str, level: str = "INFO"):
     else:
         analysis_logger.info(msg)
 
+# 
 # ============================================================================
-# 🕵️ СЛЭШ-КОМАНДА "/анализ" (С ПОДРОБНЫМ ЛОГГИРОВАНИЕМ)
+
+# 🕵️ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================================
-async def collect_all_messages_debug(channel, days_limit: int, max_per_source: int = 300):
+
+async def collect_all_messages_debug(channel, days_limit: int, max_per_source: int = 400):
     """
     Собирает сообщения из канала и веток с детальным логированием.
     Использует корректный метод message.is_system() для disnake.
     """
     after_date = datetime.utcnow() - timedelta(days=days_limit)
     
-    log_analysis(f" Старт сбора для канала #{channel.name}. Период: {days_limit} дней.", "INFO")
-    log_analysis(f"📅 Дата отсечения (after UTC): {after_date.isoformat()}", "DEBUG")
+    log_analysis(f"🚀 Старт сбора для канала #{channel.name}. Период: {days_limit} дней.", "INFO")
+    log_analysis(f" Дата отсечения (after UTC): {after_date.isoformat()}", "DEBUG")
     
     all_messages = []
     
     # --- 1. Основной канал ---
     try:
-        log_analysis(f"📥 Чтение основного канала #{channel.name}...", "INFO")
+        log_analysis(f" Чтение основного канала #{channel.name}...", "INFO")
         count_main = 0
         
-        # Проверка прав перед чтением
         if not channel.permissions_for(channel.guild.me).read_message_history:
             log_analysis(f"⚠️ У бота нет прав 'Read Message History' в канале #{channel.name}!", "WARNING")
         else:
@@ -668,7 +672,6 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
                 if count_main % 10 == 0:
                     log_analysis(f"   Проверка сообщения ID {message.id} от {message.created_at.isoformat()}", "DEBUG")
                 
-                # ИСПРАВЛЕНИЕ: Прямой вызов метода .is_system()
                 if message.is_system() or message.author == bot.user or not message.content.strip():
                     continue
                 
@@ -688,13 +691,13 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
         await asyncio.sleep(1.0)
         
     except Exception as e:
-        log_analysis(f" КРИТИЧЕСКАЯ ОШИБКА чтения основного канала: {e}", "ERROR")
+        log_analysis(f"❌ КРИТИЧЕСКАЯ ОШИБКА чтения основного канала: {e}", "ERROR")
         import traceback
         log_analysis(traceback.format_exc(), "ERROR")
 
     # --- 2. Ветки (Threads) ---
     try:
-        log_analysis(f" Получение списка веток для #{channel.name}...", "INFO")
+        log_analysis(f"🧵 Получение списка веток для #{channel.name}...", "INFO")
         threads_found = 0
         
         if hasattr(channel, 'threads'):
@@ -717,7 +720,7 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
                 log_analysis(f"   Обработка ветки: '{thread.name}' (ID: {thread.id})", "DEBUG")
                 
                 if not thread.permissions_for(channel.guild.me).read_message_history:
-                    log_analysis(f"   ️ Пропуск ветки '{thread.name}': Нет прав на чтение истории.", "WARNING")
+                    log_analysis(f"   ⚠️ Пропуск ветки '{thread.name}': Нет прав на чтение истории.", "WARNING")
                     continue
 
                 try:
@@ -728,7 +731,6 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
                         if count_thread % 5 == 0:
                              log_analysis(f"      Сообщение в ветке ID {message.id} от {message.created_at.isoformat()}", "DEBUG")
 
-                        # ИСПРАВЛЕНИЕ: Прямой вызов метода .is_system() здесь тоже
                         if message.is_system() or message.author == bot.user or not message.content.strip():
                             continue
                         
@@ -752,17 +754,17 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
                 except disnake.Forbidden:
                     log_analysis(f"   🚫 Доступ запрещен к ветке '{thread.name}'.", "WARNING")
                 except Exception as e:
-                    log_analysis(f"   ❌ Ошибка при чтении ветки '{thread.name}': {e}", "ERROR")
+                    log_analysis(f"    Ошибка при чтении ветки '{thread.name}': {e}", "ERROR")
                     import traceback
                     log_analysis(traceback.format_exc(), "ERROR")
                     continue
         else:
-            log_analysis("   ️ У канала нет атрибута 'threads'.", "WARNING")
+            log_analysis("   ⚠️ У канала нет атрибута 'threads'.", "WARNING")
 
-        log_analysis(f" Всего обработано веток: {threads_found}", "INFO")
+        log_analysis(f"🧵 Всего обработано веток: {threads_found}", "INFO")
 
     except Exception as e:
-        log_analysis(f" Ошибка при обработке списка веток: {e}", "ERROR")
+        log_analysis(f"❌ Ошибка при обработке списка веток: {e}", "ERROR")
         import traceback
         log_analysis(traceback.format_exc(), "ERROR")
 
@@ -794,6 +796,10 @@ def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
     results = [msg for msg in original_data if msg['id'] in found_ids]
     return results
 
+# ============================================================================
+# 🔍 СЛЭШ-КОМАНДА "/анализ" (ПАКЕТНЫЙ АНАЛИЗ)
+# ============================================================================
+
 @bot.slash_command(name="анализ", description="Анализ канала и веток (Owner Only) + Логгирование")
 async def slash_analyze(
     interaction: disnake.CommandInteraction,
@@ -809,7 +815,7 @@ async def slash_analyze(
 
     days_to_check = 7 if "7 дней" in период else 21
     
-    # Инициализация лога для этой сессии (очистка файла перед новым анализом)
+    # Инициализация лога
     with open(ANALYSIS_LOG_FILE, 'w', encoding='utf-8') as f:
         f.write(f"=== START ANALYSIS SESSION: {datetime.now()} ===\n")
         f.write(f"Channel: {канал.name}, Period: {days_to_check} days\n")
@@ -825,79 +831,94 @@ async def slash_analyze(
         messages_data = await collect_all_messages_debug(канал, days_to_check, max_per_source=400)
         
         if not messages_data:
-            log_analysis("⚠️ Список сообщений пуст после сбора.", "WARNING")
-            await status_msg.edit(content="ℹ️ Сообщения не найдены. Проверьте файл логов командой `/скачать_анализ`, чтобы узнать причину (права, даты, ошибки).")
+            log_analysis("️ Список сообщений пуст после сбора.", "WARNING")
+            await status_msg.edit(content="ℹ️ Сообщения не найдены. Проверьте файл логов командой `/скачать_анализ`.")
             return
 
-        log_analysis(f"Данные собраны: {len(messages_data)} сообщений. Отправка ИИ...", "INFO")
-        await status_msg.edit(content=f" Найдено {len(messages_data)} сообщений. Анализ ИИ...")
+        log_analysis(f"Данные собраны: {len(messages_data)} сообщений. Начинаю пакетный анализ...", "INFO")
+        await status_msg.edit(content=f" Найдено {len(messages_data)} сообщений. Анализирую пакетами (чтобы ничего не упустить)...")
 
-        # 2. Подготовка и запрос к ИИ
-        formatted_context = format_messages_for_ai(messages_data)
-        if len(formatted_context) > 16000:
-            formatted_context = formatted_context[:16000] + "\n... (cut)"
-            log_analysis("Контекст обрезан из-за размера.", "WARNING")
-
-        user_prompt = f"Проанализируй список:\n\n{formatted_context}"
+        # --- НОВАЯ ЛОГИКА: ПАКЕТНЫЙ АНАЛИЗ (BATCH PROCESSING) ---
+        BATCH_SIZE = 35  # Оптимальный размер пакета
+        all_violations = []
+        total_batches = (len(messages_data) + BATCH_SIZE - 1) // BATCH_SIZE
         
-        final_answer = None
-        final_provider = None
+        # Очередь моделей (из вашего основного кода)
         queue = PRIORITY_TIER_1 + PRIORITY_TIER_2 + [("g4f-default", "deepseek-r1")]
         
-        success = False
-        for prov, mod in queue:
-            try:
-                log_analysis(f"Попытка запроса к {prov}/{mod}", "DEBUG")
-                if prov == "g4f-default":
-                    client = g4f.client.AsyncClient()
-                    messages_payload = [
-                        {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt}
-                    ]
-                    resp = await asyncio.wait_for(
-                        client.chat.completions.create(model=mod, messages=messages_payload),
-                        timeout=90.0
-                    )
-                    if resp and resp.choices:
-                        final_answer = resp.choices[0].message.content
-                        final_provider = f"{prov} ({mod})"
-                        success = True
-                        break
-                else:
-                    ok, ans, _ = await make_g4f_request(prov, mod, user_prompt, timeout=90.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
-                    if ok:
-                        final_answer = ans
-                        final_provider = f"{prov} ({mod})"
-                        success = True
-                        break
-            except Exception as e:
-                log_analysis(f"Ошибка модели {prov}/{mod}: {e}", "ERROR")
-                continue
-        
-        if not success:
-            log_analysis("Все модели ИИ вернули ошибку.", "ERROR")
-            await status_msg.edit(content="❌ Ошибка ИИ. См. логи.")
-            return
+        # Разбиваем данные на пакеты
+        for i in range(0, len(messages_data), BATCH_SIZE):
+            batch_data = messages_data[i : i + BATCH_SIZE]
+            batch_num = (i // BATCH_SIZE) + 1
+            
+            log_analysis(f"Обработка пакета {batch_num}/{total_batches} (сообщения {i+1}-{min(i+BATCH_SIZE, len(messages_data))})", "DEBUG")
+            
+            # Формируем промпт только для текущего пакета
+            batch_context = format_messages_for_ai(batch_data)
+            user_prompt_batch = f"Проанализируй ЭТОТ пакет сообщений (часть {batch_num} из {total_batches}):\n\n{batch_context}"
+            
+            final_answer = None
+            success = False
+            
+            # Пробуем отправить текущий пакет через очередь моделей
+            for prov, mod in queue:
+                try:
+                    if prov == "g4f-default":
+                        client = g4f.client.AsyncClient()
+                        messages_payload = [
+                            {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
+                            {"role": "user", "content": user_prompt_batch}
+                        ]
+                        resp = await asyncio.wait_for(
+                            client.chat.completions.create(model=mod, messages=messages_payload),
+                            timeout=60.0
+                        )
+                        if resp and resp.choices:
+                            final_answer = resp.choices[0].message.content
+                            success = True
+                            break
+                    else:
+                        ok, ans, _ = await make_g4f_request(prov, mod, user_prompt_batch, timeout=60.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
+                        if ok:
+                            final_answer = ans
+                            success = True
+                            break
+                except Exception as e:
+                    continue # Пробуем следующую модель
+            
+            if success and final_answer:
+                # Парсим ответ текущего пакета
+                batch_violations = parse_ai_response(final_answer, batch_data)
+                all_violations.extend(batch_violations)
+                log_analysis(f"Пакет {batch_num}: найдено нарушений {len(batch_violations)}", "INFO")
+            else:
+                log_analysis(f"️ Пакет {batch_num}: Не удалось получить ответ от ИИ", "WARNING")
+            
+            # Пауза между пакетами
+            await asyncio.sleep(1.5)
 
-        log_analysis(f"Ответ ИИ получен от {final_provider}. Парсинг...", "INFO")
-        violations = parse_ai_response(final_answer, messages_data)
-        
-        log_analysis(f"Найдено нарушений: {len(violations)}", "INFO")
+        # Объединяем результаты
+        violations = all_violations
+        log_analysis(f"Итого найдено нарушений во всех пакетах: {len(violations)}", "INFO")
 
         if not violations:
-            await status_msg.edit(content="✅ Нарушений не найдено. Логи сохранены.")
+            await status_msg.edit(content="✅ Нарушений не обнаружено ни в одном из пакетов.")
             return
 
         # 3. Формирование отчета
         report_lines = []
         max_chars = 1900
+        final_provider = "Пакетный анализ (Multi-Model)"
+        
         for i, v in enumerate(violations, 1):
             line = f"{i}) **[{v['source']}]** {v['content']} - [Ссылка]({v['url']})\n"
             if len("".join(report_lines)) + len(line) > max_chars:
                 chunk = "".join(report_lines)
-                header = f" Отчет ({final_provider}): {len(violations)} нарушений\n\n{chunk}"
-                if i == 1: await status_msg.edit(content=header)
-                else: await interaction.channel.send(header)
+                header = f"🚨 Отчет ({final_provider}): {len(violations)} нарушений\n\n{chunk}"
+                if i == 1: 
+                    await status_msg.edit(content=header)
+                else: 
+                    await interaction.channel.send(header)
                 report_lines = [line]
             else:
                 report_lines.append(line)
@@ -913,8 +934,7 @@ async def slash_analyze(
         log_analysis(f"КРИТИЧЕСКИЙ СБОЙ КОМАНДЫ: {e}", "ERROR")
         import traceback
         log_analysis(traceback.format_exc(), "ERROR")
-        await interaction.followup.send(f"❌ Критическая ошибка. Лог сохранен. `/#скачать_анализ`", ephemeral=True)
-
+        await interaction.followup.send(f"❌ Критическая ошибка. Лог сохранен. `/скачать_анализ`", ephemeral=True)
 # ============================================================================
 # 💾 СЛЭШ-КОМАНДА "/скачать_анализ" (СКАЧАТЬ ЛОГИ)
 # ============================================================================
