@@ -840,7 +840,7 @@ async def slash_analyze(
         # 1. Сбор данных
         messages_data = await collect_all_messages_debug(канал, days_to_check, max_per_source=400)
         
-        if not messages_
+        if not messages:
             log_analysis("️ Список сообщений пуст после сбора.", "WARNING")
             await interaction.edit_original_response(content="ℹ️ Сообщения не найдены. Проверьте файл логов командой `/скачать_анализ`.")
             return
