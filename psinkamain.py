@@ -176,10 +176,28 @@ EXCLUDED_OR_MODELS = ["liquid/lfm-2.5-1.2b-instruct:free"]
 OPENROUTER_PRIORITY = "nvidia/nemotron-3-super-120b-a12b:free"
 
 ANALYSIS_SYSTEM_PROMPT = """
-Ты — модератор RP сервера. Найди ТОЛЬКО явный оффтоп.
-ИГНОРИРУЙ: описания действий (**текст**), диалоги, ролевые пинги.
-ФИКСИРУЙ: флуд, OOC обсуждения, попрошайничество, спам пингами.
-ФОРМАТ: Верни только ID сообщений через запятую (например: 5, 12) или NONE. Без пояснений.
+Ты — модератор RP сервера Discord. Твоя задача — найти ТОЛЬКО явный оффтоп и нарушения в сообщениях.
+
+📋 ЧТО ИГНОРИРОВАТЬ (не отмечать):
+- Описания действий в **звёздочках** или __подчёркиваниях__
+- Ролевые диалоги и реплики персонажей
+- Ролевые пинги (@персонаж, @должность)
+- Фразы в рамках отыгрыша
+
+🚨 ЧТО ФИКСИРОВАТЬ (отмечать ID):
+- Флуд (короткие бессмысленные сообщения подряд)
+- OOC обсуждения ((вне роли), //комментарии)
+- Попрошайничество (просьбы дать ресурсы, деньги, предметы)
+- Спам пингами (@everyone, @here, массовые упоминания)
+- Обсуждение механик вне игрового контекста
+- Личные оскорбления и токсичность
+
+📤 ФОРМАТ ОТВЕТА:
+Верни ТОЛЬКО ID сообщений через запятую (например: 5, 12, 28) или NONE если нарушений нет.
+Никаких пояснений, текста или форматирования кроме списка ID.
+
+Пример правильного ответа: 3, 7, 15
+Пример правильного ответа при отсутствии нарушений: NONE
 """
 
 FREE_PROXY_LIST = [
@@ -304,31 +322,318 @@ class DiceResult:
         self.dice_rolls: List[int] = []
         self.details: List[str] = []
         self.comment = ""
+        self.exploded_rolls: List[int] = []
+        self.kept_dice: List[int] = []
+        self.dropped_dice: List[int] = []
+        self.rerolled: bool = False
+        self.successes: int = 0
+        self.failures: int = 0
+        self.botches: int = 0
 
 class DiceParser:
     def __init__(self):
-        self.aliases = {"dndstats": "6 4d6 k3", "attack": "1d20", "+d20": "2d20 d1", "-d20": "2d20 kl1"}
+        # Алиасы удалены - только продвинутая система кубиков
+        pass
     
     def parse(self, command_str: str) -> List[DiceResult]:
+        """Парсит команду кубиков с поддержкой модификаторов."""
         results = []
-        if not command_str.strip(): return results
-        parts = command_str.split()
-        if parts and parts[0].lower() in self.aliases:
-            command_str = self.aliases[parts[0].lower()] + " " + " ".join(parts[1:])
+        if not command_str or not command_str.strip():
+            return results
         
+        command_str = command_str.strip()
+        
+        # Разделяем по точке с запятой для множественных бросков
         sets = command_str.split(';')
-        for s in sets[:4]:
-            res = DiceResult()
-            match = re.search(r'(\d*)d(\d+)', s)
-            if match:
-                n = int(match.group(1) or 1)
-                y = int(match.group(2))
-                rolls = [random.randint(1, y) for _ in range(n)]
-                res.dice_rolls = rolls
-                res.total = sum(rolls)
-                res.details = f"Бросок: {rolls}"
-                results.append(res)
+        
+        for s in sets[:4]:  # Максимум 4 разных броска
+            s = s.strip()
+            if not s:
+                continue
+            
+            result = self._parse_single_roll(s)
+            if result:
+                results.append(result)
+        
         return results
+    
+    def _parse_single_roll(self, roll_str: str) -> Optional[DiceResult]:
+        """Парсит одиночный бросок со всеми модификаторами."""
+        res = DiceResult()
+        original_str = roll_str
+        
+        # Извлекаем комментарий после !
+        if '!' in roll_str:
+            parts = roll_str.split('!', 1)
+            roll_str = parts[0].strip()
+            res.comment = parts[1].strip()
+        
+        # Проверяем флаги (s, nr, p, ul и т.д.)
+        flags = []
+        flag_pattern = r'\b([a-z]{1,2})\b'
+        potential_flags = re.findall(flag_pattern, roll_str.lower())
+        for flag in potential_flags:
+            if flag in ['s', 'nr', 'p', 'ul', 'e', 'ie', 'k', 'kl', 'd', 'dl', 'r', 'ir', 't', 'f', 'b']:
+                flags.append(flag)
+        
+        # Удаляем флаги из строки для парсинга
+        clean_str = roll_str
+        for flag in flags:
+            clean_str = re.sub(r'\b' + flag + r'\b', '', clean_str, flags=re.IGNORECASE)
+        
+        # Парсим количество наборов (например "6 4d6" = 6 наборов по 4d6)
+        num_sets = 1
+        set_match = re.match(r'^(\d+)\s+(.+)$', clean_str.strip())
+        if set_match:
+            num_sets = min(int(set_match.group(1)), 20)  # Максимум 20 наборов
+            clean_str = set_match.group(2)
+        
+        # Парсим основную формулу кубиков
+        dice_match = re.search(r'(\d*)d(\d+)', clean_str, re.IGNORECASE)
+        if not dice_match:
+            # Пробуем найти просто число
+            num_match = re.match(r'^(\d+)$', clean_str.strip())
+            if num_match:
+                res.total = float(num_match.group(1))
+                res.details = f"Статическое значение: {res.total}"
+                return res
+            return None
+        
+        num_dice = int(dice_match.group(1) or 1)
+        num_sides = int(dice_match.group(2))
+        
+        # Ограничиваем грани до 100
+        if num_sides > 100:
+            num_sides = 100
+        
+        # Ограничиваем количество кубиков
+        if num_dice > 100:
+            num_dice = 100
+        
+        # Бросаем кубики
+        rolls = [random.randint(1, num_sides) for _ in range(num_dice)]
+        res.dice_rolls = rolls.copy()
+        
+        # Обработка exploding dice (e)
+        if 'e' in flags or 'ie' in flags:
+            explode_val = num_sides  # По умолчанию взрывается на макс значении
+            infinite = 'ie' in flags
+            
+            # Проверяем есть ли конкретное значение взрыва (e6)
+            explode_match = re.search(r'(i?e)(\d+)', roll_str, re.IGNORECASE)
+            if explode_match:
+                infinite = explode_match.group(1).lower() == 'ie'
+                explode_val = int(explode_match.group(2))
+            
+            original_rolls = rolls.copy()
+            rolls_to_process = list(enumerate(rolls))
+            exploded_count = 0
+            max_explodes = 100 if infinite else len(rolls)
+            
+            while rolls_to_process and exploded_count < max_explodes:
+                new_rolls_to_process = []
+                for idx, val in rolls_to_process:
+                    if val >= explode_val:
+                        # Кубик взрывается - добавляем новый бросок
+                        new_roll = random.randint(1, num_sides)
+                        res.dice_rolls.append(new_roll)
+                        res.exploded_rolls.append(new_roll)
+                        exploded_count += 1
+                        if infinite and new_roll >= explode_val and exploded_count < max_explodes:
+                            new_rolls_to_process.append((len(res.dice_rolls)-1, new_roll))
+                rolls_to_process = new_rolls_to_process
+            
+            res.details.append(f"Взрывы: +{len(res.exploded_rolls)} доп. бросков")
+        
+        # Обработка reroll (r, ir)
+        if 'r' in flags or 'ir' in flags:
+            reroll_val = None
+            infinite = 'ir' in flags
+            
+            # Проверяем конкретное значение для reroll (r2)
+            reroll_match = re.search(r'(i?r)(\d+)', roll_str, re.IGNORECASE)
+            if reroll_match:
+                infinite = reroll_match.group(1).lower() == 'ir'
+                reroll_val = int(reroll_match.group(2))
+            else:
+                reroll_val = 1  # По умолчанию reroll единиц
+            
+            max_rerolls = 100 if infinite else len(res.dice_rolls)
+            reroll_count = 0
+            
+            for i in range(len(res.dice_rolls)):
+                while res.dice_rolls[i] <= reroll_val and reroll_count < max_rerolls:
+                    res.dice_rolls[i] = random.randint(1, num_sides)
+                    reroll_count += 1
+                    res.rerolled = True
+                    if not infinite:
+                        break
+            
+            if reroll_count > 0:
+                res.details.append(f"Перебросы: {reroll_count}")
+        
+        # Обработка keep/drop (k, kl, d, dl)
+        kept_count = len(res.dice_rolls)
+        if any(f in flags for f in ['k', 'kl', 'd', 'dl']):
+            keep_val = None
+            
+            # Определяем сколько оставлять/сбрасывать
+            for flag in ['k', 'kl', 'd', 'dl']:
+                match = re.search(flag + r'(\d+)', roll_str, re.IGNORECASE)
+                if match:
+                    keep_val = int(match.group(1))
+                    break
+            
+            if keep_val is not None and keep_val < len(res.dice_rolls):
+                sorted_rolls = sorted(res.dice_rolls, reverse=True)
+                
+                if 'k' in flags or 'kl' in flags:
+                    # Keep highest или keep lowest
+                    if 'kl' in flags:
+                        # Keep lowest - берём наименьшие
+                        sorted_rolls = sorted(res.dice_rolls)
+                        res.kept_dice = sorted_rolls[:keep_val]
+                        res.dropped_dice = sorted_rolls[keep_val:]
+                    else:
+                        # Keep highest - берём наибольшие (по умолчанию)
+                        res.kept_dice = sorted_rolls[:keep_val]
+                        res.dropped_dice = sorted_rolls[keep_val:]
+                    
+                    res.dice_rolls = res.kept_dice
+                    res.details.append(f"Оставлено {keep_val} лучших")
+                
+                elif 'd' in flags or 'dl' in flags:
+                    # Drop lowest или drop highest
+                    if 'dl' in flags:
+                        # Drop lowest - сбрасываем наименьшие, оставляем лучшие
+                        sorted_rolls = sorted(res.dice_rolls)
+                        res.dropped_dice = sorted_rolls[:keep_val]
+                        res.kept_dice = sorted_rolls[keep_val:]
+                    else:
+                        # Drop highest - сбрасываем наибольшие
+                        res.dropped_dice = sorted_rolls[:keep_val]
+                        res.kept_dice = sorted_rolls[keep_val:]
+                    
+                    res.dice_rolls = res.kept_dice
+                    res.details.append(f"Сброшено {keep_val} худших")
+        
+        # Обработка success/failure (t, f)
+        if 't' in flags:
+            target_val = None
+            failure_val = None
+            
+            t_match = re.search(r't(\d+)', roll_str, re.IGNORECASE)
+            f_match = re.search(r'f(\d+)', roll_str, re.IGNORECASE)
+            
+            if t_match:
+                target_val = int(t_match.group(1))
+            if f_match:
+                failure_val = int(f_match.group(1))
+            
+            if target_val is not None:
+                for roll in res.dice_rolls:
+                    if roll >= target_val:
+                        res.successes += 1
+                    elif failure_val is not None and roll <= failure_val:
+                        res.failures += 1
+                
+                res.total = res.successes - res.failures
+                res.details.append(f"Успехи: {res.successes}, Провалы: {res.failures}")
+        
+        # Обработка botches (b)
+        if 'b' in flags:
+            botch_val = 1
+            b_match = re.search(r'b(\d+)', roll_str, re.IGNORECASE)
+            if b_match:
+                botch_val = int(b_match.group(1))
+            
+            for roll in res.dice_rolls:
+                if roll <= botch_val:
+                    res.botches += 1
+            
+            if res.botches > 0:
+                res.details.append(f"Критические провалы: {res.botches}")
+        
+        # Вычисляем итоговую сумму
+        if 't' not in flags:  # Если не было подсчёта успехов
+            res.total = sum(res.dice_rolls)
+        
+        # Добавляем статические модификаторы (+5, -3, *2, /2)
+        modifier_match = re.search(r'([+\-*/])\s*(\d+(?:\.\d+)?)$', clean_str)
+        if modifier_match:
+            op = modifier_match.group(1)
+            val = float(modifier_match.group(2))
+            old_total = res.total
+            if op == '+':
+                res.total += val
+            elif op == '-':
+                res.total -= val
+            elif op == '*':
+                res.total *= val
+            elif op == '/':
+                if val != 0:
+                    res.total /= val
+            
+            if op in ['+', '-']:
+                res.details.append(f"{op}{int(val) if val == int(val) else val}")
+        
+        # Формируем детальное описание
+        if not res.details:
+            res.details = [f"Бросок: {res.dice_rolls}"]
+        elif isinstance(res.details, list):
+            res.details.insert(0, f"Бросок: {res.dice_rolls}")
+        else:
+            res.details = [f"Бросок: {res.dice_rolls}", res.details]
+        
+        return res
+    
+    def get_help_text(self) -> str:
+        """Возвращает справку по использованию кубиков."""
+        return """
+🎲 **Команда `/кубик` — Продвинутая система бросков**
+
+**Использование:** `/кубик формула` или оставьте пустым для этой справки
+
+📋 **Базовые команды:**
+• `XdY` — Бросить X кубиков с Y гранями (пример: `2d6`)
+• `XdY + Z` — С модификатором (пример: `1d20 + 5`)
+• `XdY - Z` — Вычесть (пример: `3d8 - 2`)
+• `XdY * Z` — Умножить (пример: `2d4 * 3`)
+• `XdY / Z` — Разделить (пример: `4d6 / 2`)
+
+🔢 **Несколько бросков:**
+• `N XdY` — N наборов по XdY (пример: `6 4d6` — 6 наборов по 4к6)
+• `A ; B ; C` — Разные броски через точку с запятой (макс. 4)
+
+💥 **Взрывающиеся кубики:**
+• `XdY eZ` — Взрыв на Z (пример: `3d6 e6`)
+• `XdY e` — Взрыв на макс. значении
+• `XdY ieZ` — Бесконечные взрывы (макс. 100)
+
+📊 **Оставить/Сбросить:**
+• `XdY kZ` — Оставить Z лучших (пример: `4d6 k3`)
+• `XdY klZ` — Оставить Z худших
+• `XdY dZ` — Сбросить Z худших
+• `XdY dlZ` — Сбросить Z лучших
+
+🔄 **Переброс:**
+• `XdY rZ` — Перебросить ≤ Z (один раз)
+• `XdY irZ` — Бесконечный переброс (макс. 100)
+
+🎯 **Успехи/Провалы:**
+• `XdY tZ` — Успехи при ≥ Z (пример: `6d10 t7`)
+• `XdY tZ fW` — Успехи ≥Z, провалы ≤W
+
+⚠️ **Критические провалы:**
+• `XdY bZ` — Подсчитать ботчи (≤Z)
+
+📝 **Дополнительно:**
+• `! текст` — Добавить комментарий (пример: `4d6 ! Урон`)
+• `s` — Упрощённый вывод
+• `ul` — Не сортировать результаты
+
+**Ограничения:** максимум 100 граней, 100 кубиков, 20 наборов, 4 броска в команде
+"""
 
 dice_engine = DiceParser()
 
@@ -347,7 +652,7 @@ async def slash_say(interaction: disnake.CommandInteraction, вопрос: str =
         queue.append(("OpenRouter", OPENROUTER_PRIORITY))
         queue.append(("g4f-default", "deepseek-r1"))
         
-        system_prompt = "Ты Псинка. Отвечай кратко на русском."
+        system_prompt = "Ты помощник по имени Псинка (мальчик). Отвечай кратко на русском и по делу, отвечай развёрнуто в случае нужды в глубинном анализе вопроса или при запросе пользователя."
         final_response = None
         final_prov = "?"
         final_mod = "?"
@@ -386,16 +691,52 @@ async def slash_say(interaction: disnake.CommandInteraction, вопрос: str =
 async def slash_cube(interaction: disnake.CommandInteraction, формула: str = None):
     try:
         if not формула:
-            await interaction.response.send_message("ℹ️ Использование: `/кубик 2d6+5` или алиасы `dndstats`")
+            # Показываем справку при пустой команде
+            help_text = dice_engine.get_help_text()
+            await interaction.response.send_message(help_text)
             return
+        
         await interaction.response.defer()
         results = dice_engine.parse(формула)
-        if not results: raise ValueError("Не удалось разобрать.")
-        txt = "\n".join([f"**{r.total}** `({', '.join(map(str, r.dice_rolls))})`" for r in results])
-        await interaction.followup.send(f"🎲 Результат:\n{txt}")
+        
+        if not results:
+            raise ValueError("Не удалось разобрать формулу. Используйте `/кубик` для справки.")
+        
+        # Формируем красивый вывод
+        output_parts = []
+        for i, r in enumerate(results):
+            result_num = i + 1
+            total_display = int(r.total) if r.total == int(r.total) else round(r.total, 2)
+            
+            part = f"**Результат #{result_num}: {total_display}**"
+            
+            if r.comment:
+                part += f" _({r.comment})_"
+            
+            part += f"\n🎲 Броски: `[{', '.join(map(str, r.dice_rolls))}]`"
+            
+            details_extra = []
+            if r.exploded_rolls:
+                details_extra.append(f"💥 Взрывы: +{len(r.exploded_rolls)}")
+            if r.rerolled:
+                details_extra.append("🔄 Был переброс")
+            if r.successes > 0 or r.failures > 0:
+                details_extra.append(f"✅ Успехи: {r.successes}, ❌ Провалы: {r.failures}")
+            if r.botches > 0:
+                details_extra.append(f"⚠️ Ботчи: {r.botches}")
+            
+            if details_extra:
+                part += "\n" + " ".join(details_extra)
+            
+            output_parts.append(part)
+        
+        final_output = "\n\n".join(output_parts)
+        await interaction.followup.send(f"🎲 **Результат броска:**\n{final_output}")
+        
     except Exception as e:
         logger.error(f"Error in /cube: {e}", exc_info=True)
-        await interaction.followup.send(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
+        error_msg = str(e)[:200]
+        await interaction.followup.send(f"❌ Ошибка: {error_msg}\nИспользуйте `/кубик` для справки по командам.", ephemeral=True)
 
 @bot.slash_command(name="погавкай", description="Пинг")
 async def slash_bark(interaction: disnake.CommandInteraction):
@@ -432,22 +773,22 @@ class TestModeView(disnake.ui.View):
         await interaction.response.defer()
         log_analysis("TEST: Express G4F started", "INFO")
         start = time.time()
-        ok, ans, lat = await make_g4f_request("PollinationsAI", "deepseek-r1", "ping", timeout=15.0)
+        ok, ans, lat = await make_g4f_request("PollinationsAI", "deepseek-r1", "ответь \"ок\" если прочитал текст, не отвечай ничего другого", timeout=15.0)
         elapsed = time.time() - start
         status = "✅ Успех" if ok else f"❌ Ошибка: {ans}"
         log_analysis(f"TEST Result: {status}, Time: {elapsed:.2f}s", "INFO")
-        await interaction.channel.send(f"✅ Экспресс тест: {status}\nВремя: {elapsed:.2f}с\nОтвет: {ans[:50]}")
+        await interaction.channel.send(f"✅ Экспресс тест G4F:\nСтатус: {status}\n⏱ Время: {elapsed:.2f}с\n📝 Ответ: {ans[:100]}")
 
     @disnake.ui.button(label="🌐 OpenRouter", style=disnake.ButtonStyle.blurple, custom_id="test_openrouter")
     async def openrouter_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
         log_analysis("TEST: OpenRouter started", "INFO")
         start = time.time()
-        ok, ans, lat = await test_openrouter_single(OPENROUTER_PRIORITY, "ping", timeout=15.0)
+        ok, ans, lat = await test_openrouter_single(OPENROUTER_PRIORITY, "ответь \"ок\" если прочитал текст, не отвечай ничего другого", timeout=15.0)
         elapsed = time.time() - start
         status = "✅ Успех" if ok else f"❌ Ошибка: {ans}"
         log_analysis(f"TEST OR Result: {status}, Time: {elapsed:.2f}s", "INFO")
-        await interaction.channel.send(f"✅ OpenRouter тест: {status}\nВремя: {elapsed:.2f}с")
+        await interaction.channel.send(f"✅ Тест OpenRouter:\nСтатус: {status}\n⏱ Время: {elapsed:.2f}с\n📝 Ответ: {ans[:100] if ans else 'Нет ответа'}")
 
     @disnake.ui.button(label="🎯 Полный цикл", style=disnake.ButtonStyle.red, custom_id="test_all")
     async def all_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
@@ -465,7 +806,7 @@ class TestModeView(disnake.ui.View):
 async def slash_test(interaction: disnake.CommandInteraction):
     try:
         if not await check_access(interaction): return
-        embed = disnake.Embed(title="Выбор режима теста", description="Нажмите кнопку для проверки:", color=0xFF8844)
+        embed = disnake.Embed(title="Выбор режима теста", description="Нажмите кнопку для проверки:\n\n📊 После теста будет показан топ моделей по скорости ответа!", color=0xFF8844)
         view = TestModeView(interaction)
         await interaction.response.send_message(embed=embed, view=view)
     except Exception as e:
