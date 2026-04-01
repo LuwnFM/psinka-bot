@@ -585,7 +585,247 @@ async def slash_test(interaction: disnake.CommandInteraction):
     embed = disnake.Embed(title=" Выбор режима тестирования", description="Выберите режим:", color=0xFF8844)
     view = TestModeView(interaction)
     await interaction.response.send_message(embed=embed, view=view)
+# новая команда /анализ
 
+# ============================================================================
+# ️ СЛЭШ-КОМАНДА "/анализ" (ОФФТОП ДЕТЕКТОР)
+# ============================================================================
+
+ANALYSIS_SYSTEM_PROMPT = """
+Ты — аналитик модерации для RolePlay сервера в Discord.
+Твоя задача: Проанализировать предоставленный список сообщений и выявить ТОЛЬКО сообщения, нарушающие правила РП (оффтоп).
+
+Критерии нарушения (Оффтоп):
+1. Пинги пользователей отдельными сообщениями без контекста игры.
+2. Попрошайничество постов ("кто напишет?", "нужен партнер", "ответьте мне").
+3. OOC (Out of Character) обсуждения: разговоры о жизни, обсуждение сюжета вне ролей, споры, флуд.
+4. Сообщения, начинающиеся с "//", "((", "))", "[OOC]", но также и те, где контекст явно не игровой, даже без маркеров.
+5. Короткие сообщения типа "ок", "+", "привет", если они не являются частью игрового действия.
+
+Что НЕ является нарушением:
+- Длинные художественные описания действий персонажа.
+- Диалоги персонажей в рамках сюжета.
+- Игровые броски кубиков (если они в контексте).
+
+ФОРМАТ ОТВЕТА (СТРОГО):
+Верни только список ID сообщений из входных данных, которые являются нарушениями.
+Формат: числа через запятую. Например: 1, 5, 12.
+Если нарушений нет, верни слово: NONE.
+НЕ пиши никаких объяснений, вступлений, заключений или дополнительного текста. Только цифры или NONE.
+"""
+
+async def fetch_channel_history_safe(channel, limit_days: int, max_messages: int = 500):
+    """
+    Безопасный сбор истории с паузами для избегания Rate Limit.
+    Возвращает список словарей: {'id': int, 'content': str, 'author': str, 'url': str}
+    """
+    after_date = datetime.now() - timedelta(days=limit_days)
+    messages_data = []
+    
+    # Получаем историю. Discord API возвращает сообщения от новых к старым.
+    # Нам нужно проверить дату каждого сообщения.
+    async for message in channel.history(limit=max_messages, after=after_date):
+        # Пропускаем системные сообщения и сообщения самого бота
+        if message.system or message.author == bot.user:
+            continue
+        
+        # Фильтр по длине контента (игнорируем совсем пустые или только эмодзи, если нужно, но пока берем всё)
+        if not message.content.strip():
+            continue
+
+        messages_data.append({
+            "id": len(messages_data) + 1, # Виртуальный ID для промпта (1, 2, 3...)
+            "real_id": message.id,
+            "content": message.content[:2000], # Ограничиваем длину, чтобы не перегрузить токены
+            "author": str(message.author),
+            "url": message.jump_url,
+            "created_at": message.created_at
+        })
+        
+        # Пауза каждые 15 сообщений для безопасности (Railway может быть чувствителен)
+        if len(messages_data) % 15 == 0:
+            await asyncio.sleep(1.5) 
+            
+    return messages_data
+
+def format_messages_for_ai(messages_list: List[Dict]) -> str:
+    """Форматирует список сообщений в строку для ИИ"""
+    output_lines = []
+    for msg in messages_list:
+        # Экранируем переносы строк для чистоты промпта
+        clean_content = msg['content'].replace('\n', ' ').strip()
+        output_lines.append(f"{msg['id']}: {clean_content}")
+    return "\n".join(output_lines)
+
+def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
+    """
+    Парсит ответ ИИ и возвращает список найденных нарушений с полными данными.
+    Ожидаемый формат: "1, 5, 8" или "NONE"
+    """
+    ai_text = ai_text.strip().upper()
+    
+    if ai_text == "NONE" or not ai_text:
+        return []
+    
+    # Извлекаем все числа из ответа
+    found_ids = []
+    # Разделяем по запятым, пробелам или переносам
+    raw_parts = re.split(r'[,\s]+', ai_text)
+    
+    for part in raw_parts:
+        try:
+            num = int(part)
+            found_ids.append(num)
+        except ValueError:
+            continue
+    
+    # Сопоставляем виртуальные ID с реальными данными
+    results = []
+    for msg in original_data:
+        if msg['id'] in found_ids:
+            results.append(msg)
+            
+    return results
+
+@bot.slash_command(name="анализ", description="Анализ канала на оффтоп с помощью ИИ (Только Owner)")
+async def slash_analyze(
+    interaction: disnake.CommandInteraction,
+    канал: disnake.TextChannel = commands.Param(description="Канал для проверки"),
+    период: str = commands.Param(
+        description="Период анализа", 
+        choices=["За последние 7 дней", "За последние 21 день"]
+    )
+):
+    # 1. Проверка прав (Только OWNER_ID)
+    if interaction.author.id != OWNER_ID:
+        await interaction.response.send_message("❌ Доступ запрещён. Эта команда доступна только владельцу.", ephemeral=True)
+        return
+
+    # Определение количества дней
+    days_to_check = 7 if "7 дней" in период else 21
+    
+    await interaction.response.defer()
+    status_msg = await interaction.edit_original_response(content=f"🔄 Начинаю сбор истории канала `{канал.name}` за последние {days_to_check} дней...")
+
+    try:
+        # 2. Сбор данных
+        messages_data = await fetch_channel_history_safe(канал, days_to_check, max_messages=600)
+        
+        if not messages_data:
+            await status_msg.edit(content="ℹ️ За указанный период в канале не найдено подходящих сообщений для анализа.")
+            return
+
+        await status_msg.edit(content=f" Найдено {len(messages_data)} сообщений. Формирую запрос к ИИ...")
+
+        # 3. Подготовка промпта
+        formatted_context = format_messages_for_ai(messages_data)
+        
+        # Проверка длины контекста (если слишком много, обрезаем самые старые, но лучше дать ИИ столько, сколько влезет в лимит модели)
+        # DeepSeek R1/V3 обычно держат большой контекст, но на всякий случай ограничим до ~15k символов для безопасности бесплатных провайдеров
+        if len(formatted_context) > 14000:
+            formatted_context = formatted_context[:14000] + "\n... (список обрезан из-за размера)"
+            # Предупреждаем, что анализ частичный
+            await status_msg.edit(content=f"️ Список сообщений слишком велик. Анализ будет проведен для первых ~{len(messages_data)//2} сообщений.")
+
+        user_prompt = f"Проанализируй следующий список сообщений:\n\n{formatted_context}"
+
+        # 4. Запрос к ИИ (используем вашу существующую логику очередей)
+        # Создадим упрощенную версию вызова, используя приоритетные модели из вашего кода
+        final_answer = None
+        final_provider = None
+        
+        # Используем ту же очередность, что и в /скажи, но адаптируем под один запрос
+        queue = PRIORITY_TIER_1 + PRIORITY_TIER_2
+        
+        # Добавляем дефолтный fallback, если основные не сработают
+        queue.append(("g4f-default", "deepseek-r1"))
+        
+        success = False
+        for prov, mod in queue:
+            logger.info(f" Анализ через {prov}/{mod}...")
+            try:
+                if prov == "g4f-default":
+                    client = g4f.client.AsyncClient()
+                    messages_payload = [
+                        {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt}
+                    ]
+                    resp = await asyncio.wait_for(
+                        client.chat.completions.create(model=mod, messages=messages_payload),
+                        timeout=60.0
+                    )
+                    if resp and resp.choices:
+                        ans = resp.choices[0].message.content
+                        if ans:
+                            final_answer = ans
+                            final_provider = f"{prov} ({mod})"
+                            success = True
+                            break
+                else:
+                    # Используем вашу функцию make_g4f_request
+                    ok, ans, _ = await make_g4f_request(prov, mod, user_prompt, timeout=60.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
+                    if ok:
+                        final_answer = ans
+                        final_provider = f"{prov} ({mod})"
+                        success = True
+                        break
+            except Exception as e:
+                logger.warning(f"Ошибка модели {prov}/{mod}: {e}")
+                continue
+        
+        if not success or not final_answer:
+            await status_msg.edit(content="❌ Не удалось получить анализ от ИИ. Все модели вернули ошибку или таймаут.")
+            return
+
+        await status_msg.edit(content=f"✅ ИИ завершил анализ ({final_provider}). Обрабатываю результаты...")
+
+        # 5. Парсинг результата
+        violations = parse_ai_response(final_answer, messages_data)
+
+        if not violations:
+            await status_msg.edit(content=" Нарушений (оффтопа) за указанный период не обнаружено!")
+            return
+
+        # 6. Формирование финального отчета
+        report_lines = []
+        total_chars = 0
+        max_embed_chars = 1900 # Лимит Discord
+        
+        for i, v in enumerate(violations, 1):
+            line = f"{i}) {v['content']} - [Ссылка]({v['url']})\n"
+            # Проверка, влезет ли в текущий блок
+            if total_chars + len(line) > max_embed_chars:
+                # Отправляем накопленное
+                chunk_text = "".join(report_lines)
+                header = f"🚨 Отчет по анализу канала #{канал.name} ({период})\nМодель: {final_provider}\nНайдено нарушений: {len(violations)}\n\nЧасть отчета:\n"
+                
+                if i == 1: # Если это первое сообщение, редактируем статус
+                     await status_msg.edit(content=header + chunk_text)
+                else:
+                     await interaction.channel.send(header + chunk_text)
+                
+                report_lines = [line]
+                total_chars = len(line)
+            else:
+                report_lines.append(line)
+                total_chars += len(line)
+
+        # Отправка остатка
+        if report_lines:
+            chunk_text = "".join(report_lines)
+            header = f"🚨 Отчет по анализу канала #{канал.name} ({период})\nМодель: {final_provider}\n\nОкончание отчета:\n"
+            if len(violations) <= 10: # Если всего мало, можно объединить или дописать
+                 # Если это единственное сообщение, которое еще не отправлено
+                 if status_msg.content.startswith("✅"): 
+                      await status_msg.edit(content=header + chunk_text)
+                 else:
+                      await interaction.channel.send(header + chunk_text)
+            else:
+                 await interaction.channel.send(header + chunk_text)
+
+    except Exception as e:
+        logger.error(f"Ошибка в команде /анализ: {e}", exc_info=True)
+        await interaction.followup.send(f"❌ Критическая ошибка при выполнении анализа: {str(e)[:100]}", ephemeral=True)
 # ============================================================================
 # 💾 АДМИН КОМАНДЫ: СКАЧАТЬ ФАЙЛЫ
 # ============================================================================
