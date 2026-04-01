@@ -569,7 +569,7 @@ async def slash_test(interaction: disnake.CommandInteraction):
     await interaction.response.send_message(embed=embed, view=view)
 
 # ============================================================================
-# 💾 АДМИН КОМАНДЫ: СКАЧАТЬ ФАЙЛЫ
+# 💾 АДМИН КОМАНДЫ: СКАЧАТЬ ФАЙЛЫ (ИСПРАВЛЕНО)
 # ============================================================================
 
 @bot.slash_command(name="скачать_ошибки", description="Скачать файл логов ошибок")
@@ -593,15 +593,17 @@ async def slash_download_db(interaction: disnake.CommandInteraction):
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Доступ запрещён.", ephemeral=True)
         return
+    
     await interaction.response.defer()
     csv_data = db_manager.export_to_csv()
-    if csv_
+    
+    # ИСПРАВЛЕНИЕ ЗДЕСЬ: Полное условие проверки
+    if csv_data:
         file_obj = io.BytesIO(csv_data.encode('utf-8'))
         file_obj.name = "model_success_log.csv"
         await interaction.followup.send(file=disnake.File(file_obj))
     else:
-        await interaction.followup.send("❌ Не удалось экспортировать данные.", ephemeral=True)
-
+        await interaction.followup.send("❌ Не удалось экспортировать данные или БД не подключена.", ephemeral=True)
 # ============================================================================
 # СОБЫТИЯ
 # ============================================================================
