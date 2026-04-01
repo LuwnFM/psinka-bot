@@ -8,7 +8,7 @@ import time
 import math
 import csv
 import io
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import asyncio
 from typing import Tuple, List, Dict, Any, Optional
@@ -39,7 +39,7 @@ class ModelSuccessLog(Base):
     provider = Column(String(50), nullable=False)
     model_name = Column(String(100), nullable=False)
     success_count = Column(Integer, default=1)
-    last_success_at = Column(DateTime, default=datetime.now)
+    last_success_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     avg_latency_ms = Column(Integer, default=0)
     __table_args__ = (UniqueConstraint('provider', 'model_name', name='_provider_model_uc'),)
 
@@ -71,9 +71,9 @@ class DBManager:
             if record:
                 record.success_count += 1
                 record.avg_latency_ms = int((record.avg_latency_ms * (record.success_count - 1) + latency_ms) / record.success_count)
-                record.last_success_at = datetime.now()
+                record.last_success_at = datetime.now(timezone.utc)
             else:
-                record = ModelSuccessLog(provider=provider, model_name=model, success_count=1, last_success_at=datetime.now(), avg_latency_ms=latency_ms)
+                record = ModelSuccessLog(provider=provider, model_name=model, success_count=1, last_success_at=datetime.now(timezone.utc), avg_latency_ms=latency_ms)
                 session.add(record)
             session.commit()
             self._cleanup_old_records(session)
@@ -154,7 +154,7 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Приоритетные модели и промпт для команды "анализ" (Строгий порядок для алгоритма)
+# Приоритетные модели
 PRIORITY_TIER_1 = [
     ("PollinationsAI", "deepseek-r1"),
     ("PollinationsAI", "deepseek-v3"),
@@ -167,7 +167,7 @@ EXCLUDED_OR_MODELS = ["liquid/lfm-2.5-1.2b-instruct:free"]
 OPENROUTER_PRIORITY = "nvidia/nemotron-3-super-120b-a12b:free"
 
 # ============================================================================
-# 🧠 КОНСТАНТЫ ДЛЯ АНАЛИЗА (ДОБАВИТЬ ЭТОТ БЛОК)
+#  КОНСТАНТЫ ДЛЯ АНАЛИЗА
 # ============================================================================
 
 ANALYSIS_SYSTEM_PROMPT = """
@@ -203,7 +203,7 @@ ANALYSIS_SYSTEM_PROMPT = """
 """
 
 # ============================================================================
-# ️ ПРОКСИ СИСТЕМА
+#  ПРОКСИ СИСТЕМА
 # ============================================================================
 
 FREE_PROXY_LIST = [
@@ -220,7 +220,7 @@ async def fetch_free_proxies(count: int = 20) -> List[str]:
                     text = await response.text()
                     proxies = [f"http://{p.strip()}" for p in text.split('\n') if p.strip() and ':' in p]
                     if proxies:
-                        logger.info(f"🌐 Обновлён список прокси: {len(proxies)} шт.")
+                        logger.info(f" Обновлён список прокси: {len(proxies)} шт.")
                         return proxies
     except Exception as e:
         logger.warning(f"⚠️ Не удалось обновить прокси: {e}")
@@ -231,30 +231,19 @@ def get_random_proxy(use_proxy: bool) -> Optional[str]:
     return random.choice(FREE_PROXY_LIST)
 
 # ============================================================================
-# 🔒 ПРОВЕРКА ДОСТУПА (ОБНОВЛЕНО: ПОДДЕРЖКА ИМЕНИ РОЛИ "ПСАРЬ")
+# 🔒 ПРОВЕРКА ДОСТУПА
 # ============================================================================
 
 async def check_access(interaction: disnake.CommandInteraction, allowed_role_names: List[str] = ["Псарь"]) -> bool:
-    """
-    Проверяет доступ пользователя.
-    1. Владелец (OWNER_ID) всегда имеет доступ.
-    2. Если задан REQUIRED_ROLE_ID (число), проверяется наличие этой роли по ID.
-    3. Если REQUIRED_ROLE_ID == 0, проверяется наличие роли с именем из списка allowed_role_names (по умолчанию "Псарь").
-    """
-    # 1. Проверка владельца
     if interaction.author.id == OWNER_ID:
         return True
     
-    # 2. Проверка по ID роли (если задан в .env)
     if REQUIRED_ROLE_ID != 0:
         if any(role.id == REQUIRED_ROLE_ID for role in interaction.author.roles):
             return True
-        # Если ID задан, но роли нет - отказываем (не переходим к проверке по имени)
         await interaction.response.send_message("❌ У вас нет необходимой роли (по ID) для использования этой команды.", ephemeral=True)
         return False
 
-    # 3. Проверка по имени роли (если REQUIRED_ROLE_ID == 0)
-    # Это сработает, если вы не задали ROLE_ID в переменных окружения
     if not interaction.author.guild_roles:
         try:
             await interaction.author.fetch_roles()
@@ -263,45 +252,58 @@ async def check_access(interaction: disnake.CommandInteraction, allowed_role_nam
     
     user_role_names = [role.name for role in interaction.author.roles]
     
-    # Проверяем, есть ли хоть одна роль из списка разрешенных имен
     if any(role_name in user_role_names for role_name in allowed_role_names):
         return True
     
-    # Если ни одна проверка не прошла
     await interaction.response.send_message(f"❌ У вас нет необходимой роли ({', '.join(allowed_role_names)}) для использования этой команды.", ephemeral=True)
     return False
 
 # ============================================================================
-#  ЗАПРОСЫ К МОДЕЛЯМ (С ФИЛЬТРАЦИЕЙ ОШИБОК)
+#  ЗАПРОСЫ К МОДЕЛЯМ (ОПТИМИЗИРОВАНО ДЛЯ RAILWAY)
 # ============================================================================
 
 async def make_g4f_request(provider_name: str, model: str, prompt: str,
                            timeout: float = 40.0, system_prompt: str = None, proxy_url: str = None) -> Tuple[bool, str, float]:
     elapsed = 0.0
     start = time.time()
+    
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    
+    loop = asyncio.get_running_loop()
+
+    def sync_g4f_call():
+        try:
+            return g4f.ChatCompletion.create(
+                model=model,
+                messages=messages,
+                provider=getattr(g4f.Provider, provider_name, None) if provider_name else None,
+                timeout=int(timeout)
+            )
+        except Exception as e:
+            raise e
+
     try:
-        messages = [{"role": "system", "content": system_prompt} if system_prompt else {}, {"role": "user", "content": prompt}]
-        messages = [m for m in messages if m] 
-        
-        client = g4f.client.AsyncClient()
-        provider_arg = getattr(g4f.Provider, provider_name, None) if provider_name else None
-        
         response = await asyncio.wait_for(
-            client.chat.completions.create(model=model, messages=messages, provider=provider_arg),
+            loop.run_in_executor(None, sync_g4f_call),
             timeout=timeout
         )
         
-        if response and hasattr(response, 'choices') and response.choices:
-            answer = response.choices[0].message.content
-            if answer and answer.strip():
-                # Фильтрация специфических ошибок DuckDuckGo / AirForce
-                if "The model does not exist" in answer or "api.airforce" in answer:
-                    logger.warning(f"⚠️ {provider_name}/{model} — ошибка существования модели (AirForce/DuckDuckGo glitch)")
-                    return False, "Model Not Found", time.time() - start
-                
+        if response:
+            answer = str(response).strip()
+            
+            if "The model does not exist" in answer or "api.airforce" in answer:
+                logger.warning(f"⚠️ {provider_name}/{model} — ошибка существования модели")
+                return False, "Model Not Found", time.time() - start
+            
+            if answer:
                 elapsed = time.time() - start
-                return True, answer.strip(), elapsed
+                return True, answer, elapsed
+                
         return False, "Пустой ответ", time.time() - start
+        
     except asyncio.TimeoutError:
         return False, f"Таймаут {timeout}с", time.time() - start
     except Exception as e:
@@ -313,18 +315,24 @@ async def test_openrouter_single(model: str, prompt: str, timeout: float = 35.0,
     openrouter_token = os.getenv('OPENR_TOKEN')
     if not openrouter_token: return False, "No Token", 0.0
     start = time.time()
+    
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    
+    loop = asyncio.get_running_loop()
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_token)
+
+    def make_request():
+        return client.chat.completions.create(
+            model=model, 
+            messages=messages, 
+            timeout=int(timeout),
+            extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot", "X-OpenRouter-Title": "PsIInka Bot"}
+        )
+
     try:
-        client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_token)
-        loop = asyncio.get_running_loop()
-        messages = [{"role": "system", "content": system_prompt} if system_prompt else {}, {"role": "user", "content": prompt}]
-        messages = [m for m in messages if m]
-
-        def make_request():
-            return client.chat.completions.create(
-                model=model, messages=messages, timeout=timeout,
-                extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot", "X-OpenRouter-Title": "PsIInka Bot"}
-            )
-
         response = await asyncio.wait_for(loop.run_in_executor(None, make_request), timeout=timeout)
         if response.choices and len(response.choices) > 0:
             answer = response.choices[0].message.content
@@ -336,27 +344,25 @@ async def test_openrouter_single(model: str, prompt: str, timeout: float = 35.0,
         return False, str(e)[:100], time.time() - start
 
 # ============================================================================
-# ❤️ HEARTBEAT (ПУЛЬС БОТА)
+# ❤️ HEARTBEAT
 # ============================================================================
 
 async def heartbeat_keeper():
     while True:
-        await asyncio.sleep(15) # Каждые 15 секунд
-        logger.debug("💓 Heartbeat: Бот активен, соединение стабильно.")
+        await asyncio.sleep(15)
+        logger.debug(" Heartbeat: Бот активен, соединение стабильно.")
 
 # ============================================================================
-# 🔥 ПАССИВНАЯ РАЗМИНКА (ТОЛЬКО ЕСЛИ НУЖНО)
+# 🔥 ПАССИВНАЯ РАЗМИНКА
 # ============================================================================
 
 async def run_passive_warmup(ctx, duration_seconds: int = 30):
-    """Запускается только если БД пуста или все запросы упали"""
     logger.info(" Запуск пассивной разминки (экстренный режим)...")
     start_time = time.time()
     test_prompt = "ok"
     system_prompt = "Reply ok."
     
     candidates = PRIORITY_TIER_1 + PRIORITY_TIER_2
-    requests_made = 0
     successful_warmups = 0
     
     idx = 0
@@ -374,14 +380,13 @@ async def run_passive_warmup(ctx, duration_seconds: int = 30):
             pass
         
         idx += 1
-        requests_made += 1
         await asyncio.sleep(0.5)
     
     logger.info(f" Пассивная разминка завершена. Успехов: {successful_warmups}")
     return successful_warmups > 0
 
 # ============================================================================
-# 💬 СЛЭШ-КОМАНДА "/скажи" (NEW ALGORITHM)
+# 💬 СЛЭШ-КОМАНДА "/скажи"
 # ============================================================================
 
 @bot.slash_command(name="скажи", description="Запрос к ИИ по строгому алгоритму приоритетов")
@@ -406,30 +411,25 @@ async def slash_say(
     attempt_log = []
 
     try:
-        # Проверка наличия данных в БД. Если пусто - запускаем микро-разминку
         if not db_manager.has_data():
             await msg.edit(content=f" ПсИИнка: База пуста. Запуск экстренной проверки моделей...")
             await run_passive_warmup(interaction, 30)
 
-        # === АЛГОРИТМ ЗАПРОСОВ ===
         queue = []
-        
-        # 1. Tier 1 (Проверенные)
         queue.extend(PRIORITY_TIER_1) 
-        # 2. Tier 2 (Следующие)
         queue.extend(PRIORITY_TIER_2)
-        # 3. Из БД (Лучшие)
         db_top = db_manager.get_top_models(limit=5)
         for p, m, _ in db_top:
             if (p, m) not in queue:
                 queue.append((p, m))
-        # 4. G4F Default Fallbacks
-        queue.append(("g4f-default", "deepseek-r1")) 
-        queue.append(("g4f-default", "deepseek-v3"))
-        # 5. OpenRouter Priority
+        
+        # Добавляем OpenRouter Priority
         queue.append(("OpenRouter", OPENROUTER_PRIORITY))
         
-        # Выполнение очереди
+        # Добавляем g4f-default в самый конец очереди (после OpenRouter)
+        queue.append(("g4f-default", "deepseek-r1"))
+        queue.append(("g4f-default", "deepseek-v3"))
+        
         for prov, mod in queue:
             logger.info(f"🔄 Попытка: {prov} / {mod}")
             success = False
@@ -439,17 +439,6 @@ async def slash_say(
                 if prov == "OpenRouter":
                     if mod in EXCLUDED_OR_MODELS: continue
                     success, answer, _ = await test_openrouter_single(mod, вопрос, timeout=45.0, system_prompt=system_prompt, proxy_url=current_proxy)
-                elif prov == "g4f-default":
-                    client = g4f.client.AsyncClient()
-                    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": вопрос}]
-                    resp = await asyncio.wait_for(
-                        client.chat.completions.create(model=mod, messages=messages),
-                        timeout=45.0
-                    )
-                    if resp and resp.choices:
-                        ans = resp.choices[0].message.content
-                        if ans and "The model does not exist" not in ans:
-                            success, answer = True, ans.strip()
                 else:
                     success, answer, _ = await make_g4f_request(prov, mod, вопрос, timeout=45.0, system_prompt=system_prompt, proxy_url=current_proxy)
                 
@@ -467,14 +456,12 @@ async def slash_say(
                 logger.warning(f"❌ Исключение {prov}/{mod}: {e}")
                 attempt_log.append(f"{prov}/{mod}: Exception")
 
-        # 6. OpenRouter Free Fallback
         if not final_response:
             logger.warning("⚠️ Основная очередь пуста. Перебор OpenRouter Free...")
             or_fallbacks = [
                 "meta-llama/llama-3.3-70b-instruct:free",
                 "qwen/qwen-2.5-72b-instruct:free",
                 "deepseek/deepseek-chat:free",
-                "openrouter/free"
             ]
             for or_mod in or_fallbacks:
                 if or_mod in EXCLUDED_OR_MODELS: continue
@@ -488,7 +475,7 @@ async def slash_say(
         if not final_response:
             error_details = "\n".join(attempt_log[-5:]) 
             logger.error(f"Все попытки провалены. Логи:\n{error_details}")
-            await msg.edit(content="⚠️ Не удалось получить ответ ни от одной модели после полного перебора приоритетов. Попробуйте позже.")
+            await msg.edit(content="️ Не удалось получить ответ ни от одной модели после полного перебора приоритетов. Попробуйте позже.")
             return
 
         clean_response = '\n'.join(line for line in final_response.strip().split('\n') if line.strip())
@@ -505,10 +492,10 @@ async def slash_say(
 
     except Exception as e:
         logger.error(f"Критическая ошибка в /скажи: {e}", exc_info=True)
-        await interaction.followup.send(f"⚠️ Критическая ошибка: {str(e)[:100]}", ephemeral=True)
+        await interaction.followup.send(f"️ Критическая ошибка: {str(e)[:100]}", ephemeral=True)
 
 # ============================================================================
-# 🎲 ДВИЖОК КУБИКОВ (DICE ENGINE)
+# 🎲 ДВИЖОК КУБИКОВ
 # ============================================================================
 
 class DiceResult:
@@ -546,16 +533,15 @@ dice_engine = DiceParser()
 
 @bot.slash_command(name="кубик", description="Бросок кубиков")
 async def slash_cube(interaction: disnake.CommandInteraction, формула: str = commands.Param(default=None)):
-    # Кубик доступен всем, проверка доступа не нужна
     if not формула:
-        await interaction.response.send_message("ℹ️ Использование: `/кубик 2d6+5` или алиасы `dndstats`")
+        await interaction.response.send_message("️ Использование: `/кубик 2d6+5` или алиасы `dndstats`")
         return
     try:
         await interaction.response.defer()
         results = dice_engine.parse(формула)
         if not results: raise ValueError("Не удалось разобрать.")
         txt = "\n".join([f"**{r.total}** `({', '.join(map(str, r.dice_rolls))})`" for r in results])
-        await interaction.followup.send(f"🎲 Результат:\n{txt}")
+        await interaction.followup.send(f" Результат:\n{txt}")
     except Exception as e:
         await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
 
@@ -577,11 +563,11 @@ async def slash_status(interaction: disnake.CommandInteraction):
     if session: session.close()
     top = db_manager.get_top_models(3)
     txt = "\n".join([f"{i+1}. `{p}` / `{m}`" for i,(p,m,_) in enumerate(top)]) if top else "Нет данных"
-    embed = disnake.Embed(title="📊 Статус", description=f"Записей в БД: {count}\nТоп моделей:\n{txt}", color=0x00FF88)
+    embed = disnake.Embed(title=" Статус", description=f"Записей в БД: {count}\nТоп моделей:\n{txt}", color=0x00FF88)
     await interaction.edit_original_response(embed=embed)
 
 # ============================================================================
-# 🧪 СЛЭШ-КОМАНДА "/тест"
+# 🧪 СЛЭШ-КОМАНДА "/тест" (ИСПРАВЛЕНЫ ЭМОДЗИ)
 # ============================================================================
 
 class TestModeView(disnake.ui.View):
@@ -592,15 +578,18 @@ class TestModeView(disnake.ui.View):
     async def express_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
         await self.run_test("express", interaction)
+    
     @disnake.ui.button(label="⚡ Быстрый", style=disnake.ButtonStyle.green, emoji="", custom_id="test_quick")
     async def quick_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
         await self.run_test("quick", interaction)
+    
     @disnake.ui.button(label="🌐 OpenRouter", style=disnake.ButtonStyle.blurple, emoji="🔮", custom_id="test_openrouter")
     async def openrouter_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
         await self.run_test("openrouter", interaction)
-    @disnake.ui.button(label="🎯 Всё", style=disnake.ButtonStyle.red, emoji="🎲", custom_id="test_all")
+    
+    @disnake.ui.button(label=" Всё", style=disnake.ButtonStyle.red, emoji="🎲", custom_id="test_all")
     async def all_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
         await self.run_test("all", interaction)
@@ -621,27 +610,21 @@ async def slash_test(interaction: disnake.CommandInteraction):
     embed = disnake.Embed(title=" Выбор режима тестирования", description="Выберите режим:", color=0xFF8844)
     view = TestModeView(interaction)
     await interaction.response.send_message(embed=embed, view=view)
-# новая команда /анализ
-# 
+
 # ============================================================================
-# 📝 НАСТРОЙКА ОТДЕЛЬНОГО ЛОГГЕРА ДЛЯ АНАЛИЗА
+# 📝 ЛОГГЕР ДЛЯ АНАЛИЗА
 # ============================================================================
-import os
 
 ANALYSIS_LOG_FILE = "analysis_debug.log"
-
-# Создаем отдельный хендлер для логов анализа, чтобы не засорять основной лог
 analysis_logger = logging.getLogger("analysis_debug")
 analysis_logger.setLevel(logging.DEBUG)
 
-# Очищаем старые хендлеры, если есть (чтобы не дублировать записи при перезагрузке бота)
 if not analysis_logger.handlers:
-    file_handler = logging.FileHandler(ANALYSIS_LOG_FILE, mode='w', encoding='utf-8') # 'w' очищает файл при каждом старте бота, используйте 'a' если хотите накопление
+    file_handler = logging.FileHandler(ANALYSIS_LOG_FILE, mode='w', encoding='utf-8')
     file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     analysis_logger.addHandler(file_handler)
 
 def log_analysis(msg: str, level: str = "INFO"):
-    """Удобная функция для записи в специальный лог"""
     if level == "DEBUG":
         analysis_logger.debug(msg)
     elif level == "ERROR":
@@ -649,25 +632,18 @@ def log_analysis(msg: str, level: str = "INFO"):
     else:
         analysis_logger.info(msg)
 
-# 
 # ============================================================================
-
-# 🕵️ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# 🕵️ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ АНАЛИЗА
 # ============================================================================
 
 async def collect_all_messages_debug(channel, days_limit: int, max_per_source: int = 400):
-    """
-    Собирает сообщения из канала и веток с детальным логированием.
-    Использует корректный метод message.is_system() для disnake.
-    """
-    after_date = datetime.utcnow() - timedelta(days=days_limit)
+    after_date = datetime.now(timezone.utc) - timedelta(days=days_limit)
     
-    log_analysis(f"🚀 Старт сбора для канала #{channel.name}. Период: {days_limit} дней.", "INFO")
+    log_analysis(f" Старт сбора для канала #{channel.name}. Период: {days_limit} дней.", "INFO")
     log_analysis(f" Дата отсечения (after UTC): {after_date.isoformat()}", "DEBUG")
     
     all_messages = []
     
-    # --- 1. Основной канал ---
     try:
         log_analysis(f" Чтение основного канала #{channel.name}...", "INFO")
         count_main = 0
@@ -702,7 +678,6 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
         import traceback
         log_analysis(traceback.format_exc(), "ERROR")
 
-    # --- 2. Ветки (Threads) ---
     try:
         log_analysis(f"🧵 Получение списка веток для #{channel.name}...", "INFO")
         threads_found = 0
@@ -727,7 +702,7 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
                 log_analysis(f"   Обработка ветки: '{thread.name}' (ID: {thread.id})", "DEBUG")
                 
                 if not thread.permissions_for(channel.guild.me).read_message_history:
-                    log_analysis(f"   ⚠️ Пропуск ветки '{thread.name}': Нет прав на чтение истории.", "WARNING")
+                    log_analysis(f"   ️ Пропуск ветки '{thread.name}': Нет прав на чтение истории.", "WARNING")
                     continue
 
                 try:
@@ -759,7 +734,7 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
                     await asyncio.sleep(0.8) 
                     
                 except disnake.Forbidden:
-                    log_analysis(f"   🚫 Доступ запрещен к ветке '{thread.name}'.", "WARNING")
+                    log_analysis(f"    Доступ запрещен к ветке '{thread.name}'.", "WARNING")
                 except Exception as e:
                     log_analysis(f"    Ошибка при чтении ветки '{thread.name}': {e}", "ERROR")
                     import traceback
@@ -771,7 +746,7 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
         log_analysis(f"🧵 Всего обработано веток: {threads_found}", "INFO")
 
     except Exception as e:
-        log_analysis(f"❌ Ошибка при обработке списка веток: {e}", "ERROR")
+        log_analysis(f" Ошибка при обработке списка веток: {e}", "ERROR")
         import traceback
         log_analysis(traceback.format_exc(), "ERROR")
 
@@ -787,8 +762,10 @@ def format_messages_for_ai(messages_list: List[Dict]) -> str:
     return "\n".join(output_lines)
 
 def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
+    if not ai_text:
+        return []
     ai_text = ai_text.strip().upper()
-    if ai_text == "NONE" or not ai_text:
+    if ai_text == "NONE":
         return []
     
     found_ids = []
@@ -803,8 +780,8 @@ def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
     results = [msg for msg in original_data if msg['id'] in found_ids]
     return results
 
-# # # ============================================================================
-# 🔍 СЛЭШ-КОМАНДА "/анализ" (ПАКЕТНЫЙ АНАЛИЗ + ПРОГРЕСС + НАДЕЖНОСТЬ)
+# ============================================================================
+# 🔍 СЛЭШ-КОМАНДА "/анализ" (ОПТИМИЗИРОВАНО С G4F-DEFAULT В КОНЦЕ)
 # ============================================================================
 
 @bot.slash_command(name="анализ", description="Анализ канала и веток (Owner Only) + Логгирование")
@@ -822,7 +799,6 @@ async def slash_analyze(
 
     days_to_check = 7 if "7 дней" in период else 21
     
-    # Инициализация лога
     with open(ANALYSIS_LOG_FILE, 'w', encoding='utf-8') as f:
         f.write(f"=== START ANALYSIS SESSION: {datetime.now()} ===\n")
         f.write(f"Channel: {канал.name}, Period: {days_to_check} days\n")
@@ -830,14 +806,12 @@ async def slash_analyze(
 
     await interaction.response.defer()
     
-    # Переменные для прогресс-бара
-    total_batches = 0 # Будет вычислено позже
+    total_batches = 0
     current_batch = 0
     
     log_analysis(f"Начало команды /анализ. Канал: {канал.name}, Период: {days_to_check}", "INFO")
 
     try:
-        # 1. Сбор данных
         messages_data = await collect_all_messages_debug(канал, days_to_check, max_per_source=400)
         
         if not messages_data:
@@ -845,28 +819,32 @@ async def slash_analyze(
             await interaction.edit_original_response(content="ℹ️ Сообщения не найдены. Проверьте файл логов командой `/скачать_анализ`.")
             return
 
-        # Расчет пакетов
         BATCH_SIZE = 35
         total_batches = (len(messages_data) + BATCH_SIZE - 1) // BATCH_SIZE
         
         log_analysis(f"Данные собраны: {len(messages_data)} сообщений. Всего пакетов: {total_batches}. Начинаю анализ...", "INFO")
         
-        # Начальное сообщение с прогресс-баром
         progress_bar = "░" * 10
-        status_text = f"🔄 Анализ: [{progress_bar}] 0% ({current_batch}/{total_batches})\nПодготовка..."
+        status_text = f"🔄 Анализ: [{progress_bar}] 0% (0/{total_batches})\nПодготовка..."
         status_msg = await interaction.edit_original_response(content=status_text)
 
-        # --- НОВАЯ ЛОГИКА: ПАКЕТНЫЙ АНАЛИЗ С ГАРАНТИЕЙ ОТВЕТА ---
         all_violations = []
         
-        # Очередь моделей (точно такая же, как в /скажи)
-        # Добавляем резервный OpenRouter Free в конец, если основные не справятся
-        queue = PRIORITY_TIER_1 + PRIORITY_TIER_2 + [("g4f-default", "deepseek-r1")]
-        # Можно добавить резервную модель OpenRouter, если g4f-default тоже откажет
+        # Очередь: Tier 1 + Tier 2
+        queue = PRIORITY_TIER_1 + PRIORITY_TIER_2
+        
+        # Резерв OpenRouter (включая Nemotron первым)
         fallback_queue = [
+            OPENROUTER_PRIORITY, # Nemotron
             "meta-llama/llama-3.3-70b-instruct:free",
             "qwen/qwen-2.5-72b-instruct:free",
             "deepseek/deepseek-chat:free"
+        ]
+        
+        # САМЫЙ КОНЕЦ: g4f-default (как просили)
+        g4f_fallback = [
+            ("g4f-default", "deepseek-r1"),
+            ("g4f-default", "deepseek-v3")
         ]
 
         for i in range(0, len(messages_data), BATCH_SIZE):
@@ -875,52 +853,52 @@ async def slash_analyze(
             
             log_analysis(f"Обработка пакета {current_batch}/{total_batches}", "DEBUG")
             
-            # Формируем промпт для текущего пакета
             batch_context = format_messages_for_ai(batch_data)
             user_prompt_batch = f"Проанализируй ЭТОТ пакет сообщений (часть {current_batch} из {total_batches}):\n\n{batch_context}"
             
             final_answer = None
             success = False
             used_provider = "Unknown"
+            loop = asyncio.get_running_loop()
 
-            # 1. Попытка через основную очередь (как в /скажи)
+            # 1. Основная очередь (Tier 1 & 2)
             for prov, mod in queue:
                 try:
-                    if prov == "g4f-default":
-                        client = g4f.client.AsyncClient()
-                        messages_payload = [
-                            {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
-                            {"role": "user", "content": user_prompt_batch}
-                        ]
-                        resp = await asyncio.wait_for(
-                            client.chat.completions.create(model=mod, messages=messages_payload),
-                            timeout=60.0
-                        )
-                        if resp and resp.choices:
-                            final_answer = resp.choices[0].message.content
-                            used_provider = f"{prov} ({mod})"
-                            success = True
-                            break
-                    else:
-                        ok, ans, _ = await make_g4f_request(prov, mod, user_prompt_batch, timeout=60.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
-                        if ok:
-                            final_answer = ans
-                            used_provider = f"{prov} ({mod})"
-                            success = True
-                            break
+                    percent = int(((current_batch - 1) / total_batches) * 100)
+                    filled_len = int(10 * (current_batch - 1) // total_batches)
+                    bar = "█" * filled_len + "░" * (10 - filled_len)
+                    progress_text = f"🔄 Анализ: [{bar}] {percent}% ({current_batch-1}/{total_batches})\n Отправка запросу {prov}..."
+                    try: await status_msg.edit(content=progress_text)
+                    except: pass
+
+                    def run_g4f():
+                        return make_g4f_request(prov, mod, user_prompt_batch, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
+                    
+                    ok, ans, _ = await asyncio.wait_for(
+                        loop.run_in_executor(None, run_g4f),
+                        timeout=55.0
+                    )
+                    
+                    if ok:
+                        final_answer = ans
+                        used_provider = f"{prov} ({mod})"
+                        success = True
+                        break
+                except asyncio.TimeoutError:
+                    log_analysis(f"Таймаут модели {prov}/{mod}", "WARNING")
+                    continue
                 except Exception as e:
-                    log_analysis(f"Ошибка модели {prov}/{mod} для пакета {current_batch}: {e}", "DEBUG")
+                    log_analysis(f"Ошибка модели {prov}/{mod}: {e}", "DEBUG")
                     continue
             
-            # 2. Если основная очередь не сработала, пробуем резервные модели OpenRouter напрямую
+            # 2. Резерв OpenRouter (Nemotron и другие free)
             if not success:
-                log_analysis(f"⚠️ Основная очередь не дала ответа для пакета {current_batch}. Пробую резерв OpenRouter...", "WARNING")
+                log_analysis(f"⚠️ Основная очередь не дала ответа. Пробую резерв OpenRouter...", "WARNING")
                 openrouter_token = os.getenv('OPENR_TOKEN')
                 if openrouter_token:
                     client_or = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_token)
                     for or_model in fallback_queue:
                         try:
-                            loop = asyncio.get_running_loop()
                             def make_or_req():
                                 return client_or.chat.completions.create(
                                     model=or_model,
@@ -928,10 +906,14 @@ async def slash_analyze(
                                         {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
                                         {"role": "user", "content": user_prompt_batch}
                                     ],
-                                    timeout=60.0,
+                                    timeout=50.0,
                                     extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot", "X-OpenRouter-Title": "PsIInka Bot"}
                                 )
-                            resp = await asyncio.wait_for(loop.run_in_executor(None, make_or_req), timeout=60.0)
+                            
+                            resp = await asyncio.wait_for(
+                                loop.run_in_executor(None, make_or_req),
+                                timeout=55.0
+                            )
                             if resp.choices:
                                 final_answer = resp.choices[0].message.content
                                 used_provider = f"OpenRouter ({or_model}) [RESERVE]"
@@ -940,16 +922,33 @@ async def slash_analyze(
                         except Exception as e:
                             log_analysis(f"Ошибка резерва {or_model}: {e}", "DEBUG")
                             continue
-                
-            # 3. Если вообще ничего не помогло (крайний случай)
+            
+            # 3. Самый крайний случай: g4f-default (Deepseek R1/V3)
             if not success:
-                log_analysis(f"❌ КРИТИЧЕСКИ: Не удалось получить ответ для пакета {current_batch} ни от одной модели!", "ERROR")
-                # Принудительно ставим NONE, чтобы анализ не сломался, но логируем ошибку
+                log_analysis(f"️ OpenRouter не ответил. Пробую g4f-default (крайний резерв)...", "WARNING")
+                for prov, mod in g4f_fallback:
+                    try:
+                        def run_g4f_default():
+                            return make_g4f_request(prov, mod, user_prompt_batch, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
+                        
+                        ok, ans, _ = await asyncio.wait_for(
+                            loop.run_in_executor(None, run_g4f_default),
+                            timeout=55.0
+                        )
+                        if ok:
+                            final_answer = ans
+                            used_provider = f"{prov} ({mod}) [LAST_RESORT]"
+                            success = True
+                            break
+                    except Exception as e:
+                        log_analysis(f"Ошибка g4f-default {mod}: {e}", "DEBUG")
+                        continue
+
+            if not success:
+                log_analysis(f"❌ КРИТИЧЕСКИ: Не удалось получить ответ для пакета {current_batch}", "ERROR")
                 final_answer = "NONE" 
                 used_provider = "NO_RESPONSE_ERROR"
-                # Можно отправить уведомление владельцу, но пока просто продолжаем
             
-            # Парсинг ответа (даже если это вынужденный NONE)
             batch_violations = parse_ai_response(final_answer, batch_data)
             all_violations.extend(batch_violations)
             
@@ -959,19 +958,16 @@ async def slash_analyze(
             percent = int((current_batch / total_batches) * 100)
             filled_len = int(10 * current_batch // total_batches)
             bar = "█" * filled_len + "░" * (10 - filled_len)
-            progress_text = f"🔄 Анализ: [{bar}] {percent}% ({current_batch}/{total_batches})\nТекущий пакет: {used_provider}"
+            progress_text = f"🔄 Анализ: [{bar}] {percent}% ({current_batch}/{total_batches})\n✅ Пакет #{current_batch} обработан"
             
-            # Обновляем сообщение статуса каждые 1 пакет или чаще, если нужно
             try:
                 await status_msg.edit(content=progress_text)
             except:
-                pass # Игнорируем ошибки редактирования, если сообщение уже удалено или слишком часто
+                pass 
             
-            # Пауза между пакетами
             await asyncio.sleep(1.5)
 
-        # Финальное обновление прогресса
-        await status_msg.edit(content=f"✅ Анализ завершен! [{ '█' * 10 }] 100%\nОбработка результатов...")
+        await status_msg.edit(content=f"✅ Анализ завершен! [{'█' * 10 }] 100%\nОбработка результатов...")
 
         violations = all_violations
         log_analysis(f"Итого найдено нарушений: {len(violations)}", "INFO")
@@ -980,15 +976,12 @@ async def slash_analyze(
             await status_msg.edit(content="✅ Нарушений не обнаружено ни в одном из пакетов.")
             return
 
-        # 4. Формирование отчета
         report_lines = []
         max_chars = 1900
         final_provider_name = "Пакетный анализ (Multi-Model)"
         
         for i, v in enumerate(violations, 1):
-            # Очистка текста от упоминаний
             clean_content_text = re.sub(r'<@!?[0-9]+>', '@user', v['content'])
-            # Обрезка до 500 символов
             if len(clean_content_text) > 500:
                 clean_content_text = clean_content_text[:497] + "..."
             
@@ -996,7 +989,7 @@ async def slash_analyze(
             
             if len("".join(report_lines)) + len(line) > max_chars:
                 chunk = "".join(report_lines)
-                header = f"🚨 Отчет ({final_provider_name}): {len(violations)} нарушений\n\n{chunk}"
+                header = f" Отчет ({final_provider_name}): {len(violations)} нарушений\n\n{chunk}"
                 
                 if i == 1: 
                     await status_msg.edit(content=header)
@@ -1009,7 +1002,7 @@ async def slash_analyze(
         
         if report_lines:
             chunk = "".join(report_lines)
-            header = f"🚨 Отчет (окончание):\n\n{chunk}"
+            header = f" Отчет (окончание):\n\n{chunk}"
             await interaction.channel.send(header)
             
         await interaction.channel.send(f"✅ Анализ полностью завершен. Логи доступны через `/скачать_анализ`.")
@@ -1019,8 +1012,9 @@ async def slash_analyze(
         import traceback
         log_analysis(traceback.format_exc(), "ERROR")
         await interaction.followup.send(f"❌ Критическая ошибка. Лог сохранен. `/скачать_анализ`\nОшибка: {str(e)[:100]}", ephemeral=True)
+
 # ============================================================================
-# 💾 СЛЭШ-КОМАНДА "/скачать_анализ" (СКАЧАТЬ ЛОГИ)
+# 💾 СЛЭШ-КОМАНДА "/скачать_анализ"
 # ============================================================================
 
 @bot.slash_command(name="скачать_анализ", description="Скачать подробный лог последнего анализа (Только Owner)")
@@ -1110,7 +1104,7 @@ async def on_command_error(ctx, error):
 
 if __name__ == "__main__":
     try:
-        logger.info("🚀 Запуск PsIInka Bot v0.4.2-RoleFix...")
+        logger.info(" Запуск PsIInka Bot v0.4.4-Final...")
         bot.run(os.getenv("DISCORD_TOKEN"))
     except Exception as e:
-        logger.critical(f"💥 Критическая ошибка при запуске: {e}", exc_info=True) 
+        logger.critical(f"💥 Критическая ошибка при запуске: {e}", exc_info=True)
