@@ -893,7 +893,7 @@ async def slash_test(interaction: disnake.CommandInteraction):
     try:
         if not await check_access(interaction): return
         embed = disnake.Embed(title="Выбор режима теста", description="Нажмите кнопку для проверки:\n\n📊 После теста будет показан топ моделей по скорости ответа!", color=0xFF8844)
-        view = TestModeView(interaction)
+        view = TestModeView()
         await interaction.response.send_message(embed=embed, view=view)
     except Exception as e:
         logger.error(f"Error in /test: {e}", exc_info=True)
