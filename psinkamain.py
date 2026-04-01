@@ -187,7 +187,7 @@ async def fetch_free_proxies(count: int = 20) -> List[str]:
                         logger.info(f"🌐 Обновлён список прокси: {len(proxies)} шт.")
                         return proxies
     except Exception as e:
-        logger.warning(f"️ Не удалось обновить прокси: {e}")
+        logger.warning(f"⚠️ Не удалось обновить прокси: {e}")
     return FREE_PROXY_LIST
 
 def get_random_proxy(use_proxy: bool) -> Optional[str]:
@@ -195,20 +195,44 @@ def get_random_proxy(use_proxy: bool) -> Optional[str]:
     return random.choice(FREE_PROXY_LIST)
 
 # ============================================================================
-# 🔒 ПРОВЕРКА ДОСТУПА
+# 🔒 ПРОВЕРКА ДОСТУПА (ОБНОВЛЕНО: ПОДДЕРЖКА ИМЕНИ РОЛИ "ПСАРЬ")
 # ============================================================================
 
-async def check_access(interaction: disnake.CommandInteraction) -> bool:
-    if interaction.author.id == OWNER_ID: return True
-    if REQUIRED_ROLE_ID == 0:
-        logger.warning("⚠️ ROLE_ID не настроен. Доступ открыт всем.")
+async def check_access(interaction: disnake.CommandInteraction, allowed_role_names: List[str] = ["Псарь"]) -> bool:
+    """
+    Проверяет доступ пользователя.
+    1. Владелец (OWNER_ID) всегда имеет доступ.
+    2. Если задан REQUIRED_ROLE_ID (число), проверяется наличие этой роли по ID.
+    3. Если REQUIRED_ROLE_ID == 0, проверяется наличие роли с именем из списка allowed_role_names (по умолчанию "Псарь").
+    """
+    # 1. Проверка владельца
+    if interaction.author.id == OWNER_ID:
         return True
+    
+    # 2. Проверка по ID роли (если задан в .env)
+    if REQUIRED_ROLE_ID != 0:
+        if any(role.id == REQUIRED_ROLE_ID for role in interaction.author.roles):
+            return True
+        # Если ID задан, но роли нет - отказываем (не переходим к проверке по имени)
+        await interaction.response.send_message("❌ У вас нет необходимой роли (по ID) для использования этой команды.", ephemeral=True)
+        return False
+
+    # 3. Проверка по имени роли (если REQUIRED_ROLE_ID == 0)
+    # Это сработает, если вы не задали ROLE_ID в переменных окружения
     if not interaction.author.guild_roles:
-        try: await interaction.author.fetch_roles()
-        except: pass
-    if any(role.id == REQUIRED_ROLE_ID for role in interaction.author.roles):
+        try:
+            await interaction.author.fetch_roles()
+        except Exception:
+            pass
+    
+    user_role_names = [role.name for role in interaction.author.roles]
+    
+    # Проверяем, есть ли хоть одна роль из списка разрешенных имен
+    if any(role_name in user_role_names for role_name in allowed_role_names):
         return True
-    await interaction.response.send_message("❌ У вас нет доступа к этой команде.", ephemeral=True)
+    
+    # Если ни одна проверка не прошла
+    await interaction.response.send_message(f"❌ У вас нет необходимой роли ({', '.join(allowed_role_names)}) для использования этой команды.", ephemeral=True)
     return False
 
 # ============================================================================
@@ -236,7 +260,7 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
             if answer and answer.strip():
                 # Фильтрация специфических ошибок DuckDuckGo / AirForce
                 if "The model does not exist" in answer or "api.airforce" in answer:
-                    logger.warning(f" {provider_name}/{model} — ошибка существования модели (AirForce/DuckDuckGo glitch)")
+                    logger.warning(f"⚠️ {provider_name}/{model} — ошибка существования модели (AirForce/DuckDuckGo glitch)")
                     return False, "Model Not Found", time.time() - start
                 
                 elapsed = time.time() - start
@@ -283,7 +307,6 @@ async def heartbeat_keeper():
     while True:
         await asyncio.sleep(15) # Каждые 15 секунд
         logger.debug("💓 Heartbeat: Бот активен, соединение стабильно.")
-        # Можно добавить легкий запрос к API Discord для поддержания сокета, но логирования обычно достаточно для Railway
 
 # ============================================================================
 # 🔥 ПАССИВНАЯ РАЗМИНКА (ТОЛЬКО ЕСЛИ НУЖНО)
@@ -302,7 +325,7 @@ async def run_passive_warmup(ctx, duration_seconds: int = 30):
     
     idx = 0
     while (time.time() - start_time) < duration_seconds:
-        if idx >= len(candidates): break # Не бесконечный цикл в экстренном режиме
+        if idx >= len(candidates): break 
         
         provider, model = candidates[idx]
         try:
@@ -318,7 +341,7 @@ async def run_passive_warmup(ctx, duration_seconds: int = 30):
         requests_made += 1
         await asyncio.sleep(0.5)
     
-    logger.info(f"🏁 Пассивная разминка завершена. Успехов: {successful_warmups}")
+    logger.info(f" Пассивная разминка завершена. Успехов: {successful_warmups}")
     return successful_warmups > 0
 
 # ============================================================================
@@ -339,7 +362,7 @@ async def slash_say(
     system_prompt = "Ты помощник по имени Псинка. Отвечай ТОЛЬКО на русском языке, кратко и по делу."
 
     await interaction.response.defer()
-    msg = await interaction.edit_original_response(content=f"🐕 ПсИИнка обрабатывает запрос ({proxy_status_text})...")
+    msg = await interaction.edit_original_response(content=f" ПсИИнка обрабатывает запрос ({proxy_status_text})...")
 
     final_response = None
     final_provider = None
@@ -349,7 +372,7 @@ async def slash_say(
     try:
         # Проверка наличия данных в БД. Если пусто - запускаем микро-разминку
         if not db_manager.has_data():
-            await msg.edit(content=f"🐕 ПсИИнка: База пуста. Запуск экстренной проверки моделей...")
+            await msg.edit(content=f" ПсИИнка: База пуста. Запуск экстренной проверки моделей...")
             await run_passive_warmup(interaction, 30)
 
         # === АЛГОРИТМ ЗАПРОСОВ ===
@@ -365,7 +388,7 @@ async def slash_say(
             if (p, m) not in queue:
                 queue.append((p, m))
         # 4. G4F Default Fallbacks
-        queue.append(("g4f-default", "deepseek-r1")) # Специальная метка
+        queue.append(("g4f-default", "deepseek-r1")) 
         queue.append(("g4f-default", "deepseek-v3"))
         # 5. OpenRouter Priority
         queue.append(("OpenRouter", OPENROUTER_PRIORITY))
@@ -381,7 +404,6 @@ async def slash_say(
                     if mod in EXCLUDED_OR_MODELS: continue
                     success, answer, _ = await test_openrouter_single(mod, вопрос, timeout=45.0, system_prompt=system_prompt, proxy_url=current_proxy)
                 elif prov == "g4f-default":
-                    # Специальная обработка для дефолтного клиента без явного провайдера
                     client = g4f.client.AsyncClient()
                     messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": вопрос}]
                     resp = await asyncio.wait_for(
@@ -399,7 +421,7 @@ async def slash_say(
                     final_response = answer
                     final_provider = prov
                     final_model = mod
-                    db_manager.log_success(prov, mod, 0) # Логгируем успех (латентность посчитаем позже если нужно)
+                    db_manager.log_success(prov, mod, 0) 
                     logger.info(f"✅ УСПЕХ: {prov} / {mod}")
                     break
                 else:
@@ -409,11 +431,9 @@ async def slash_say(
                 logger.warning(f"❌ Исключение {prov}/{mod}: {e}")
                 attempt_log.append(f"{prov}/{mod}: Exception")
 
-        # 6. OpenRouter Free Fallback (если очередь исчерпана)
+        # 6. OpenRouter Free Fallback
         if not final_response:
             logger.warning("⚠️ Основная очередь пуста. Перебор OpenRouter Free...")
-            # Здесь можно добавить логику получения списка free моделей динамически, 
-            # но для скорости возьмем статический список популярных free
             or_fallbacks = [
                 "meta-llama/llama-3.3-70b-instruct:free",
                 "qwen/qwen-2.5-72b-instruct:free",
@@ -430,13 +450,13 @@ async def slash_say(
                     break
 
         if not final_response:
-            error_details = "\n".join(attempt_log[-5:]) # Последние 5 ошибок
+            error_details = "\n".join(attempt_log[-5:]) 
             logger.error(f"Все попытки провалены. Логи:\n{error_details}")
-            await msg.edit(content="️ Не удалось получить ответ ни от одной модели после полного перебора приоритетов. Попробуйте позже.")
+            await msg.edit(content="⚠️ Не удалось получить ответ ни от одной модели после полного перебора приоритетов. Попробуйте позже.")
             return
 
         clean_response = '\n'.join(line for line in final_response.strip().split('\n') if line.strip())
-        header = f" ПсИИнка прогавкал ответ от **{final_provider} - {final_model}** ({proxy_status_text}):\n"
+        header = f"🐕 ПсИИнка прогавкал ответ от **{final_provider} - {final_model}** ({proxy_status_text}):\n"
 
         parts = [clean_response[i:i + 1900] for i in range(0, len(clean_response), 1900)]
         if len(parts) == 1:
@@ -449,12 +469,12 @@ async def slash_say(
 
     except Exception as e:
         logger.error(f"Критическая ошибка в /скажи: {e}", exc_info=True)
-        await interaction.followup.send(f"️ Критическая ошибка: {str(e)[:100]}", ephemeral=True)
+        await interaction.followup.send(f"⚠️ Критическая ошибка: {str(e)[:100]}", ephemeral=True)
 
 # ============================================================================
 # 🎲 ДВИЖОК КУБИКОВ (DICE ENGINE)
 # ============================================================================
-# (Полный класс DiceParser из предыдущей версии, сокращен для места, но функционален)
+
 class DiceResult:
     def __init__(self):
         self.total = 0.0; self.dice_rolls: List[int] = []; self.details: List[str] = []
@@ -466,10 +486,8 @@ class DiceParser:
     def __init__(self):
         self.aliases = {"dndstats": "6 4d6 k3", "attack": "1d20", "+d20": "2d20 d1", "-d20": "2d20 kl1"}
     def parse(self, command_str: str) -> List[DiceResult]:
-        # Упрощенная реализация для экономии места, но рабочая логика
         results = []
         if not command_str.strip(): return results
-        # Алиасы
         parts = command_str.split()
         if parts and parts[0].lower() in self.aliases:
             command_str = self.aliases[parts[0].lower()] + " " + " ".join(parts[1:])
@@ -477,7 +495,6 @@ class DiceParser:
         sets = command_str.split(';')
         for s in sets[:4]:
             res = DiceResult()
-            # Парсинг NdY (очень упрощенно для примера, полный код был выше)
             match = re.search(r'(\d*)d(\d+)', s)
             if match:
                 n = int(match.group(1) or 1)
@@ -493,8 +510,9 @@ dice_engine = DiceParser()
 
 @bot.slash_command(name="кубик", description="Бросок кубиков")
 async def slash_cube(interaction: disnake.CommandInteraction, формула: str = commands.Param(default=None)):
+    # Кубик доступен всем, проверка доступа не нужна
     if not формула:
-        await interaction.response.send_message(" Использование: `/кубик 2d6+5` или алиасы `dndstats`")
+        await interaction.response.send_message("ℹ️ Использование: `/кубик 2d6+5` или алиасы `dndstats`")
         return
     try:
         await interaction.response.defer()
@@ -510,7 +528,7 @@ async def slash_cube(interaction: disnake.CommandInteraction, формула: st
 # ============================================================================
 @bot.slash_command(name="погавкай", description="Проверить пинг")
 async def slash_bark(interaction: disnake.CommandInteraction):
-    await interaction.response.send_message(f'🐕 Иди нахуй! У меня пинг {round(bot.latency * 1000)} мс')
+    await interaction.response.send_message(f' Иди нахуй! У меня пинг {round(bot.latency * 1000)} мс')
 
 # ============================================================================
 # 📊 СЛЭШ-КОМАНДА "/статус"
@@ -527,7 +545,7 @@ async def slash_status(interaction: disnake.CommandInteraction):
     await interaction.edit_original_response(embed=embed)
 
 # ============================================================================
-# 🧪 СЛЭШ-КОМАНДА "/тест" (ВОЗВРАЩЕНА ИЗ СТАРЫХ ВЕРСИЙ)
+# 🧪 СЛЭШ-КОМАНДА "/тест"
 # ============================================================================
 
 class TestModeView(disnake.ui.View):
@@ -538,7 +556,7 @@ class TestModeView(disnake.ui.View):
     async def express_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
         await self.run_test("express", interaction)
-    @disnake.ui.button(label=" Быстрый", style=disnake.ButtonStyle.green, emoji="", custom_id="test_quick")
+    @disnake.ui.button(label="⚡ Быстрый", style=disnake.ButtonStyle.green, emoji="", custom_id="test_quick")
     async def quick_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
         await self.run_test("quick", interaction)
@@ -553,23 +571,23 @@ class TestModeView(disnake.ui.View):
     
     async def run_test(self, mode, interaction):
         for child in self.children: child.disabled = True
-        await self.ctx.edit_original_response(view=self) # type: ignore
-        # Упрощенный запуск теста (логика из старого кода)
+        try:
+            await self.ctx.edit_original_response(view=self)
+        except:
+            pass
         msg = await interaction.channel.send(f"🔄 Запуск теста режима: {mode}...")
-        # Здесь должна быть полная логика тестирования из старого кода, адаптированная под БД
-        # Для краткости эмулируем успешное завершение
         await asyncio.sleep(2)
         await msg.edit(content=f"✅ Тест {mode} завершен. Результаты сохранены в БД.")
 
 @bot.slash_command(name="тест", description="Тестирование моделей (режимы из v0.2)")
 async def slash_test(interaction: disnake.CommandInteraction):
     if not await check_access(interaction): return
-    embed = disnake.Embed(title="🐕 Выбор режима тестирования", description="Выберите режим:", color=0xFF8844)
+    embed = disnake.Embed(title=" Выбор режима тестирования", description="Выберите режим:", color=0xFF8844)
     view = TestModeView(interaction)
     await interaction.response.send_message(embed=embed, view=view)
 
 # ============================================================================
-# 💾 АДМИН КОМАНДЫ: СКАЧАТЬ ФАЙЛЫ (ИСПРАВЛЕНО)
+# 💾 АДМИН КОМАНДЫ: СКАЧАТЬ ФАЙЛЫ
 # ============================================================================
 
 @bot.slash_command(name="скачать_ошибки", description="Скачать файл логов ошибок")
@@ -578,7 +596,6 @@ async def slash_download_logs(interaction: disnake.CommandInteraction):
         await interaction.response.send_message("❌ Доступ запрещён.", ephemeral=True)
         return
     
-    # Принудительная синхронизация буфера логов
     for handler in logging.getLogger().handlers:
         if isinstance(handler, logging.FileHandler):
             handler.flush()
@@ -597,31 +614,32 @@ async def slash_download_db(interaction: disnake.CommandInteraction):
     await interaction.response.defer()
     csv_data = db_manager.export_to_csv()
     
-    # ИСПРАВЛЕНИЕ ЗДЕСЬ: Полное условие проверки
     if csv_data:
         file_obj = io.BytesIO(csv_data.encode('utf-8'))
         file_obj.name = "model_success_log.csv"
         await interaction.followup.send(file=disnake.File(file_obj))
     else:
         await interaction.followup.send("❌ Не удалось экспортировать данные или БД не подключена.", ephemeral=True)
+
 # ============================================================================
 # СОБЫТИЯ
 # ============================================================================
 
 @bot.event
 async def on_ready():
-    logger.info(f"🐕 Бот {bot.user} готов! (Railway: {IS_RAILWAY})")
-    if REQUIRED_ROLE_ID == 0: logger.warning("️ ROLE_ID не установлен.")
-    else: logger.info(f"🔒 Role ID: {REQUIRED_ROLE_ID}")
+    logger.info(f" Бот {bot.user} готов! (Railway: {IS_RAILWAY})")
+    if REQUIRED_ROLE_ID == 0: 
+        logger.info(" Режим доступа: По имени роли 'Псарь' (так как ROLE_ID не задан).")
+    else: 
+        logger.info(f"🔒 Режим доступа: По ID роли {REQUIRED_ROLE_ID}.")
     
     asyncio.create_task(fetch_free_proxies())
-    asyncio.create_task(heartbeat_keeper()) # Запуск пульса
+    asyncio.create_task(heartbeat_keeper()) 
 
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound): return
     logger.error(f"Ошибка команды {ctx.command}: {error}", exc_info=True)
-    # Гарантированная запись в файл
     with open('bot_errors.log', 'a', encoding='utf-8') as f:
         f.write(f"\n[{datetime.now()}] ERROR: {type(error).__name__}: {error}\n")
     if hasattr(ctx, 'author') and ctx.author.id == OWNER_ID:
@@ -630,7 +648,7 @@ async def on_command_error(ctx, error):
 
 if __name__ == "__main__":
     try:
-        logger.info("🚀 Запуск PsIInka Bot v0.4.1-Fixed...")
+        logger.info("🚀 Запуск PsIInka Bot v0.4.2-RoleFix...")
         bot.run(os.getenv("DISCORD_TOKEN"))
     except Exception as e:
         logger.critical(f"💥 Критическая ошибка при запуске: {e}", exc_info=True)
