@@ -137,7 +137,10 @@ db_manager = DBManager(SessionLocal)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(), logging.FileHandler('bot_errors.log', encoding='utf-8', delay=True)]
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bot_errors.log', encoding='utf-8', delay=True)
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -158,19 +161,35 @@ ANALYSIS_SYSTEM_PROMPT = """
 ФОРМАТ: Верни только ID сообщений через запятую (например: 5, 12) или NONE. Без пояснений.
 """
 
-FREE_PROXY_LIST = ["http://103.152.112.162:80"] # Упрощено для стабильности
+FREE_PROXY_LIST = [
+    "http://103.152.112.162:80", "http://185.217.136.234:8080",
+    "http://47.88.29.109:8080", "http://103.167.135.110:80", "http://185.162.230.55:80",
+]
 
-async def fetch_free_proxies(count: int = 5):
-    return FREE_PROXY_LIST # Заглушка для стабильности
+async def fetch_free_proxies(count: int = 20) -> List[str]:
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all&limit={count}"
+            async with session.get(url, timeout=10) as response:
+                if response.status == 200:
+                    text = await response.text()
+                    proxies = [f"http://{p.strip()}" for p in text.split('\n') if p.strip() and ':' in p]
+                    if proxies:
+                        logger.info(f" Обновлён список прокси: {len(proxies)} шт.")
+                        return proxies
+    except Exception as e:
+        logger.warning(f"⚠️ Не удалось обновить прокси: {e}")
+    return FREE_PROXY_LIST
 
 def get_random_proxy(use_proxy: bool) -> Optional[str]:
-    return random.choice(FREE_PROXY_LIST) if use_proxy else None
+    if not use_proxy: return None
+    return random.choice(FREE_PROXY_LIST)
 
 async def check_access(interaction: disnake.CommandInteraction, allowed_role_names: List[str] = ["Псарь"]) -> bool:
     if interaction.author.id == OWNER_ID: return True
     if REQUIRED_ROLE_ID != 0:
         if any(role.id == REQUIRED_ROLE_ID for role in interaction.author.roles): return True
-        await interaction.response.send_message(" Нет роли (по ID).", ephemeral=True)
+        await interaction.response.send_message("❌ Нет роли (по ID).", ephemeral=True)
         return False
     user_role_names = [role.name for role in interaction.author.roles]
     if any(role_name in user_role_names for role_name in allowed_role_names): return True
@@ -178,27 +197,29 @@ async def check_access(interaction: disnake.CommandInteraction, allowed_role_nam
     return False
 
 # ============================================================================
-# 🤖 ЗАПРОСЫ К МОДЕЛЯМ (ИСПРАВЛЕНО)
+#  ЗАПРОСЫ К МОДЕЛЯМ
 # ============================================================================
 
 async def make_g4f_request(provider_name: str, model: str, prompt: str,
-                           timeout: float = 40.0, system_prompt: str = None) -> Tuple[bool, str, float]:
+                           timeout: float = 40.0, system_prompt: str = None, proxy_url: str = None) -> Tuple[bool, str, float]:
     start = time.time()
     messages = []
     if system_prompt: messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
     
+    provider_arg = getattr(g4f.Provider, provider_name, None) if provider_name else None
+    
+    def sync_call():
+        return g4f.ChatCompletion.create(
+            model=model,
+            messages=messages,
+            provider=provider_arg,
+            timeout=int(timeout)
+        )
+
     try:
-        # Используем синхронный метод внутри async функции для простоты оборачивания
         response = await asyncio.wait_for(
-            asyncio.to_thread(
-                lambda: g4f.ChatCompletion.create(
-                    model=model,
-                    messages=messages,
-                    provider=getattr(g4f.Provider, provider_name, None) if provider_name else None,
-                    timeout=int(timeout)
-                )
-            ),
+            asyncio.to_thread(sync_call),
             timeout=timeout
         )
         
@@ -214,7 +235,7 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
     except Exception as e:
         return False, str(e)[:100], time.time() - start
 
-async def test_openrouter_single(model: str, prompt: str, timeout: float = 35.0, system_prompt: str = None):
+async def test_openrouter_single(model: str, prompt: str, timeout: float = 35.0, system_prompt: str = None, proxy_url: str = None):
     openrouter_token = os.getenv('OPENR_TOKEN')
     if not openrouter_token: return False, "No Token", 0.0
     start = time.time()
@@ -224,14 +245,17 @@ async def test_openrouter_single(model: str, prompt: str, timeout: float = 35.0,
     
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_token)
     
+    def sync_call():
+        return client.chat.completions.create(
+            model=model, 
+            messages=messages, 
+            timeout=int(timeout),
+            extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot", "X-OpenRouter-Title": "PsIInka Bot"}
+        )
+
     try:
         response = await asyncio.wait_for(
-            asyncio.to_thread(
-                lambda: client.chat.completions.create(
-                    model=model, messages=messages, timeout=int(timeout),
-                    extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot", "X-OpenRouter-Title": "PsIInka Bot"}
-                )
-            ),
+            asyncio.to_thread(sync_call),
             timeout=timeout
         )
         if response.choices and len(response.choices) > 0:
@@ -248,7 +272,7 @@ async def heartbeat_keeper():
         logger.debug("💓 Heartbeat OK")
 
 async def run_passive_warmup(ctx, duration_seconds: int = 30):
-    logger.info("🔥 Warmup start...")
+    logger.info(" Warmup start...")
     start_time = time.time()
     candidates = PRIORITY_TIER_1 + PRIORITY_TIER_2
     idx = 0
@@ -262,71 +286,133 @@ async def run_passive_warmup(ctx, duration_seconds: int = 30):
         await asyncio.sleep(0.5)
 
 # ============================================================================
+# 🎲 ДВИЖОК КУБИКОВ (ВОЗВРАЩЕН КЛАСС DiceResult)
+# ============================================================================
+
+class DiceResult:
+    def __init__(self):
+        self.total = 0.0
+        self.dice_rolls: List[int] = []
+        self.details: List[str] = []
+        self.successes = 0
+        self.failures = 0
+        self.botches = 0
+        self.is_private = False
+        self.comment = ""
+        self.simplified = False
+        self.no_results = False
+        self.unsorted = False
+        self.set_results: List[float] = []
+
+class DiceParser:
+    def __init__(self):
+        self.aliases = {"dndstats": "6 4d6 k3", "attack": "1d20", "+d20": "2d20 d1", "-d20": "2d20 kl1"}
+    
+    def parse(self, command_str: str) -> List[DiceResult]:
+        results = []
+        if not command_str.strip(): return results
+        parts = command_str.split()
+        if parts and parts[0].lower() in self.aliases:
+            command_str = self.aliases[parts[0].lower()] + " " + " ".join(parts[1:])
+        
+        sets = command_str.split(';')
+        for s in sets[:4]:
+            res = DiceResult()
+            match = re.search(r'(\d*)d(\d+)', s)
+            if match:
+                n = int(match.group(1) or 1)
+                y = int(match.group(2))
+                rolls = [random.randint(1, y) for _ in range(n)]
+                res.dice_rolls = rolls
+                res.total = sum(rolls)
+                res.details = f"Бросок: {rolls}"
+                results.append(res)
+        return results
+
+dice_engine = DiceParser()
+
+# ============================================================================
 # 💬 КОМАНДЫ
 # ============================================================================
 
 @bot.slash_command(name="скажи", description="Запрос к ИИ")
 async def slash_say(interaction: disnake.CommandInteraction, вопрос: str = commands.Param(min_length=1), прокси: str = commands.Param(choices=["Да", "Нет"], default="Нет")):
     if not await check_access(interaction): return
-    await interaction.response.defer()
-    msg = await interaction.edit_original_response(content="🔄 Обработка...")
-    
-    queue = PRIORITY_TIER_1 + PRIORITY_TIER_2
-    queue.append(("OpenRouter", OPENROUTER_PRIORITY))
-    queue.append(("g4f-default", "deepseek-r1"))
-    queue.append(("g4f-default", "deepseek-v3"))
-    
-    system_prompt = "Ты Псинка. Отвечай кратко на русском."
-    final_response = None
-    
-    for prov, mod in queue:
-        try:
-            if prov == "OpenRouter":
-                ok, ans, _ = await test_openrouter_single(mod, вопрос, timeout=45.0, system_prompt=system_prompt)
-            else:
-                ok, ans, _ = await make_g4f_request(prov, mod, вопрос, timeout=45.0, system_prompt=system_prompt)
-            
-            if ok and ans:
-                final_response = ans
-                db_manager.log_success(prov, mod, 0)
-                break
-        except Exception as e:
-            logger.warning(f"Error {prov}/{mod}: {e}")
+    try:
+        await interaction.response.defer()
+        msg = await interaction.edit_original_response(content=" Обработка...")
+        
+        queue = PRIORITY_TIER_1 + PRIORITY_TIER_2
+        queue.append(("OpenRouter", OPENROUTER_PRIORITY))
+        queue.append(("g4f-default", "deepseek-r1"))
+        queue.append(("g4f-default", "deepseek-v3"))
+        
+        system_prompt = "Ты Псинка. Отвечай кратко на русском."
+        final_response = None
+        final_prov = "?"
+        final_mod = "?"
+        
+        for prov, mod in queue:
+            try:
+                if prov == "OpenRouter":
+                    ok, ans, _ = await test_openrouter_single(mod, вопрос, timeout=45.0, system_prompt=system_prompt)
+                else:
+                    ok, ans, _ = await make_g4f_request(prov, mod, вопрос, timeout=45.0, system_prompt=system_prompt)
+                
+                if ok and ans:
+                    final_response = ans
+                    final_prov, final_mod = prov, mod
+                    db_manager.log_success(prov, mod, 0)
+                    break
+            except Exception as e:
+                logger.warning(f"Error {prov}/{mod}: {e}")
 
-    if not final_response:
-        await msg.edit(content="❌ Не удалось получить ответ.")
-        return
-    
-    await msg.edit(content=f"🐕 Ответ ({prov}/{mod}):\n{final_response[:1900]}")
+        if not final_response:
+            await msg.edit(content="❌ Не удалось получить ответ.")
+            return
+        
+        await msg.edit(content=f"🐕 Ответ ({final_prov}/{final_mod}):\n{final_response[:1900]}")
+    except Exception as e:
+        logger.error(f"Critical error in /say: {e}", exc_info=True)
+        if interaction.response.is_done():
+            await interaction.followup.send(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
 
 @bot.slash_command(name="кубик", description="Бросок кубиков")
 async def slash_cube(interaction: disnake.CommandInteraction, формула: str = None):
-    if not формула:
-        await interaction.response.send_message("Используйте: `/кубик 2d6`")
-        return
-    await interaction.response.defer()
-    # Простая реализация
-    match = re.search(r'(\d*)d(\d+)', формула)
-    if match:
-        n = int(match.group(1) or 1)
-        y = int(match.group(2))
-        rolls = [random.randint(1, y) for _ in range(n)]
-        await interaction.followup.send(f"🎲 Результат: {sum(rolls)} ({rolls})")
-    else:
-        await interaction.followup.send("❌ Неверный формат.")
+    try:
+        if not формула:
+            await interaction.response.send_message("ℹ️ Использование: `/кубик 2d6+5` или алиасы `dndstats`")
+            return
+        await interaction.response.defer()
+        results = dice_engine.parse(формула)
+        if not results: raise ValueError("Не удалось разобрать.")
+        txt = "\n".join([f"**{r.total}** `({', '.join(map(str, r.dice_rolls))})`" for r in results])
+        await interaction.followup.send(f" Результат:\n{txt}")
+    except Exception as e:
+        logger.error(f"Error in /cube: {e}", exc_info=True)
+        await interaction.followup.send(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
 
 @bot.slash_command(name="погавкай", description="Пинг")
 async def slash_bark(interaction: disnake.CommandInteraction):
-    await interaction.response.send_message(f'🐕 Пинг: {round(bot.latency * 1000)} мс')
+    try:
+        await interaction.response.send_message(f' Пинг: {round(bot.latency * 1000)} мс')
+    except Exception as e:
+        logger.error(f"Error in /bark: {e}", exc_info=True)
 
 @bot.slash_command(name="статус", description="Статистика")
 async def slash_status(interaction: disnake.CommandInteraction):
-    if not await check_access(interaction): return
-    await interaction.response.defer()
-    top = db_manager.get_top_models(3)
-    txt = "\n".join([f"{i+1}. `{p}` / `{m}`" for i,(p,m,_) in enumerate(top)]) if top else "Нет данных"
-    embed = disnake.Embed(title="📊 Статус", description=txt, color=0x00FF88)
-    await interaction.edit_original_response(embed=embed)
+    try:
+        if not await check_access(interaction): return
+        await interaction.response.defer()
+        top = db_manager.get_top_models(3)
+        txt = "\n".join([f"{i+1}. `{p}` / `{m}`" for i,(p,m,_) in enumerate(top)]) if top else "Нет данных"
+        embed = disnake.Embed(title=" Статус", description=txt, color=0x00FF88)
+        await interaction.edit_original_response(embed=embed)
+    except Exception as e:
+        logger.error(f"Error in /status: {e}", exc_info=True)
+        await interaction.followup.send(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
 
 # ============================================================================
 # 🧪 ТЕСТ (ИСПРАВЛЕНЫ ЭМОДЗИ)
@@ -337,7 +423,7 @@ class TestModeView(disnake.ui.View):
         super().__init__(timeout=300)
         self.ctx = ctx
     
-    @disnake.ui.button(label="⚡ Экспресс", style=disnake.ButtonStyle.green, emoji="⚡", custom_id="test_express")
+    @disnake.ui.button(label="⚡ Экспресс", style=disnake.ButtonStyle.green, emoji="", custom_id="test_express")
     async def express_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
         await interaction.channel.send("✅ Экспресс тест запущен.")
@@ -347,7 +433,7 @@ class TestModeView(disnake.ui.View):
         await interaction.response.defer()
         await interaction.channel.send("✅ Быстрый тест запущен.")
 
-    @disnake.ui.button(label=" OpenRouter", style=disnake.ButtonStyle.blurple, emoji="", custom_id="test_openrouter")
+    @disnake.ui.button(label="🌐 OpenRouter", style=disnake.ButtonStyle.blurple, emoji="🔮", custom_id="test_openrouter")
     async def openrouter_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
         await interaction.channel.send("✅ OpenRouter тест запущен.")
@@ -359,13 +445,20 @@ class TestModeView(disnake.ui.View):
 
 @bot.slash_command(name="тест", description="Тестирование")
 async def slash_test(interaction: disnake.CommandInteraction):
-    if not await check_access(interaction): return
-    embed = disnake.Embed(title="Выбор режима", description="Нажмите кнопку:", color=0xFF8844)
-    view = TestModeView(interaction)
-    await interaction.response.send_message(embed=embed, view=view)
+    try:
+        if not await check_access(interaction): return
+        embed = disnake.Embed(title="Выбор режима", description="Нажмите кнопку:", color=0xFF8844)
+        view = TestModeView(interaction)
+        await interaction.response.send_message(embed=embed, view=view)
+    except Exception as e:
+        logger.error(f"Error in /test: {e}", exc_info=True)
+        if interaction.response.is_done():
+            await interaction.followup.send(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
 
 # ============================================================================
-#  АНАЛИЗ
+# 🔍 АНАЛИЗ (ПОЛНЫЙ ФУНКЦИОНАЛ + ПРОКСИ ФОЛЛБЕК)
 # ============================================================================
 
 ANALYSIS_LOG_FILE = "analysis_debug.log"
@@ -450,9 +543,14 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
         status_msg = await interaction.edit_original_response(content=f"🔄 Анализ: [░░░░░░░░░░] 0% (0/{total_batches})\nПодготовка...")
         
         all_violations = []
-        queue = PRIORITY_TIER_1 + PRIORITY_TIER_2
-        fallback_queue = [OPENROUTER_PRIORITY, "meta-llama/llama-3.3-70b-instruct:free"]
+        
+        # Очереди
+        main_queue = PRIORITY_TIER_1 + PRIORITY_TIER_2
+        or_fallback = [OPENROUTER_PRIORITY, "meta-llama/llama-3.3-70b-instruct:free", "qwen/qwen-2.5-72b-instruct:free"]
         g4f_fallback = [("g4f-default", "deepseek-r1"), ("g4f-default", "deepseek-v3")]
+        
+        # Полный список для прокси-фоллбека
+        proxy_queue = main_queue + [("OpenRouter", m) for m in or_fallback] + g4f_fallback
 
         for i in range(0, len(messages_data), BATCH_SIZE):
             batch_data = messages_data[i : i + BATCH_SIZE]
@@ -463,21 +561,29 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
             final_answer = None
             success = False
             used_provider = "Unknown"
+            use_proxy_mode = False
 
-            # --- ИСПРАВЛЕННЫЙ ВЫЗОВ ЧЕРЕЗ SYNC WRAPPER ---
+            # Helper for async execution in thread
             def run_async_in_thread(async_func, *args, **kwargs):
                 return asyncio.run(async_func(*args, **kwargs))
 
-            # 1. Основная очередь
-            for prov, mod in queue:
+            # Функция попытки запроса
+            async def try_request(prov, mod, use_proxy=False):
+                proxy_str = get_random_proxy(True) if use_proxy else None
+                if prov == "OpenRouter":
+                    return await test_openrouter_single(mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
+                else:
+                    return await make_g4f_request(prov, mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT, proxy_url=proxy_str)
+
+            # 1. Основная попытка
+            for prov, mod in main_queue:
                 try:
-                    # Обновляем статус
                     percent = int(((current_batch - 1) / total_batches) * 100)
                     bar = "█" * int(10 * (current_batch - 1) // total_batches) + "░" * (10 - int(10 * (current_batch - 1) // total_batches))
                     await status_msg.edit(content=f"🔄 Анализ: [{bar}] {percent}% ({current_batch-1}/{total_batches})\nПопытка: {prov}...")
 
                     ok, ans, _ = await asyncio.wait_for(
-                        asyncio.to_thread(run_async_in_thread, make_g4f_request, prov, mod, user_prompt, 50.0, ANALYSIS_SYSTEM_PROMPT),
+                        asyncio.to_thread(run_async_in_thread, try_request, prov, mod, False),
                         timeout=55.0
                     )
                     if ok:
@@ -491,46 +597,61 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
 
             # 2. OpenRouter резерв
             if not success:
-                openrouter_token = os.getenv('OPENR_TOKEN')
-                if openrouter_token:
-                    client_or = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_token)
-                    for or_model in fallback_queue:
-                        try:
-                            def or_req():
-                                return client_or.chat.completions.create(
-                                    model=or_model,
-                                    messages=[{"role": "system", "content": ANALYSIS_SYSTEM_PROMPT}, {"role": "user", "content": user_prompt}],
-                                    timeout=50,
-                                    extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot", "X-OpenRouter-Title": "PsIInka Bot"}
-                                )
-                            resp = await asyncio.wait_for(asyncio.to_thread(or_req), timeout=55.0)
-                            if resp.choices:
-                                final_answer = resp.choices[0].message.content
-                                used_provider = f"OpenRouter ({or_model})"
-                                success = True
-                                break
-                        except Exception as e:
-                            log_analysis(f"OR Error {or_model}: {e}", "DEBUG")
-                            continue
-
-            # 3. G4F Default крайний резерв
-            if not success:
-                for prov, mod in g4f_fallback:
+                for or_model in or_fallback:
                     try:
                         ok, ans, _ = await asyncio.wait_for(
-                            asyncio.to_thread(run_async_in_thread, make_g4f_request, prov, mod, user_prompt, 50.0, ANALYSIS_SYSTEM_PROMPT),
+                            asyncio.to_thread(run_async_in_thread, try_request, "OpenRouter", or_model, False),
                             timeout=55.0
                         )
                         if ok:
                             final_answer = ans
-                            used_provider = f"{prov} ({mod}) [LAST]"
+                            used_provider = f"OpenRouter ({or_model})"
                             success = True
                             break
                     except: continue
 
+            # 3. G4F Default резерв
+            if not success:
+                for prov, mod in g4f_fallback:
+                    try:
+                        ok, ans, _ = await asyncio.wait_for(
+                            asyncio.to_thread(run_async_in_thread, try_request, prov, mod, False),
+                            timeout=55.0
+                        )
+                        if ok:
+                            final_answer = ans
+                            used_provider = f"{prov} ({mod})"
+                            success = True
+                            break
+                    except: continue
+
+            # 4. КРАЙНИЙ СЛУЧАЙ: ПРОКСИ РЕЖИМ
+            if not success:
+                log_analysis(f"️ Пакет {current_batch}: Все обычные методы failed. Активация PROXY MODE.", "WARNING")
+                await status_msg.edit(content=f"🔄 Анализ: [{bar}] {percent}% ({current_batch-1}/{total_batches})\n⚠️ ОШИБКИ. ПОДКЛЮЧЕНИЕ ЧЕРЕЗ ПРОКСИ...")
+                
+                for prov, mod in proxy_queue:
+                    try:
+                        # Обновляем статус с указанием прокси
+                        await status_msg.edit(content=f"🔄 Анализ: [{bar}] {percent}% ({current_batch-1}/{total_batches})\n Прокси: {prov}...")
+                        
+                        ok, ans, _ = await asyncio.wait_for(
+                            asyncio.to_thread(run_async_in_thread, try_request, prov, mod, True), # True = use proxy
+                            timeout=60.0 # Чуть больше таймаут для прокси
+                        )
+                        if ok:
+                            final_answer = ans
+                            used_provider = f"{prov} ({mod}) [PROXY]"
+                            success = True
+                            break
+                    except Exception as e:
+                        log_analysis(f"Proxy Error {prov}/{mod}: {e}", "DEBUG")
+                        continue
+
             if not success:
                 final_answer = "NONE"
                 used_provider = "NO_RESPONSE"
+                log_analysis(f"❌ Пакет {current_batch}: Полностью неудачно даже с прокси.", "ERROR")
 
             batch_violations = parse_ai_response(final_answer, batch_data)
             all_violations.extend(batch_violations)
@@ -575,9 +696,14 @@ async def slash_analyze(interaction: disnake.CommandInteraction, канал: dis
         log_analysis(f"CRITICAL ERROR: {e}", "ERROR")
         import traceback
         log_analysis(traceback.format_exc(), "ERROR")
-        await interaction.followup.send(f"❌ Ошибка: {str(e)[:100]}", ephemeral=True)
+        logger.error(f"Critical error in /analyze: {e}", exc_info=True)
+        await interaction.followup.send(f"❌ Критическая ошибка. Лог сохранен. `/скачать_анализ`\nОшибка: {str(e)[:100]}", ephemeral=True)
 
-@bot.slash_command(name="скачать_анализ", description="Скачать лог")
+# ============================================================================
+# 💾 АДМИН КОМАНДЫ: СКАЧАТЬ ФАЙЛЫ
+# ============================================================================
+
+@bot.slash_command(name="скачать_анализ", description="Скачать лог анализа")
 async def slash_download_analysis_log(interaction: disnake.CommandInteraction):
     if interaction.author.id != OWNER_ID: return
     await interaction.response.defer()
@@ -586,11 +712,78 @@ async def slash_download_analysis_log(interaction: disnake.CommandInteraction):
     else:
         await interaction.followup.send("❌ Файл не найден.", ephemeral=True)
 
+@bot.slash_command(name="скачать_ошибки", description="Скачать общий лог ошибок бота")
+async def slash_download_logs(interaction: disnake.CommandInteraction):
+    if interaction.author.id != OWNER_ID:
+        await interaction.response.send_message("❌ Доступ запрещён.", ephemeral=True)
+        return
+    
+    await interaction.response.defer()
+    
+    # Принудительная запись буфера
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.FileHandler):
+            handler.flush()
+    
+    if os.path.exists('bot_errors.log'):
+        await interaction.followup.send(file=disnake.File('bot_errors.log'))
+    else:
+        await interaction.followup.send("❌ Файл логов пуст или не найден.", ephemeral=True)
+
+@bot.slash_command(name="скачать_бд", description="Скачать таблицу успехов из БД (CSV)")
+async def slash_download_db(interaction: disnake.CommandInteraction):
+    if interaction.author.id != OWNER_ID:
+        await interaction.response.send_message("❌ Доступ запрещён.", ephemeral=True)
+        return
+    
+    await interaction.response.defer()
+    csv_data = db_manager.export_to_csv()
+    
+    if csv_data:
+        file_obj = io.BytesIO(csv_data.encode('utf-8'))
+        file_obj.name = "model_success_log.csv"
+        await interaction.followup.send(file=disnake.File(file_obj))
+    else:
+        await interaction.followup.send("❌ Не удалось экспортировать данные или БД не подключена.", ephemeral=True)
+
+# ============================================================================
+# СОБЫТИЯ
+# ============================================================================
+
 @bot.event
 async def on_ready():
-    logger.info(f"Bot {bot.user} ready!")
-    asyncio.create_task(heartbeat_keeper())
+    logger.info(f"Bot {bot.user} ready! (Railway: {IS_RAILWAY})")
+    if REQUIRED_ROLE_ID == 0: 
+        logger.info("Mode: Role 'Псарь' access.")
+    else: 
+        logger.info(f"Mode: Role ID {REQUIRED_ROLE_ID} access.")
+    
+    asyncio.create_task(fetch_free_proxies())
+    asyncio.create_task(heartbeat_keeper()) 
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound): return
+    
+    # Логирование ошибки
+    logger.error(f"Command error {ctx.command}: {error}", exc_info=True)
+    
+    # Запись в файл вручную, если basic_config не сработал мгновенно
+    with open('bot_errors.log', 'a', encoding='utf-8') as f:
+        f.write(f"\n[{datetime.now()}] ERROR: {type(error).__name__}: {error}\n")
+    
+    if hasattr(ctx, 'author') and ctx.author.id == OWNER_ID:
+        try: 
+            msg = f"⚠️ Ошибка команды: {str(error)[:100]}"
+            if hasattr(ctx, 'response') and ctx.response.is_done():
+                await ctx.followup.send(msg, ephemeral=True)
+            else:
+                await ctx.send(msg, delete_after=10)
+        except: pass
 
 if __name__ == "__main__":
-    logger.info(" Start PsIInka Bot v0.4.5-Fixed")
-    bot.run(os.getenv("DISCORD_TOKEN"))
+    logger.info("🚀 Start PsIInka Bot v0.4.7-FullRestore")
+    try:
+        bot.run(os.getenv("DISCORD_TOKEN"))
+    except Exception as e:
+        logger.critical(f"💥 Startup crash: {e}", exc_info=True)
