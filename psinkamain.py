@@ -618,14 +618,13 @@ def log_analysis(msg: str, level: str = "INFO"):
 # ============================================================================
 async def collect_all_messages_debug(channel, days_limit: int, max_per_source: int = 300):
     """
-    Собирает сообщения с детальным логированием.
-    ИСПРАВЛЕНИЕ: Использует обычный цикл для веток, так как channel.threads возвращает список.
+    Собирает сообщения из канала и веток с детальным логированием.
+    Использует корректный метод message.is_system() для disnake.
     """
-    # Используем utcnow(), так как Discord хранит время в UTC. Это избежит проблем с часовыми поясами Railway.
     after_date = datetime.utcnow() - timedelta(days=days_limit)
     
     log_analysis(f" Старт сбора для канала #{channel.name}. Период: {days_limit} дней.", "INFO")
-    log_analysis(f" Дата отсечения (after UTC): {after_date.isoformat()}", "DEBUG")
+    log_analysis(f"📅 Дата отсечения (after UTC): {after_date.isoformat()}", "DEBUG")
     
     all_messages = []
     
@@ -642,7 +641,8 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
                 if count_main % 10 == 0:
                     log_analysis(f"   Проверка сообщения ID {message.id} от {message.created_at.isoformat()}", "DEBUG")
                 
-                if message.system or message.author == bot.user or not message.content.strip():
+                # ИСПРАВЛЕНИЕ: Прямой вызов метода .is_system()
+                if message.is_system() or message.author == bot.user or not message.content.strip():
                     continue
                 
                 count_main += 1
@@ -661,7 +661,7 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
         await asyncio.sleep(1.0)
         
     except Exception as e:
-        log_analysis(f"❌ КРИТИЧЕСКАЯ ОШИБКА чтения основного канала: {e}", "ERROR")
+        log_analysis(f" КРИТИЧЕСКАЯ ОШИБКА чтения основного канала: {e}", "ERROR")
         import traceback
         log_analysis(traceback.format_exc(), "ERROR")
 
@@ -670,17 +670,11 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
         log_analysis(f" Получение списка веток для #{channel.name}...", "INFO")
         threads_found = 0
         
-        # ИСПРАВЛЕНИЕ ЗДЕСЬ: channel.threads возвращает список, используем обычный 'for'
-        # Если список пустой, цикл просто не выполнится
         if hasattr(channel, 'threads'):
-            # В некоторых версиях disnake это может быть свойство, возвращающее кэш или список
             thread_list = channel.threads
-            
-            # Если это корутина (маловероятно, но вдруг), нужно awaited, но обычно это список
             if isinstance(thread_list, list):
                 threads_to_process = thread_list
             else:
-                # Попытка преобразовать в список, если это итератор
                 try:
                     threads_to_process = list(thread_list)
                 except:
@@ -689,14 +683,12 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
             log_analysis(f"   Найдено объектов веток в списке: {len(threads_to_process)}", "DEBUG")
 
             for thread in threads_to_process:
-                # Пропускаем, если объект не является потоком (на всякий случай)
                 if not hasattr(thread, 'history'):
                     continue
                     
                 threads_found += 1
                 log_analysis(f"   Обработка ветки: '{thread.name}' (ID: {thread.id})", "DEBUG")
                 
-                # Проверка прав доступа к конкретной ветке
                 if not thread.permissions_for(channel.guild.me).read_message_history:
                     log_analysis(f"   ️ Пропуск ветки '{thread.name}': Нет прав на чтение истории.", "WARNING")
                     continue
@@ -709,7 +701,8 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
                         if count_thread % 5 == 0:
                              log_analysis(f"      Сообщение в ветке ID {message.id} от {message.created_at.isoformat()}", "DEBUG")
 
-                        if message.system or message.author == bot.user or not message.content.strip():
+                        # ИСПРАВЛЕНИЕ: Прямой вызов метода .is_system() здесь тоже
+                        if message.is_system() or message.author == bot.user or not message.content.strip():
                             continue
                         
                         count_thread += 1
@@ -730,19 +723,19 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
                     await asyncio.sleep(0.8) 
                     
                 except disnake.Forbidden:
-                    log_analysis(f"    Доступ запрещен к ветке '{thread.name}'.", "WARNING")
+                    log_analysis(f"   🚫 Доступ запрещен к ветке '{thread.name}'.", "WARNING")
                 except Exception as e:
                     log_analysis(f"   ❌ Ошибка при чтении ветки '{thread.name}': {e}", "ERROR")
                     import traceback
                     log_analysis(traceback.format_exc(), "ERROR")
                     continue
         else:
-            log_analysis("   ️ У канала нет атрибута 'threads'. Версия библиотеки не поддерживает ветки?", "WARNING")
+            log_analysis("   ️ У канала нет атрибута 'threads'.", "WARNING")
 
-        log_analysis(f"🧵 Всего обработано веток: {threads_found}", "INFO")
+        log_analysis(f" Всего обработано веток: {threads_found}", "INFO")
 
     except Exception as e:
-        log_analysis(f"❌ Ошибка при обработке списка веток: {e}", "ERROR")
+        log_analysis(f" Ошибка при обработке списка веток: {e}", "ERROR")
         import traceback
         log_analysis(traceback.format_exc(), "ERROR")
 
