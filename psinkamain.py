@@ -1119,7 +1119,7 @@ def format_messages_for_ai(messages_list: List[Dict]) -> str:
     ])
 
 
-def parse_ai_response(ai_text: str, original_ List[Dict]) -> List[Dict]:
+def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
     if not ai_text or ai_text.strip().upper() == "NONE": 
         return []
     
