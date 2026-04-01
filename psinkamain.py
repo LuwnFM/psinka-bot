@@ -912,20 +912,32 @@ async def slash_analyze(
             await status_msg.edit(content="✅ Нарушений не обнаружено ни в одном из пакетов.")
             return
 
-        # 3. Формирование отчета
+                # 3. Формирование отчета
         report_lines = []
         max_chars = 1900
         final_provider = "Пакетный анализ (Multi-Model)"
         
         for i, v in enumerate(violations, 1):
-            line = f"{i}) **[{v['source']}]** {v['content']} - [Ссылка]({v['url']})\n"
+            # 1. Очистка текста от упоминаний (чтобы не пинговало)
+            # Заменяем <@12345> или <@!12345> на @user
+            clean_content_text = re.sub(r'<@!?[0-9]+>', '@user', v['content'])
+            
+            # 2. Обрезка текста до 500 символов
+            if len(clean_content_text) > 500:
+                clean_content_text = clean_content_text[:497] + "..."
+            
+            # Формируем строку отчета
+            line = f"{i}) **[{v['source']}]** {clean_content_text} - [Ссылка]({v['url']})\n"
+            
             if len("".join(report_lines)) + len(line) > max_chars:
                 chunk = "".join(report_lines)
                 header = f"🚨 Отчет ({final_provider}): {len(violations)} нарушений\n\n{chunk}"
+                
                 if i == 1: 
                     await status_msg.edit(content=header)
                 else: 
                     await interaction.channel.send(header)
+                
                 report_lines = [line]
             else:
                 report_lines.append(line)
