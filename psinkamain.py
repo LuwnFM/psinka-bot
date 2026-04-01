@@ -803,8 +803,8 @@ def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
     results = [msg for msg in original_data if msg['id'] in found_ids]
     return results
 
-# ============================================================================
-# 🔍 СЛЭШ-КОМАНДА "/анализ" (ПАКЕТНЫЙ АНАЛИЗ)
+# # ============================================================================
+# 🔍 СЛЭШ-КОМАНДА "/анализ" (ПАКЕТНЫЙ АНАЛИЗ + ПРОГРЕСС + НАДЕЖНОСТЬ)
 # ============================================================================
 
 @bot.slash_command(name="анализ", description="Анализ канала и веток (Owner Only) + Логгирование")
@@ -829,7 +829,10 @@ async def slash_analyze(
         f.write(f"User: {interaction.author.name}\n\n")
 
     await interaction.response.defer()
-    status_msg = await interaction.edit_original_response(content=f"🔄 Запуск анализа... См. логи.")
+    
+    # Переменные для прогресс-бара
+    total_batches = 0 # Будет вычислено позже
+    current_batch = 0
     
     log_analysis(f"Начало команды /анализ. Канал: {канал.name}, Период: {days_to_check}", "INFO")
 
@@ -837,37 +840,50 @@ async def slash_analyze(
         # 1. Сбор данных
         messages_data = await collect_all_messages_debug(канал, days_to_check, max_per_source=400)
         
-        if not messages_data:
+        if not messages_
             log_analysis("️ Список сообщений пуст после сбора.", "WARNING")
-            await status_msg.edit(content="ℹ️ Сообщения не найдены. Проверьте файл логов командой `/скачать_анализ`.")
+            await interaction.edit_original_response(content="ℹ️ Сообщения не найдены. Проверьте файл логов командой `/скачать_анализ`.")
             return
 
-        log_analysis(f"Данные собраны: {len(messages_data)} сообщений. Начинаю пакетный анализ...", "INFO")
-        await status_msg.edit(content=f" Найдено {len(messages_data)} сообщений. Анализирую пакетами (чтобы ничего не упустить)...")
-
-        # --- НОВАЯ ЛОГИКА: ПАКЕТНЫЙ АНАЛИЗ (BATCH PROCESSING) ---
-        BATCH_SIZE = 35  # Оптимальный размер пакета
-        all_violations = []
+        # Расчет пакетов
+        BATCH_SIZE = 35
         total_batches = (len(messages_data) + BATCH_SIZE - 1) // BATCH_SIZE
         
-        # Очередь моделей (из вашего основного кода)
-        queue = PRIORITY_TIER_1 + PRIORITY_TIER_2 + [("g4f-default", "deepseek-r1")]
+        log_analysis(f"Данные собраны: {len(messages_data)} сообщений. Всего пакетов: {total_batches}. Начинаю анализ...", "INFO")
         
-        # Разбиваем данные на пакеты
+        # Начальное сообщение с прогресс-баром
+        progress_bar = "░" * 10
+        status_text = f"🔄 Анализ: [{progress_bar}] 0% ({current_batch}/{total_batches})\nПодготовка..."
+        status_msg = await interaction.edit_original_response(content=status_text)
+
+        # --- НОВАЯ ЛОГИКА: ПАКЕТНЫЙ АНАЛИЗ С ГАРАНТИЕЙ ОТВЕТА ---
+        all_violations = []
+        
+        # Очередь моделей (точно такая же, как в /скажи)
+        # Добавляем резервный OpenRouter Free в конец, если основные не справятся
+        queue = PRIORITY_TIER_1 + PRIORITY_TIER_2 + [("g4f-default", "deepseek-r1")]
+        # Можно добавить резервную модель OpenRouter, если g4f-default тоже откажет
+        fallback_queue = [
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "qwen/qwen-2.5-72b-instruct:free",
+            "deepseek/deepseek-chat:free"
+        ]
+
         for i in range(0, len(messages_data), BATCH_SIZE):
             batch_data = messages_data[i : i + BATCH_SIZE]
-            batch_num = (i // BATCH_SIZE) + 1
+            current_batch = (i // BATCH_SIZE) + 1
             
-            log_analysis(f"Обработка пакета {batch_num}/{total_batches} (сообщения {i+1}-{min(i+BATCH_SIZE, len(messages_data))})", "DEBUG")
+            log_analysis(f"Обработка пакета {current_batch}/{total_batches}", "DEBUG")
             
-            # Формируем промпт только для текущего пакета
+            # Формируем промпт для текущего пакета
             batch_context = format_messages_for_ai(batch_data)
-            user_prompt_batch = f"Проанализируй ЭТОТ пакет сообщений (часть {batch_num} из {total_batches}):\n\n{batch_context}"
+            user_prompt_batch = f"Проанализируй ЭТОТ пакет сообщений (часть {current_batch} из {total_batches}):\n\n{batch_context}"
             
             final_answer = None
             success = False
-            
-            # Пробуем отправить текущий пакет через очередь моделей
+            used_provider = "Unknown"
+
+            # 1. Попытка через основную очередь (как в /скажи)
             for prov, mod in queue:
                 try:
                     if prov == "g4f-default":
@@ -882,56 +898,105 @@ async def slash_analyze(
                         )
                         if resp and resp.choices:
                             final_answer = resp.choices[0].message.content
+                            used_provider = f"{prov} ({mod})"
                             success = True
                             break
                     else:
                         ok, ans, _ = await make_g4f_request(prov, mod, user_prompt_batch, timeout=60.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
                         if ok:
                             final_answer = ans
+                            used_provider = f"{prov} ({mod})"
                             success = True
                             break
                 except Exception as e:
-                    continue # Пробуем следующую модель
+                    log_analysis(f"Ошибка модели {prov}/{mod} для пакета {current_batch}: {e}", "DEBUG")
+                    continue
             
-            if success and final_answer:
-                # Парсим ответ текущего пакета
-                batch_violations = parse_ai_response(final_answer, batch_data)
-                all_violations.extend(batch_violations)
-                log_analysis(f"Пакет {batch_num}: найдено нарушений {len(batch_violations)}", "INFO")
-            else:
-                log_analysis(f"️ Пакет {batch_num}: Не удалось получить ответ от ИИ", "WARNING")
+            # 2. Если основная очередь не сработала, пробуем резервные модели OpenRouter напрямую
+            if not success:
+                log_analysis(f"⚠️ Основная очередь не дала ответа для пакета {current_batch}. Пробую резерв OpenRouter...", "WARNING")
+                openrouter_token = os.getenv('OPENR_TOKEN')
+                if openrouter_token:
+                    client_or = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_token)
+                    for or_model in fallback_queue:
+                        try:
+                            loop = asyncio.get_running_loop()
+                            def make_or_req():
+                                return client_or.chat.completions.create(
+                                    model=or_model,
+                                    messages=[
+                                        {"role": "system", "content": ANALYSIS_SYSTEM_PROMPT},
+                                        {"role": "user", "content": user_prompt_batch}
+                                    ],
+                                    timeout=60.0,
+                                    extra_headers={"HTTP-Referer": "https://github.com/psiiinka-bot", "X-OpenRouter-Title": "PsIInka Bot"}
+                                )
+                            resp = await asyncio.wait_for(loop.run_in_executor(None, make_or_req), timeout=60.0)
+                            if resp.choices:
+                                final_answer = resp.choices[0].message.content
+                                used_provider = f"OpenRouter ({or_model}) [RESERVE]"
+                                success = True
+                                break
+                        except Exception as e:
+                            log_analysis(f"Ошибка резерва {or_model}: {e}", "DEBUG")
+                            continue
+                
+            # 3. Если вообще ничего не помогло (крайний случай)
+            if not success:
+                log_analysis(f"❌ КРИТИЧЕСКИ: Не удалось получить ответ для пакета {current_batch} ни от одной модели!", "ERROR")
+                # Принудительно ставим NONE, чтобы анализ не сломался, но логируем ошибку
+                final_answer = "NONE" 
+                used_provider = "NO_RESPONSE_ERROR"
+                # Можно отправить уведомление владельцу, но пока просто продолжаем
+            
+            # Парсинг ответа (даже если это вынужденный NONE)
+            batch_violations = parse_ai_response(final_answer, batch_data)
+            all_violations.extend(batch_violations)
+            
+            log_analysis(f"Пакет {current_batch}: обработано через {used_provider}. Найдено: {len(batch_violations)}", "INFO")
+
+            # Обновление прогресс-бара
+            percent = int((current_batch / total_batches) * 100)
+            filled_len = int(10 * current_batch // total_batches)
+            bar = "█" * filled_len + "░" * (10 - filled_len)
+            progress_text = f"🔄 Анализ: [{bar}] {percent}% ({current_batch}/{total_batches})\nТекущий пакет: {used_provider}"
+            
+            # Обновляем сообщение статуса каждые 1 пакет или чаще, если нужно
+            try:
+                await status_msg.edit(content=progress_text)
+            except:
+                pass # Игнорируем ошибки редактирования, если сообщение уже удалено или слишком часто
             
             # Пауза между пакетами
             await asyncio.sleep(1.5)
 
-        # Объединяем результаты
+        # Финальное обновление прогресса
+        await status_msg.edit(content=f"✅ Анализ завершен! [{ '█' * 10 }] 100%\nОбработка результатов...")
+
         violations = all_violations
-        log_analysis(f"Итого найдено нарушений во всех пакетах: {len(violations)}", "INFO")
+        log_analysis(f"Итого найдено нарушений: {len(violations)}", "INFO")
 
         if not violations:
             await status_msg.edit(content="✅ Нарушений не обнаружено ни в одном из пакетов.")
             return
 
-                # 3. Формирование отчета
+        # 4. Формирование отчета
         report_lines = []
         max_chars = 1900
-        final_provider = "Пакетный анализ (Multi-Model)"
+        final_provider_name = "Пакетный анализ (Multi-Model)"
         
         for i, v in enumerate(violations, 1):
-            # 1. Очистка текста от упоминаний (чтобы не пинговало)
-            # Заменяем <@12345> или <@!12345> на @user
+            # Очистка текста от упоминаний
             clean_content_text = re.sub(r'<@!?[0-9]+>', '@user', v['content'])
-            
-            # 2. Обрезка текста до 500 символов
+            # Обрезка до 500 символов
             if len(clean_content_text) > 500:
                 clean_content_text = clean_content_text[:497] + "..."
             
-            # Формируем строку отчета
             line = f"{i}) **[{v['source']}]** {clean_content_text} - [Ссылка]({v['url']})\n"
             
             if len("".join(report_lines)) + len(line) > max_chars:
                 chunk = "".join(report_lines)
-                header = f"🚨 Отчет ({final_provider}): {len(violations)} нарушений\n\n{chunk}"
+                header = f"🚨 Отчет ({final_provider_name}): {len(violations)} нарушений\n\n{chunk}"
                 
                 if i == 1: 
                     await status_msg.edit(content=header)
@@ -947,13 +1012,13 @@ async def slash_analyze(
             header = f"🚨 Отчет (окончание):\n\n{chunk}"
             await interaction.channel.send(header)
             
-        await interaction.channel.send(f"✅ Анализ завершен. Подробный лог доступен через `/скачать_анализ`.")
+        await interaction.channel.send(f"✅ Анализ полностью завершен. Логи доступны через `/скачать_анализ`.")
 
     except Exception as e:
         log_analysis(f"КРИТИЧЕСКИЙ СБОЙ КОМАНДЫ: {e}", "ERROR")
         import traceback
         log_analysis(traceback.format_exc(), "ERROR")
-        await interaction.followup.send(f"❌ Критическая ошибка. Лог сохранен. `/скачать_анализ`", ephemeral=True)
+        await interaction.followup.send(f"❌ Критическая ошибка. Лог сохранен. `/скачать_анализ`\nОшибка: {str(e)[:100]}", ephemeral=True)
 # ============================================================================
 # 💾 СЛЭШ-КОМАНДА "/скачать_анализ" (СКАЧАТЬ ЛОГИ)
 # ============================================================================
