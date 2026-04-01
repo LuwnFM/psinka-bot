@@ -723,7 +723,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
 
 @bot.slash_command(name="кубик", description="Бросок кубиков")
 async def slash_cube(interaction: disnake.CommandInteraction, 
-                     формула: str = commands.Param(description="Формула броска (например: 2d6+5 или dndstats)", required=False)):
+                     формула: Optional[str] = commands.Param(description="Формула броска (например: 2d6+5 или dndstats)", default=None)):
     try:
         if not формула:
             help_embed = disnake.Embed(
