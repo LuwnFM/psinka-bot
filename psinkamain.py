@@ -220,7 +220,7 @@ G4F_DEEP_SCAN_MODELS = {
     "FreeGPT": ["deepseek-r1", "llama-3.3-70b", "gpt-3.5-turbo"],
     "MyShell": ["llama-3.3-70b", "mistral-large"],
     "Perplexity": ["llama-3.3-70b", "mixtral-8x7b"],
-    "Default": ["gpt-3.5-turbo", "llama-3.3-70b", "deepseek-r1"]
+    "Default": ["gpt-3.5-turbo", "llama-3.3-70b", "deepseek-r1", "deepseek-v3"]
 }
 
 # ============================================================================
@@ -357,7 +357,7 @@ def create_progress_bar(current: int, total: int, length: int = 10) -> str:
     return "█" * filled + "░" * (length - filled)
 
 # ============================================================================
-# 🌐 ЗАПРОСЫ К МОДЕЛЯМ
+# 🌐 ЗАПРОСЫ К МОДЕЛЯМ (ИСПРАВЛЕНО: НЕТ ОГРАНИЧЕНИЙ НА ТОКЕНЫ)
 # ============================================================================
 
 async def make_g4f_request(provider_name: str, model: str, prompt: str,
@@ -462,7 +462,11 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
 
     return False, "Все модели OpenRouter недоступны", time.time() - start
 
-async def test_groq_single(models: list, prompt: str, timeout: float = 45.0, system_prompt: str = None):
+async def test_groq_single(models: list, prompt: str, timeout: float = 45.0, system_prompt: str = None, return_model_name: bool = False):
+    """
+    return_model_name: если True (для тестов) — возвращает имя модели в ответе
+                       если False (для /скажи и /анализ) — возвращает только контент
+    """
     groq_token = os.getenv('GROQ_TOKEN')
     if not groq_token: return False, "No GROQ Token", 0.0
     
@@ -481,7 +485,7 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0, sys
                     model=model,
                     messages=messages,
                     temperature=0.5,
-                    max_tokens=256,
+                    # ✅ УБРАНО ОГРАНИЧЕНИЕ max_tokens — теперь без лимита
                     timeout=int(timeout)
                 )
             
@@ -493,9 +497,13 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0, sys
             if response.choices and len(response.choices) > 0:
                 elapsed = time.time() - start
                 content = response.choices[0].message.content
-                if len(content) > 150: content = content[:147] + "..."
                 logger.debug(f"✅ Groq/{model} — {elapsed:.2f}s")
-                return True, f"{model}: {content}", elapsed
+                
+                # ✅ ИСПРАВЛЕНО: только для тестов добавляем имя модели
+                if return_model_name:
+                    return True, f"{model}: {content}", elapsed
+                else:
+                    return True, content, elapsed
             
         except Exception as e:
             err_str = str(e).lower()
@@ -783,6 +791,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
         use_proxy = (прокси == "Да")
         proxy_url = get_random_proxy(use_proxy)
         used_temp_file = False
+        lat = 0
         
         for idx, (prov, mod) in enumerate(queue):
             try:
@@ -793,14 +802,14 @@ async def slash_say(interaction: disnake.CommandInteraction,
                 if prov == "OpenRouter":
                     ok, ans, lat = await test_openrouter_single([mod], вопрос, timeout=45.0, system_prompt=system_prompt, proxy_url=proxy_url)
                 elif prov == "Groq":
-                    ok, ans, lat = await test_groq_single([mod], вопрос, timeout=45.0, system_prompt=system_prompt)
+                    # ✅ ИСПРАВЛЕНО: return_model_name=False для чистого ответа
+                    ok, ans, lat = await test_groq_single([mod], вопрос, timeout=45.0, system_prompt=system_prompt, return_model_name=False)
                 else:
                     ok, ans, lat = await make_g4f_request(prov, mod, вопрос, timeout=45.0, system_prompt=system_prompt, proxy_url=proxy_url)
                 
                 if ok and ans:
                     final_response = ans
                     final_prov, final_mod = prov, mod
-                    # Проверяем, была ли модель из временного файла
                     pending_models = pending_test_manager.get_pending_models()
                     if (prov, mod) in pending_models:
                         used_temp_file = True
@@ -823,9 +832,8 @@ async def slash_say(interaction: disnake.CommandInteraction,
             return
         
         # 🐕 СОБАЧИЙ СТИЛЬ: Успешный ответ (БЕЗ EMBED, с разбивкой на части)
-        await msg.delete()  # Удаляем сообщение со статусом
+        await msg.delete()
         
-        # Заголовок ответа
         header_text = f"🐕 **ПсИИнка прогавкал ответ!**\n"
         header_text += f"*виляет хвостом* Держи, хозяин:\n\n"
         header_text += f"📊 **Источник:** `{final_prov}` / `{final_mod}`\n"
@@ -833,24 +841,19 @@ async def slash_say(interaction: disnake.CommandInteraction,
         header_text += f"🔀 **Прокси:** `{прокси}`\n"
         header_text += f"{'─' * 40}\n\n"
         
-        # Разбиваем ответ на части по 1900 символов (оставляем запас для header)
         MAX_CHUNK_SIZE = 1900
         chunks = []
         
-        # Первая часть с заголовком
         first_chunk = header_text + final_response[:MAX_CHUNK_SIZE - len(header_text)]
         chunks.append(first_chunk)
         
-        # Остальные части
         remaining = final_response[MAX_CHUNK_SIZE - len(header_text):]
         while remaining:
             chunks.append(remaining[:MAX_CHUNK_SIZE])
             remaining = remaining[MAX_CHUNK_SIZE:]
         
-        # Отправляем сообщения цепочкой
         first_msg = await interaction.channel.send(chunks[0])
         
-        # Последующие сообщения отвечают на предыдущее
         for i in range(1, len(chunks)):
             await interaction.channel.send(chunks[i], reference=first_msg, mention_author=False)
         
@@ -1003,6 +1006,7 @@ class TestModeView(disnake.ui.View):
         models = G4F_DEEP_SCAN_MODELS.get("PollinationsAI", ["deepseek-r1"])
         success = False
         used_model = ""
+        ans = ""
         for mod in models:
             ok, ans, lat = await make_g4f_request("PollinationsAI", mod, "ping", timeout=15.0)
             if ok:
@@ -1035,7 +1039,8 @@ class TestModeView(disnake.ui.View):
         await interaction.response.defer()
         log_analysis("TEST: Groq started", "INFO")
         start = time.time()
-        ok, ans, lat = await test_groq_single(GROQ_PRIORITY_MODELS, "ping", timeout=15.0, system_prompt="Ты тестовый ИИ.")
+        # ✅ ДЛЯ ТЕСТОВ: return_model_name=True чтобы видеть какая модель сработала
+        ok, ans, lat = await test_groq_single(GROQ_PRIORITY_MODELS, "ping", timeout=15.0, system_prompt="Ты тестовый ИИ.", return_model_name=True)
         elapsed = time.time() - start
         
         model_name = ans.split(':')[0] if ':' in ans and ok else "unknown"
@@ -1165,7 +1170,8 @@ async def run_mass_test(channel):
                 if provider == "OpenRouter":
                     ok, ans, lat = await test_openrouter_single([model], TEST_PROMPT, timeout=30.0)
                 elif provider == "Groq":
-                    ok, ans, lat = await test_groq_single([model], TEST_PROMPT, timeout=30.0)
+                    # ✅ ДЛЯ МАССОВОГО ТЕСТА: return_model_name=False
+                    ok, ans, lat = await test_groq_single([model], TEST_PROMPT, timeout=30.0, return_model_name=False)
                 else:
                     ok, ans, lat = await make_g4f_request(provider, model, TEST_PROMPT, timeout=30.0)
                 
@@ -1337,13 +1343,15 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             success = False
             used_provider = "Unknown"
             used_temp_file = False
+            latency_val = 0
 
             async def try_request(prov, mod, use_proxy=False):
                 proxy_str = get_random_proxy(True) if use_proxy else None
                 if prov == "OpenRouter":
                     return await test_openrouter_single(mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
                 elif prov == "Groq":
-                    return await test_groq_single(mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
+                    # ✅ ДЛЯ АНАЛИЗА: return_model_name=False для чистого ответа
+                    return await test_groq_single(mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT, return_model_name=False)
                 else:
                     return await make_g4f_request(prov, mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT, proxy_url=proxy_str)
 
@@ -1356,16 +1364,17 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                     progress_embed.set_field_at(1, name="Статус", value=f"*лает на* `{prov}`... 🐕", inline=False)
                     await status_msg.edit(embed=progress_embed)
 
-                    ok, ans, _ = await try_request(prov, mod, False)
+                    ok, ans, lat = await try_request(prov, mod, False)
                     if ok:
                         final_answer = ans
                         used_provider = f"{prov} ({mod})"
                         success = True
+                        latency_val = lat
                         pending_models = pending_test_manager.get_pending_models()
                         if (prov, mod) in pending_models:
                             used_temp_file = True
                         if not used_temp_file:
-                            db_manager.log_success(prov, mod, int(_ * 1000))
+                            db_manager.log_success(prov, mod, int(lat * 1000))
                         break
                 except Exception as e:
                     log_analysis(f"Error {prov}/{mod}: {e}", "DEBUG")
@@ -1378,11 +1387,12 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                 
                 for prov, mod in main_queue:
                     try:
-                        ok, ans, _ = await try_request(prov, mod, True)
+                        ok, ans, lat = await try_request(prov, mod, True)
                         if ok:
                             final_answer = ans
                             used_provider = f"{prov} ({mod}) [PROXY]"
                             success = True
+                            latency_val = lat
                             break
                     except: 
                         continue
@@ -1432,7 +1442,6 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
         if current_part: 
             report_parts.append("".join(current_part))
 
-        # 🐕 СОБАЧИЙ СТИЛЬ: Отчёт по анализу
         header_embed = disnake.Embed(
             title="🚨 ПсИИнка нашёл нарушения!",
             description=f"*рычит на нарушителей* Найдено **{len(all_violations)}** нарушений 🐕",
@@ -1443,10 +1452,8 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
         header_embed.add_field(name="Период", value=f"{days_to_check} дней", inline=True)
         header_embed.add_field(name="Сообщений проверено", value=f"`{len(messages_data)}`", inline=True)
         
-        # 🔧 ИСПРАВЛЕНИЕ: Редактируем исходное сообщение ТОЛЬКО эмбедом (без текста отчёта)
         await status_msg.edit(content=None, embed=header_embed)
         
-        # 🔧 ОТПРАВЛЯЕМ части отчёта отдельными сообщениями следом
         for part in report_parts:
             await interaction.channel.send(part)
         
