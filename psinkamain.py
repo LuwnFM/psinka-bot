@@ -215,7 +215,7 @@ class PendingTestManager:
 pending_test_manager = PendingTestManager(PENDING_TEST_LOG)
 
 G4F_DEEP_SCAN_MODELS = {
-    "PollinationsAI": ["deepseek-r1", "deepseek-v3", "llama-3.3-70b", "qwen-2.5-72b", "mistral-large", "flux-pro"],
+    "PollinationsAI": ["deepseek-r1", "deepseek-v3", "llama-3.3-70b", "qwen-2.5-72b", "mistral-large"],
     "Vercel": ["deepseek-r1", "llama-3.3-70b", "qwen-2.5-72b"],
     "FreeGPT": ["deepseek-r1", "llama-3.3-70b", "gpt-3.5-turbo"],
     "MyShell": ["llama-3.3-70b", "mistral-large"],
@@ -356,8 +356,19 @@ def create_progress_bar(current: int, total: int, length: int = 10) -> str:
     filled = int(length * current / total)
     return "█" * filled + "░" * (length - filled)
 
+def strip_think_content(text: str) -> str:
+    """Удаляет секции <think>...</think> из ответа модели"""
+    if not text:
+        return text
+    
+    cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r'</?think>', '', cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.lstrip()
+    
+    return cleaned if cleaned.strip() else text
+
 # ============================================================================
-# 🌐 ЗАПРОСЫ К МОДЕЛЯМ (ИСПРАВЛЕНО: НЕТ ОГРАНИЧЕНИЙ НА ТОКЕНЫ)
+# 🌐 ЗАПРОСЫ К МОДЕЛЯМ
 # ============================================================================
 
 async def make_g4f_request(provider_name: str, model: str, prompt: str,
@@ -463,10 +474,6 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
     return False, "Все модели OpenRouter недоступны", time.time() - start
 
 async def test_groq_single(models: list, prompt: str, timeout: float = 45.0, system_prompt: str = None, return_model_name: bool = False):
-    """
-    return_model_name: если True (для тестов) — возвращает имя модели в ответе
-                       если False (для /скажи и /анализ) — возвращает только контент
-    """
     groq_token = os.getenv('GROQ_TOKEN')
     if not groq_token: return False, "No GROQ Token", 0.0
     
@@ -485,7 +492,6 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0, sys
                     model=model,
                     messages=messages,
                     temperature=0.5,
-                    # ✅ УБРАНО ОГРАНИЧЕНИЕ max_tokens — теперь без лимита
                     timeout=int(timeout)
                 )
             
@@ -499,7 +505,6 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0, sys
                 content = response.choices[0].message.content
                 logger.debug(f"✅ Groq/{model} — {elapsed:.2f}s")
                 
-                # ✅ ИСПРАВЛЕНО: только для тестов добавляем имя модели
                 if return_model_name:
                     return True, f"{model}: {content}", elapsed
                 else:
@@ -717,73 +722,108 @@ dice_engine = DiceParser()
 # ============================================================================
 # 💬 КОМАНДЫ (СОБАЧИЙ СТИЛЬ)
 # ============================================================================
-def strip_think_content(text: str) -> str:
-    """Удаляет секции <think>...</think> из ответа модели"""
-    if not text:
-        return text
-    
-    # Удаляем <think>...</think> блоки
-    cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    
-    # Удаляем оставшиеся теги think
-    cleaned = re.sub(r'</?think>', '', cleaned, flags=re.IGNORECASE)
-    
-    # Удаляем пустые строки в начале
-    cleaned = cleaned.lstrip()
-    
-    return cleaned if cleaned.strip() else text
 
 async def get_priority_queue():
     """
     Очередь для /скажи:
-    1. Временный файл тестов (самый высокий приоритет)
-    2. G4F модели (g4f-default + все доступные)
-    3. Groq модели (все, кроме исключений)
-    4. OpenRouter модели (все, кроме исключений)
-    5. БД (резерв)
+    1. Временный файл тестов
+    2. Groq модели
+    3. OpenRouter модели
+    4. БД
+    5. G4F модели (в конце)
     """
     queue = []
     seen = set()
     
-    # Исключения для моделей
     EXCLUDED_MODELS = ["flux-pro", "liquid/lfm-2.5-1.2b-instruct:free"]
     
-    # 1. Приоритет: временный файл тестов
+    # 1. Временный файл тестов
     pending = pending_test_manager.get_pending_models()
     for prov, mod in pending:
         if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
             queue.append((prov, mod))
             seen.add((prov, mod))
     
-    # 2. G4F модели (g4f-default + все из словаря)
-    # Сначала g4f-default
+    # 2. Groq модели
+    for groq_model in GROQ_PRIORITY_MODELS:
+        if ("Groq", groq_model) not in seen and groq_model not in EXCLUDED_MODELS:
+            queue.append(("Groq", groq_model))
+            seen.add(("Groq", groq_model))
+    
+    # 3. OpenRouter модели
+    for or_model in OR_PRIORITY_MODELS:
+        if ("OpenRouter", or_model) not in seen and or_model not in EXCLUDED_MODELS:
+            queue.append(("OpenRouter", or_model))
+            seen.add(("OpenRouter", or_model))
+    
+    # 4. Модели из БД
+    if SessionLocal:
+        db_models = db_manager.get_all_models()
+        for prov, mod in db_models:
+            if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
+                queue.append((prov, mod))
+                seen.add((prov, mod))
+    
+    # 5. G4F модели (в конце)
     if ("g4f-default", "deepseek-r1") not in seen:
         queue.append(("g4f-default", "deepseek-r1"))
         seen.add(("g4f-default", "deepseek-r1"))
     
-    # Затем все G4F провайдеры из словаря
     for prov, models in G4F_DEEP_SCAN_MODELS.items():
         for mod in models:
             if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
                 queue.append((prov, mod))
                 seen.add((prov, mod))
     
-    # 3. Groq модели (все из списка)
+    return queue
+
+async def get_analysis_priority_queue():
+    """
+    Очередь для /анализ:
+    1. БД (самый высокий приоритет)
+    2. Временный файл тестов
+    3. Groq модели
+    4. OpenRouter модели
+    5. G4F модели (в конце)
+    """
+    queue = []
+    seen = set()
+    EXCLUDED_MODELS = ["flux-pro", "liquid/lfm-2.5-1.2b-instruct:free"]
+    
+    # 1. БД — самый высокий приоритет
+    if SessionLocal:
+        db_models = db_manager.get_all_models()
+        for prov, mod in db_models:
+            if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
+                queue.append((prov, mod))
+                seen.add((prov, mod))
+    
+    # 2. Временный файл тестов
+    pending = pending_test_manager.get_pending_models()
+    for prov, mod in pending:
+        if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
+            queue.append((prov, mod))
+            seen.add((prov, mod))
+    
+    # 3. Groq модели
     for groq_model in GROQ_PRIORITY_MODELS:
         if ("Groq", groq_model) not in seen and groq_model not in EXCLUDED_MODELS:
             queue.append(("Groq", groq_model))
             seen.add(("Groq", groq_model))
     
-    # 4. OpenRouter модели (все из списка, кроме исключений)
+    # 4. OpenRouter модели
     for or_model in OR_PRIORITY_MODELS:
         if ("OpenRouter", or_model) not in seen and or_model not in EXCLUDED_MODELS:
             queue.append(("OpenRouter", or_model))
             seen.add(("OpenRouter", or_model))
     
-    # 5. Модели из БД (резервный вариант)
-    if SessionLocal:
-        db_models = db_manager.get_all_models()
-        for prov, mod in db_models:
+    # 5. G4F модели (в конце)
+    if ("g4f-default", "deepseek-r1") not in seen:
+        queue.append(("g4f-default", "deepseek-r1"))
+        seen.add(("g4f-default", "deepseek-r1"))
+    
+    for prov, models in G4F_DEEP_SCAN_MODELS.items():
+        for mod in models:
             if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
                 queue.append((prov, mod))
                 seen.add((prov, mod))
@@ -798,7 +838,6 @@ async def slash_say(interaction: disnake.CommandInteraction,
     try:
         await interaction.response.defer()
         
-        # 🐕 СОБАЧИЙ СТИЛЬ: Начало обработки
         status_embed = disnake.Embed(
             title="🐕 ПсИИнка слушает...",
             description="*виляет хвостом* Сейчас прогавкаю ответ, хозяин! ⏳",
@@ -829,7 +868,6 @@ async def slash_say(interaction: disnake.CommandInteraction,
                 if prov == "OpenRouter":
                     ok, ans, lat = await test_openrouter_single([mod], вопрос, timeout=45.0, system_prompt=system_prompt, proxy_url=proxy_url)
                 elif prov == "Groq":
-                    # ✅ ИСПРАВЛЕНО: return_model_name=False для чистого ответа
                     ok, ans, lat = await test_groq_single([mod], вопрос, timeout=45.0, system_prompt=system_prompt, return_model_name=False)
                 else:
                     ok, ans, lat = await make_g4f_request(prov, mod, вопрос, timeout=45.0, system_prompt=system_prompt, proxy_url=proxy_url)
@@ -858,7 +896,6 @@ async def slash_say(interaction: disnake.CommandInteraction,
             await msg.edit(embed=error_embed)
             return
         
-        # 🐕 СОБАЧИЙ СТИЛЬ: Успешный ответ (БЕЗ EMBED, с разбивкой на части)
         await msg.delete()
         
         header_text = f"🐕 **ПсИИнка прогавкал ответ!**\n"
@@ -1066,7 +1103,6 @@ class TestModeView(disnake.ui.View):
         await interaction.response.defer()
         log_analysis("TEST: Groq started", "INFO")
         start = time.time()
-        # ✅ ДЛЯ ТЕСТОВ: return_model_name=True чтобы видеть какая модель сработала
         ok, ans, lat = await test_groq_single(GROQ_PRIORITY_MODELS, "ping", timeout=15.0, system_prompt="Ты тестовый ИИ.", return_model_name=True)
         elapsed = time.time() - start
         
@@ -1197,7 +1233,6 @@ async def run_mass_test(channel):
                 if provider == "OpenRouter":
                     ok, ans, lat = await test_openrouter_single([model], TEST_PROMPT, timeout=30.0)
                 elif provider == "Groq":
-                    # ✅ ДЛЯ МАССОВОГО ТЕСТА: return_model_name=False
                     ok, ans, lat = await test_groq_single([model], TEST_PROMPT, timeout=30.0, return_model_name=False)
                 else:
                     ok, ans, lat = await make_g4f_request(provider, model, TEST_PROMPT, timeout=30.0)
@@ -1376,7 +1411,6 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                 if prov == "OpenRouter":
                     return await test_openrouter_single(mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT)
                 elif prov == "Groq":
-                    # ✅ ДЛЯ АНАЛИЗА: return_model_name=False для чистого ответа
                     return await test_groq_single(mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT, return_model_name=False)
                 else:
                     return await make_g4f_request(prov, mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT, proxy_url=proxy_str)
@@ -1395,7 +1429,6 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                         final_answer = ans
                         used_provider = f"{prov} ({mod})"
                         success = True
-                        latency_val = lat
                         pending_models = pending_test_manager.get_pending_models()
                         if (prov, mod) in pending_models:
                             used_temp_file = True
@@ -1418,7 +1451,6 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                             final_answer = ans
                             used_provider = f"{prov} ({mod}) [PROXY]"
                             success = True
-                            latency_val = lat
                             break
                     except: 
                         continue
