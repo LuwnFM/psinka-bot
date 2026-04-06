@@ -136,8 +136,92 @@ class DBManager:
             return False
         finally:
             session.close()
+    
+    def get_all_models(self) -> List[Tuple[str, str]]:
+        if not self.SessionLocal: return []
+        session = self.SessionLocal()
+        try:
+            results = session.query(ModelSuccessLog.provider, ModelSuccessLog.model_name)\
+                             .order_by(ModelSuccessLog.success_count.desc()).all()
+            return [(r.provider, r.model_name) for r in results]
+        except:
+            return []
+        finally:
+            session.close()
 
 db_manager = DBManager(SessionLocal)
+
+# ============================================================================
+# 📂 МЕНЕДЖЕР ВРЕМЕННЫХ ЛОГОВ ТЕСТОВ
+# ============================================================================
+
+PENDING_TEST_LOG = "test_pending.csv"
+
+class PendingTestManager:
+    def __init__(self, filename: str):
+        self.filename = filename
+        if not os.path.exists(self.filename):
+            with open(self.filename, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['provider', 'model', 'latency_ms', 'timestamp'])
+
+    def log_success(self, provider: str, model: str, latency_ms: int):
+        try:
+            with open(self.filename, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow([provider, model, latency_ms, datetime.now(timezone.utc).isoformat()])
+        except Exception as e:
+            logger.error(f"Ошибка записи во временный лог тестов: {e}")
+
+    def read_and_clear(self) -> List[Tuple[str, str, int]]:
+        results = []
+        if not os.path.exists(self.filename):
+            return results
+        try:
+            with open(self.filename, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader, None)
+                for row in reader:
+                    if len(row) >= 3:
+                        results.append((row[0], row[1], int(row[2])))
+            
+            with open(self.filename, 'w', encoding='utf-8') as f:
+                f.write('provider,model,latency_ms,timestamp\n')
+            
+            return results
+        except Exception as e:
+            logger.error(f"Ошибка чтения временного лога: {e}")
+            return []
+    
+    def get_pending_models(self) -> List[Tuple[str, str]]:
+        models = []
+        if not os.path.exists(self.filename):
+            return models
+        try:
+            with open(self.filename, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader, None)
+                seen = set()
+                for row in reader:
+                    if len(row) >= 2:
+                        key = (row[0], row[1])
+                        if key not in seen:
+                            models.append(key)
+                            seen.add(key)
+            return models
+        except:
+            return []
+
+pending_test_manager = PendingTestManager(PENDING_TEST_LOG)
+
+G4F_DEEP_SCAN_MODELS = {
+    "PollinationsAI": ["deepseek-r1", "deepseek-v3", "llama-3.3-70b", "qwen-2.5-72b", "mistral-large", "flux-pro"],
+    "Vercel": ["deepseek-r1", "llama-3.3-70b", "qwen-2.5-72b"],
+    "FreeGPT": ["deepseek-r1", "llama-3.3-70b", "gpt-3.5-turbo"],
+    "MyShell": ["llama-3.3-70b", "mistral-large"],
+    "Perplexity": ["llama-3.3-70b", "mixtral-8x7b"],
+    "Default": ["gpt-3.5-turbo", "llama-3.3-70b", "deepseek-r1"]
+}
 
 # ============================================================================
 # 🔧 ЛОГИРОВАНИЕ
@@ -179,7 +263,6 @@ EXCLUDED_OR_MODELS = ["liquid/lfm-2.5-1.2b-instruct:free"]
 OPENROUTER_PRIORITY = "nvidia/nemotron-3-super-120b-a12b:free"
 
 GROQ_PRIORITY_MODELS = [
-    "meta-llama/llama-4-scout-17b-16e-instruct",
     "qwen/qwen3-32b",
     "llama-3.3-70b-versatile",
     "llama-3.1-8b-instant",
@@ -627,6 +710,50 @@ dice_engine = DiceParser()
 # 💬 КОМАНДЫ (СОБАЧИЙ СТИЛЬ)
 # ============================================================================
 
+async def get_priority_queue():
+    """Получает очередь моделей: сначала временный файл, потом дефолтные, потом БД"""
+    queue = []
+    seen = set()
+    
+    # 1. Приоритет: временный файл тестов
+    pending = pending_test_manager.get_pending_models()
+    for prov, mod in pending:
+        if (prov, mod) not in seen:
+            queue.append((prov, mod))
+            seen.add((prov, mod))
+    
+    # 2. Дефолтные бесплатные модели
+    for prov, mod in PRIORITY_TIER_1 + PRIORITY_TIER_2:
+        if (prov, mod) not in seen:
+            queue.append((prov, mod))
+            seen.add((prov, mod))
+    
+    # 3. Groq модели
+    for groq_model in GROQ_PRIORITY_MODELS[:3]:
+        if ("Groq", groq_model) not in seen:
+            queue.append(("Groq", groq_model))
+            seen.add(("Groq", groq_model))
+    
+    # 4. OpenRouter модели
+    for or_model in OR_PRIORITY_MODELS[:2]:
+        if ("OpenRouter", or_model) not in seen:
+            queue.append(("OpenRouter", or_model))
+            seen.add(("OpenRouter", or_model))
+    
+    # 5. Модели из БД
+    if SessionLocal:
+        db_models = db_manager.get_all_models()
+        for prov, mod in db_models:
+            if (prov, mod) not in seen:
+                queue.append((prov, mod))
+                seen.add((prov, mod))
+    
+    # 6. Фолбэк g4f-default
+    if ("g4f-default", "deepseek-r1") not in seen:
+        queue.append(("g4f-default", "deepseek-r1"))
+    
+    return queue
+
 @bot.slash_command(name="скажи", description="Запрос к ИИ")
 async def slash_say(interaction: disnake.CommandInteraction, 
                     вопрос: str = commands.Param(min_length=1, description="Ваш вопрос или запрос"), 
@@ -647,11 +774,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
         
         msg = await interaction.edit_original_response(embed=status_embed)
         
-        queue = PRIORITY_TIER_1 + PRIORITY_TIER_2
-        for groq_model in GROQ_PRIORITY_MODELS[:3]:
-            queue.append(("Groq", groq_model))
-        queue.append(("OpenRouter", OPENROUTER_PRIORITY))
-        queue.append(("g4f-default", "deepseek-r1"))
+        queue = await get_priority_queue()
         
         system_prompt = "Ты помощник по имени Псинка (мальчик). Отвечай кратко на русском и по делу, отвечай развёрнуто в случае нужды в глубинном анализе вопроса или при запросе пользователя."
         final_response = None
@@ -659,6 +782,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
         final_mod = "?"
         use_proxy = (прокси == "Да")
         proxy_url = get_random_proxy(use_proxy)
+        used_temp_file = False
         
         for idx, (prov, mod) in enumerate(queue):
             try:
@@ -676,7 +800,12 @@ async def slash_say(interaction: disnake.CommandInteraction,
                 if ok and ans:
                     final_response = ans
                     final_prov, final_mod = prov, mod
-                    db_manager.log_success(prov, mod, int(lat * 1000))
+                    # Проверяем, была ли модель из временного файла
+                    pending_models = pending_test_manager.get_pending_models()
+                    if (prov, mod) in pending_models:
+                        used_temp_file = True
+                    if not used_temp_file:
+                        db_manager.log_success(prov, mod, int(lat * 1000))
                     break
             except Exception as e:
                 logger.warning(f"Error {prov}/{mod}: {e}")
@@ -871,11 +1000,20 @@ class TestModeView(disnake.ui.View):
         await interaction.response.defer()
         log_analysis("TEST: Express G4F started", "INFO")
         start = time.time()
-        ok, ans, lat = await make_g4f_request("PollinationsAI", "deepseek-r1", "ping", timeout=15.0)
-        elapsed = time.time() - start
+        models = G4F_DEEP_SCAN_MODELS.get("PollinationsAI", ["deepseek-r1"])
+        success = False
+        used_model = ""
+        for mod in models:
+            ok, ans, lat = await make_g4f_request("PollinationsAI", mod, "ping", timeout=15.0)
+            if ok:
+                pending_test_manager.log_success("PollinationsAI", mod, int(lat * 1000))
+                success = True
+                used_model = mod
+                break
         
-        status = "✅ Успех *гав!*" if ok else f"❌ Ошибка: {ans} *скулит*"
-        color = 0x00FF88 if ok else 0xFF4444
+        elapsed = time.time() - start
+        status = "✅ Успех *гав!*" if success else f"❌ Ошибка *скулит*"
+        color = 0x00FF88 if success else 0xFF4444
         
         embed = disnake.Embed(
             title="🧪 ПсИИнка тестит G4F",
@@ -885,8 +1023,8 @@ class TestModeView(disnake.ui.View):
         )
         embed.add_field(name="⏱ Время", value=f"{elapsed:.2f}с", inline=True)
         embed.add_field(name="📡 Провайдер", value="PollinationsAI", inline=True)
-        embed.add_field(name="🤖 Модель", value="deepseek-r1", inline=True)
-        if ok:
+        if success:
+            embed.add_field(name="🤖 Модель", value=f"`{used_model}`", inline=True)
             embed.add_field(name="💬 Ответ", value=f"```{ans[:100]}```", inline=False)
         
         log_analysis(f"TEST Result: {status}, Time: {elapsed:.2f}s", "INFO")
@@ -900,6 +1038,10 @@ class TestModeView(disnake.ui.View):
         ok, ans, lat = await test_groq_single(GROQ_PRIORITY_MODELS, "ping", timeout=15.0, system_prompt="Ты тестовый ИИ.")
         elapsed = time.time() - start
         
+        model_name = ans.split(':')[0] if ':' in ans and ok else "unknown"
+        if ok:
+            pending_test_manager.log_success("Groq", model_name, int(lat * 1000))
+            
         status = "✅ Успех *гав!*" if ok else f"❌ Ошибка: {ans} *скулит*"
         color = 0x00FF88 if ok else 0xFF4444
         
@@ -913,7 +1055,7 @@ class TestModeView(disnake.ui.View):
         embed.add_field(name="📡 Провайдер", value="Groq", inline=True)
         if ok:
             embed.add_field(name="💬 Ответ", value=f"```{ans[:100]}```", inline=False)
-            embed.add_field(name="🏆 Модель", value=f"`{ans.split(':')[0]}`", inline=True)
+            embed.add_field(name="🏆 Модель", value=f"`{model_name}`", inline=True)
         
         log_analysis(f"TEST Groq Result: {status}, Time: {elapsed:.2f}s", "INFO")
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -926,6 +1068,9 @@ class TestModeView(disnake.ui.View):
         ok, ans, lat = await test_openrouter_single(OR_PRIORITY_MODELS, "ping", timeout=15.0, system_prompt="Ты тестовый ИИ.")
         elapsed = time.time() - start
         
+        if ok:
+            pending_test_manager.log_success("OpenRouter", OR_PRIORITY_MODELS[0], int(lat * 1000))
+            
         status = "✅ Успех *гав!*" if ok else f"❌ Ошибка: {ans} *скулит*"
         color = 0x00FF88 if ok else 0xFF4444
         
@@ -988,7 +1133,7 @@ async def slash_test(interaction: disnake.CommandInteraction):
 async def run_mass_test(channel):
     progress_embed = disnake.Embed(
         title="🔄 ПсИИнка сканирует...",
-        description="*нюхает* G4F + Groq + OpenRouter... 🐕",
+        description="*нюхает* G4F (Deep) + Groq + OpenRouter... 🐕",
         color=0xFF8844,
         timestamp=datetime.now()
     )
@@ -997,15 +1142,20 @@ async def run_mass_test(channel):
     
     start_time = time.time()
     
-    providers_to_test = ["PollinationsAI", "Vercel", "FreeGPT"]
-    models_to_test = ["deepseek-r1", "llama-3-70b", "qwen-2.5-72b"]
-    combinations = [(p, m) for p in providers_to_test for m in models_to_test]
-    combinations += [("Groq", m) for m in GROQ_PRIORITY_MODELS[:3]]
-    combinations += [("OpenRouter", m) for m in OR_PRIORITY_MODELS[:3]]
+    combinations = []
+    
+    for prov, models in G4F_DEEP_SCAN_MODELS.items():
+        for mod in models:
+            combinations.append((prov, mod))
+            
+    for m in GROQ_PRIORITY_MODELS:
+        combinations.append(("Groq", m))
+        
+    for m in OR_PRIORITY_MODELS:
+        combinations.append(("OpenRouter", m))
     
     results = []
     total = len(combinations)
-    
     semaphore = asyncio.Semaphore(5)
 
     async def test_combo(provider, model):
@@ -1018,6 +1168,9 @@ async def run_mass_test(channel):
                     ok, ans, lat = await test_groq_single([model], TEST_PROMPT, timeout=30.0)
                 else:
                     ok, ans, lat = await make_g4f_request(provider, model, TEST_PROMPT, timeout=30.0)
+                
+                if ok:
+                    pending_test_manager.log_success(provider, model, int(lat * 1000))
                 
                 return {'provider': provider, 'model': model, 'success': ok, 'time': lat, 'error': ans if not ok else None}
             except Exception as e:
@@ -1037,7 +1190,7 @@ async def run_mass_test(channel):
             progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`\n⏳ Прошло: {elapsed:.0f}с", inline=False)
             
             success_count = len([r for r in results if r['success']])
-            progress_embed.add_field(name="📊 Статистика", value=f"✅ Успешно: {success_count} *гав!*\n❌ Ошибок: {len(results) - success_count} *скулит*", inline=False)
+            progress_embed.set_field_at(1, name="📊 Статистика", value=f"✅ Успешно: {success_count} *гав!*\n❌ Ошибок: {len(results) - success_count} *скулит*", inline=False)
             
             await progress_msg.edit(embed=progress_embed)
         except: pass
@@ -1061,9 +1214,6 @@ async def run_mass_test(channel):
         final_embed.add_field(name="🏆 Топ-5 быстрых", value=top_text, inline=False)
     
     await progress_msg.edit(embed=final_embed)
-    
-    for r in successful[:5]:
-        db_manager.log_success(r['provider'], r['model'], int(r['time'] * 1000))
 
 # ============================================================================
 # 🔍 АНАЛИЗ КАНАЛА (СОБАЧИЙ СТИЛЬ)
@@ -1175,10 +1325,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
         
         all_violations = []
         
-        main_queue = PRIORITY_TIER_1 + PRIORITY_TIER_2
-        groq_queue = [("Groq", m) for m in GROQ_PRIORITY_MODELS[:3]]
-        or_fallback = [OPENROUTER_PRIORITY, "meta-llama/llama-3.3-70b-instruct:free"]
-        proxy_queue = main_queue + groq_queue + [("OpenRouter", m) for m in or_fallback]
+        main_queue = await get_priority_queue()
 
         for i in range(0, len(messages_data), BATCH_SIZE):
             batch_data = messages_data[i : i + BATCH_SIZE]
@@ -1189,6 +1336,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             final_answer = None
             success = False
             used_provider = "Unknown"
+            used_temp_file = False
 
             async def try_request(prov, mod, use_proxy=False):
                 proxy_str = get_random_proxy(True) if use_proxy else None
@@ -1213,41 +1361,22 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                         final_answer = ans
                         used_provider = f"{prov} ({mod})"
                         success = True
+                        pending_models = pending_test_manager.get_pending_models()
+                        if (prov, mod) in pending_models:
+                            used_temp_file = True
+                        if not used_temp_file:
+                            db_manager.log_success(prov, mod, int(_ * 1000))
                         break
                 except Exception as e:
                     log_analysis(f"Error {prov}/{mod}: {e}", "DEBUG")
                     continue
 
             if not success:
-                for groq_model in GROQ_PRIORITY_MODELS[:3]:
-                    try:
-                        ok, ans, _ = await try_request("Groq", groq_model, False)
-                        if ok:
-                            final_answer = ans
-                            used_provider = f"Groq ({groq_model})"
-                            success = True
-                            break
-                    except: 
-                        continue
-
-            if not success:
-                for or_model in or_fallback:
-                    try:
-                        ok, ans, _ = await try_request("OpenRouter", or_model, False)
-                        if ok:
-                            final_answer = ans
-                            used_provider = f"OpenRouter ({or_model})"
-                            success = True
-                            break
-                    except: 
-                        continue
-
-            if not success:
                 log_analysis(f"⚠️ Batch {current_batch}: Activating PROXY MODE.", "WARNING")
                 progress_embed.set_field_at(1, name="Статус", value="⚠️ ПРОКСИ РЕЖИМ... *нюхает* 🔀", inline=False)
                 await status_msg.edit(embed=progress_embed)
                 
-                for prov, mod in proxy_queue:
+                for prov, mod in main_queue:
                     try:
                         ok, ans, _ = await try_request(prov, mod, True)
                         if ok:
@@ -1382,6 +1511,62 @@ async def slash_download_db(interaction: disnake.CommandInteraction):
         await interaction.followup.send(file=disnake.File(file_obj))
     else:
         await interaction.followup.send("❌ Гав! Не удалось экспортировать данные или БД не подключена. *скулит*", ephemeral=True)
+
+@bot.slash_command(name="очистить_бд", description="Полная очистка таблицы успехов в БД")
+async def slash_clear_db(interaction: disnake.CommandInteraction):
+    if interaction.author.id != OWNER_ID:
+        await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
+        return
+    
+    await interaction.response.defer()
+    
+    if not SessionLocal:
+        await interaction.followup.send("❌ Гав! БД не подключена.", ephemeral=True)
+        return
+
+    session = SessionLocal()
+    try:
+        count = session.query(ModelSuccessLog).count()
+        session.query(ModelSuccessLog).delete()
+        session.commit()
+        await interaction.followup.send(f"✅ ПсИИнка очистил БД! Удалено записей: `{count}` *виляет хвостом* 🐕", ephemeral=True)
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Error clearing DB: {e}")
+        await interaction.followup.send(f"❌ Ошибка очистки: {str(e)[:100]}", ephemeral=True)
+    finally:
+        session.close()
+
+@bot.slash_command(name="записать_тест", description="Перенос данных из временного лога тестов в БД")
+async def slash_commit_tests(interaction: disnake.CommandInteraction):
+    if interaction.author.id != OWNER_ID:
+        await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
+        return
+    
+    await interaction.response.defer()
+    
+    records = pending_test_manager.read_and_clear()
+    if not records:
+        await interaction.followup.send("ℹ️ ПсИИнка проверил временный лог — там пусто. *нюхает* 🐕", ephemeral=True)
+        return
+    
+    count = 0
+    if SessionLocal:
+        session = SessionLocal()
+        try:
+            for prov, mod, lat in records:
+                db_manager.log_success(prov, mod, lat)
+                count += 1
+            session.commit()
+            await interaction.followup.send(f"✅ ПсИИнка записал `{count}` успешных тестов в БД! *виляет хвостом* 🐕", ephemeral=True)
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error committing tests: {e}")
+            await interaction.followup.send(f"❌ Ошибка записи: {str(e)[:100]}", ephemeral=True)
+        finally:
+            session.close()
+    else:
+        await interaction.followup.send("❌ Гав! БД не подключена, данные сохранены только в файле.", ephemeral=True)
 
 # ============================================================================
 # СОБЫТИЯ
