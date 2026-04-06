@@ -791,7 +791,6 @@ async def slash_say(interaction: disnake.CommandInteraction,
         use_proxy = (прокси == "Да")
         proxy_url = get_random_proxy(use_proxy)
         used_temp_file = False
-        lat = 0
         
         for idx, (prov, mod) in enumerate(queue):
             try:
@@ -1343,7 +1342,6 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             success = False
             used_provider = "Unknown"
             used_temp_file = False
-            latency_val = 0
 
             async def try_request(prov, mod, use_proxy=False):
                 proxy_str = get_random_proxy(True) if use_proxy else None
