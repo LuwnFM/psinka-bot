@@ -746,7 +746,7 @@ async def get_priority_queue():
     seen = set()
     
     # Исключения для моделей
-    EXCLUDED_MODELS = ["flux-pro", "liquid/lfm-2.5-1.2b-instruct:free""]
+    EXCLUDED_MODELS = ["flux-pro", "liquid/lfm-2.5-1.2b-instruct:free"]
     
     # 1. Приоритет: временный файл тестов
     pending = pending_test_manager.get_pending_models()
