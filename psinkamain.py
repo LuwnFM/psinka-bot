@@ -257,14 +257,14 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # 🤖 КОНФИГУРАЦИЯ МОДЕЛЕЙ
 # ============================================================================
 
-PRIORITY_TIER_1 = [("PollinationsAI", "deepseek-r1"), ("PollinationsAI", "deepseek-v3")]
-PRIORITY_TIER_2 = [("FreeGPT", "deepseek-r1"), ("Vercel", "deepseek-r1")]
+PRIORITY_TIER_1 = [("Default", "deepseek-r1"), ("Default", "deepseek-v3")]
+PRIORITY_TIER_2 = [("PollinationsAI", "deepseek-r1"), ("Vercel", "deepseek-r1")]
 EXCLUDED_OR_MODELS = ["liquid/lfm-2.5-1.2b-instruct:free"]
 OPENROUTER_PRIORITY = "nvidia/nemotron-3-super-120b-a12b:free"
 
 GROQ_PRIORITY_MODELS = [
-    "qwen/qwen3-32b",
     "llama-3.3-70b-versatile",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
     "llama-3.1-8b-instant",
     "moonshotai/kimi-k2-instruct-0905",
 ]
