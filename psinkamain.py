@@ -734,90 +734,59 @@ def strip_think_content(text: str) -> str:
     return cleaned if cleaned.strip() else text
 
 async def get_priority_queue():
-    """Получает очередь моделей: сначала временный файл, потом дефолтные, потом БД"""
+    """
+    Очередь для /скажи:
+    1. Временный файл тестов (самый высокий приоритет)
+    2. G4F модели (g4f-default + все доступные)
+    3. Groq модели (все, кроме исключений)
+    4. OpenRouter модели (все, кроме исключений)
+    5. БД (резерв)
+    """
     queue = []
     seen = set()
+    
+    # Исключения для моделей
+    EXCLUDED_MODELS = ["flux-pro", "liquid/lfm-2.5-1.2b-instruct:free""]
     
     # 1. Приоритет: временный файл тестов
     pending = pending_test_manager.get_pending_models()
     for prov, mod in pending:
-        if (prov, mod) not in seen:
+        if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
             queue.append((prov, mod))
             seen.add((prov, mod))
     
-    # 2. Дефолтные бесплатные модели
-    for prov, mod in PRIORITY_TIER_1 + PRIORITY_TIER_2:
-        if (prov, mod) not in seen:
-            queue.append((prov, mod))
-            seen.add((prov, mod))
+    # 2. G4F модели (g4f-default + все из словаря)
+    # Сначала g4f-default
+    if ("g4f-default", "deepseek-r1") not in seen:
+        queue.append(("g4f-default", "deepseek-r1"))
+        seen.add(("g4f-default", "deepseek-r1"))
     
-    # 3. Groq модели
-    for groq_model in GROQ_PRIORITY_MODELS[:3]:
-        if ("Groq", groq_model) not in seen:
-            queue.append(("Groq", groq_model))
-            seen.add(("Groq", groq_model))
-    
-    # 4. OpenRouter модели
-    for or_model in OR_PRIORITY_MODELS[:2]:
-        if ("OpenRouter", or_model) not in seen:
-            queue.append(("OpenRouter", or_model))
-            seen.add(("OpenRouter", or_model))
-    
-    # 5. Модели из БД
-    if SessionLocal:
-        db_models = db_manager.get_all_models()
-        for prov, mod in db_models:
-            if (prov, mod) not in seen:
+    # Затем все G4F провайдеры из словаря
+    for prov, models in G4F_DEEP_SCAN_MODELS.items():
+        for mod in models:
+            if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
                 queue.append((prov, mod))
                 seen.add((prov, mod))
     
-    # 6. Фолбэк g4f-default
-    if ("g4f-default", "deepseek-r1") not in seen:
-        queue.append(("g4f-default", "deepseek-r1"))
-    
-    return queue
-
-async def get_analysis_priority_queue():
-    """Очередь для /анализ: БД в приоритете, без flux-pro"""
-    queue = []
-    seen = set()
-    
-    # 1. Приоритет: БД (самый высокий для анализа)
-    if SessionLocal:
-        db_models = db_manager.get_all_models()
-        for prov, mod in db_models:
-            if (prov, mod) not in seen and mod != "flux-pro":
-                queue.append((prov, mod))
-                seen.add((prov, mod))
-    
-    # 2. Временный файл тестов
-    pending = pending_test_manager.get_pending_models()
-    for prov, mod in pending:
-        if (prov, mod) not in seen and mod != "flux-pro":
-            queue.append((prov, mod))
-            seen.add((prov, mod))
-    
-    # 3. Дефолтные бесплатные модели (без flux-pro)
-    for prov, mod in PRIORITY_TIER_1 + PRIORITY_TIER_2:
-        if (prov, mod) not in seen and mod != "flux-pro":
-            queue.append((prov, mod))
-            seen.add((prov, mod))
-    
-    # 4. Groq модели
-    for groq_model in GROQ_PRIORITY_MODELS[:3]:
-        if ("Groq", groq_model) not in seen:
+    # 3. Groq модели (все из списка)
+    for groq_model in GROQ_PRIORITY_MODELS:
+        if ("Groq", groq_model) not in seen and groq_model not in EXCLUDED_MODELS:
             queue.append(("Groq", groq_model))
             seen.add(("Groq", groq_model))
     
-    # 5. OpenRouter модели
-    for or_model in OR_PRIORITY_MODELS[:2]:
-        if ("OpenRouter", or_model) not in seen:
+    # 4. OpenRouter модели (все из списка, кроме исключений)
+    for or_model in OR_PRIORITY_MODELS:
+        if ("OpenRouter", or_model) not in seen and or_model not in EXCLUDED_MODELS:
             queue.append(("OpenRouter", or_model))
             seen.add(("OpenRouter", or_model))
     
-    # 6. Фолбэк g4f-default (без flux-pro)
-    if ("g4f-default", "deepseek-r1") not in seen:
-        queue.append(("g4f-default", "deepseek-r1"))
+    # 5. Модели из БД (резервный вариант)
+    if SessionLocal:
+        db_models = db_manager.get_all_models()
+        for prov, mod in db_models:
+            if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
+                queue.append((prov, mod))
+                seen.add((prov, mod))
     
     return queue
 
