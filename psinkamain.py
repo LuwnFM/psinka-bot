@@ -717,6 +717,21 @@ dice_engine = DiceParser()
 # ============================================================================
 # 💬 КОМАНДЫ (СОБАЧИЙ СТИЛЬ)
 # ============================================================================
+def strip_think_content(text: str) -> str:
+    """Удаляет секции <think>...</think> из ответа модели"""
+    if not text:
+        return text
+    
+    # Удаляем <think>...</think> блоки
+    cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    
+    # Удаляем оставшиеся теги think
+    cleaned = re.sub(r'</?think>', '', cleaned, flags=re.IGNORECASE)
+    
+    # Удаляем пустые строки в начале
+    cleaned = cleaned.lstrip()
+    
+    return cleaned if cleaned.strip() else text
 
 async def get_priority_queue():
     """Получает очередь моделей: сначала временный файл, потом дефолтные, потом БД"""
@@ -757,6 +772,50 @@ async def get_priority_queue():
                 seen.add((prov, mod))
     
     # 6. Фолбэк g4f-default
+    if ("g4f-default", "deepseek-r1") not in seen:
+        queue.append(("g4f-default", "deepseek-r1"))
+    
+    return queue
+
+async def get_analysis_priority_queue():
+    """Очередь для /анализ: БД в приоритете, без flux-pro"""
+    queue = []
+    seen = set()
+    
+    # 1. Приоритет: БД (самый высокий для анализа)
+    if SessionLocal:
+        db_models = db_manager.get_all_models()
+        for prov, mod in db_models:
+            if (prov, mod) not in seen and mod != "flux-pro":
+                queue.append((prov, mod))
+                seen.add((prov, mod))
+    
+    # 2. Временный файл тестов
+    pending = pending_test_manager.get_pending_models()
+    for prov, mod in pending:
+        if (prov, mod) not in seen and mod != "flux-pro":
+            queue.append((prov, mod))
+            seen.add((prov, mod))
+    
+    # 3. Дефолтные бесплатные модели (без flux-pro)
+    for prov, mod in PRIORITY_TIER_1 + PRIORITY_TIER_2:
+        if (prov, mod) not in seen and mod != "flux-pro":
+            queue.append((prov, mod))
+            seen.add((prov, mod))
+    
+    # 4. Groq модели
+    for groq_model in GROQ_PRIORITY_MODELS[:3]:
+        if ("Groq", groq_model) not in seen:
+            queue.append(("Groq", groq_model))
+            seen.add(("Groq", groq_model))
+    
+    # 5. OpenRouter модели
+    for or_model in OR_PRIORITY_MODELS[:2]:
+        if ("OpenRouter", or_model) not in seen:
+            queue.append(("OpenRouter", or_model))
+            seen.add(("OpenRouter", or_model))
+    
+    # 6. Фолбэк g4f-default (без flux-pro)
     if ("g4f-default", "deepseek-r1") not in seen:
         queue.append(("g4f-default", "deepseek-r1"))
     
@@ -807,7 +866,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
                     ok, ans, lat = await make_g4f_request(prov, mod, вопрос, timeout=45.0, system_prompt=system_prompt, proxy_url=proxy_url)
                 
                 if ok and ans:
-                    final_response = ans
+                    final_response = strip_think_content(ans)
                     final_prov, final_mod = prov, mod
                     pending_models = pending_test_manager.get_pending_models()
                     if (prov, mod) in pending_models:
@@ -1330,7 +1389,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
         
         all_violations = []
         
-        main_queue = await get_priority_queue()
+        main_queue = await get_analysis_priority_queue()
 
         for i in range(0, len(messages_data), BATCH_SIZE):
             batch_data = messages_data[i : i + BATCH_SIZE]
