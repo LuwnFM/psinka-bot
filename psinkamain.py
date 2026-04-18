@@ -330,9 +330,18 @@ async def fetch_free_proxies(count: int = 20) -> List[str]:
         logger.warning(f"⚠️ Не удалось обновить прокси: {e}")
     return FREE_PROXY_LIST
 
+def validate_proxy_format(proxy: str) -> bool:
+    """Проверяет, что прокси в формате http://host:port или socks5://..."""
+    if not proxy:
+        return False
+    return proxy.startswith(('http://', 'https://', 'socks4://', 'socks5://')) and ':' in proxy.split('://')[-1]
+
+# Использование в get_random_proxy:
 def get_random_proxy(use_proxy: bool) -> Optional[str]:
-    if not use_proxy: return None
-    return random.choice(FREE_PROXY_LIST)
+    if not use_proxy: 
+        return None
+    proxy = random.choice(FREE_PROXY_LIST)
+    return proxy if validate_proxy_format(proxy) else None
 
 async def check_access(interaction: disnake.CommandInteraction, allowed_role_names: List[str] = ["Псарь"]) -> bool:
     if interaction.author.id == OWNER_ID:
@@ -372,54 +381,80 @@ def strip_think_content(text: str) -> str:
 # ============================================================================
 
 async def make_g4f_request(provider_name: str, model: str, prompt: str,
-                           timeout: float = 45.0, system_prompt: str = None, proxy_url: str = None) -> Tuple[bool, str, float]:
+                           timeout: float = 45.0, system_prompt: str = None, 
+                           proxy_url: str = None) -> Tuple[bool, str, float]:
+    """
+    Запрос к g4f с корректными параметрами согласно документации:
+    https://github.com/gpt4free/g4f.dev/blob/main/docs/legacy.md
+    """
     start = time.time()
+    
+    # Формируем сообщения
     messages = []
-    if system_prompt: messages.append({"role": "system", "content": system_prompt})
+    if system_prompt: 
+        messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
     
+    # Определяем провайдеры для перебора
     providers_to_try = [provider_name] if provider_name else [None]
     fallback_providers = ["PollinationsAI", "MyShell", "Perplexity"]
     
     for prov_name in providers_to_try + fallback_providers:
         try:
+            # Получаем класс провайдера (или None для авто-выбора)
             provider_arg = getattr(g4f.Provider, prov_name, None) if prov_name else None
             
             def sync_call():
                 return g4f.ChatCompletion.create(
                     model=model,
                     messages=messages,
-                    provider=provider_arg,
-                    timeout=int(timeout)
+                    provider=provider_arg,      # ✅ Класс провайдера или None
+                    timeout=int(timeout),        # ✅ Таймаут в секундах (int)
+                    proxy=proxy_url,             # ✅ ✅ ✅ ПРОКСИ ТЕПЕРЬ ПЕРЕДАЁТСЯ
+                    stream=False                 # ✅ Явно отключаем стриминг для строкового ответа
                 )
 
+            # Выполняем в потоке, чтобы не блокировать asyncio
             response = await asyncio.wait_for(
                 asyncio.to_thread(sync_call),
                 timeout=timeout + 5
             )
             
-            if response:
-                answer = str(response).strip()
-                if "The model does not exist" in answer or "api.airforce" in answer or "Add a" in answer:
-                    raise Exception(f"Provider Error: {answer[:50]}")
-                
-                if answer:
-                    elapsed = time.time() - start
-                    logger.debug(f"✅ G4F {prov_name}/{model} — {elapsed:.2f}s")
-                    return True, answer, elapsed
+            # ✅ Корректная обработка ответа
+            if response is None:
+                raise Exception("Пустой ответ (None)")
             
-            raise Exception("Пустой ответ")
+            # Если ответ — генератор (маловероятно при stream=False, но на всякий случай)
+            if hasattr(response, '__iter__') and not isinstance(response, (str, bytes)):
+                answer = ''.join(str(chunk) for chunk in response).strip()
+            else:
+                answer = str(response).strip()
+            
+            # Фильтруем известные ошибки в тексте ответа
+            if any(err in answer for err in ["The model does not exist", "api.airforce", "Add a", "error"]):
+                raise Exception(f"Provider Error: {answer[:50]}")
+            
+            if answer:
+                elapsed = time.time() - start
+                logger.debug(f"✅ G4F {prov_name or 'Auto'}/{model} — {elapsed:.2f}s | proxy: {proxy_url or 'direct'}")
+                return True, answer, elapsed
+            
+            raise Exception("Пустой ответ после обработки")
 
+        except asyncio.TimeoutError:
+            return False, f"Таймаут {timeout}с", time.time() - start
         except Exception as e:
             err_str = str(e).lower()
-            if "api_key" in err_str or "key" in err_str or "unauthorized" in err_str:
-                logger.debug(f"⚠️ G4F {prov_name} требует ключ, пробуем следующий...")
-                continue
-            if "timeout" in err_str:
-                return False, f"Таймаут {timeout}с", time.time() - start
             
+            # Пропускаем провайдеры, требующие ключи
+            if any(kw in err_str for kw in ["api_key", "key", "unauthorized", "authentication"]):
+                logger.debug(f"⚠️ G4F {prov_name} требует авторизацию, пробуем следующий...")
+                continue
+            
+            # Если это последний провайдер в списке — возвращаем ошибку
             if prov_name == fallback_providers[-1]:
                 return False, f"G4F Error: {str(e)[:80]}", time.time() - start
+            logger.debug(f"⚠️ G4F {prov_name} ошибка: {str(e)[:60]}, пробуем fallback...")
 
     return False, "Все провайдеры G4F недоступны", time.time() - start
 
