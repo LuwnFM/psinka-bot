@@ -31,12 +31,6 @@ except ImportError:
     # Для совместимости со старыми версиями
     ProviderError = ModelNotFoundError = RequestLimitError = AuthenticationError = Exception
 
-# В except блоке make_g4f_request:
-except (ProviderError, ModelNotFoundError, RequestLimitError, AuthenticationError) as e:
-    logger.debug(f"⚠️ G4F {prov_name}: {type(e).__name__} — {str(e)[:60]}")
-    continue  # Пробуем следующий провайдер
-
-
 load_dotenv()
 
 DATABASE_URL = os.getenv('DATABASE_URL')
