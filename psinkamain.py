@@ -240,80 +240,6 @@ G4F_DEEP_SCAN_MODELS = {
     "Default": ["gpt-3.5-turbo", "llama-3.3-70b", "deepseek-r1", "deepseek-v3"]
 }
 
-# ============================================================================
-# 📚 ПОЛНЫЕ СПИСКИ МОДЕЛЕЙ ДЛЯ ТЕСТИРОВАНИЯ
-# ============================================================================
-
-# Все известные модели Groq (приоритетные + дополнительные)
-GROQ_ALL_MODELS = GROQ_PRIORITY_MODELS + [
-    "mixtral-8x7b-32768",
-    "gemma2-9b-it",
-    "llama-3.2-1b-preview",
-    "llama-3.2-3b-preview",
-    "llama-3.2-11b-vision-preview",
-    "llama-3.2-90b-vision-preview",
-    "llama-guard-3-8b",
-    "llama3-70b-8192",
-    "llama3-8b-8192",
-]
-
-# Все известные бесплатные/доступные модели OpenRouter
-OR_ALL_MODELS = OR_PRIORITY_MODELS + [
-    "meta-llama/llama-3-8b-instruct:free",
-    "meta-llama/llama-3-70b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-    "mistralai/mixtral-8x7b-instruct:free",
-    "google/gemma-2-9b-it:free",
-    "huggingfaceh4/zephyr-7b-beta:free",
-    "nousresearch/hermes-2-pro-mistral-7b:free",
-    "openchat/openchat-7b:free",
-    "microsoft/phi-3-mini-128k-instruct:free",
-    "microsoft/phi-3-medium-128k-instruct:free",
-]
-
-
-def get_all_g4f_combinations() -> List[Tuple[str, str]]:
-    """
-    Возвращает ВСЕ комбинации провайдер/модель для G4F:
-    - Из конфигурации G4F_DEEP_SCAN_MODELS
-    - Из БД (успешные истории)
-    - Уникальные, без дубликатов
-    """
-    combos = []
-    seen = set()
-    EXCLUDED = ["flux-pro", "liquid/lfm-2.5-1.2b-instruct:free"]
-
-    # 1. Из конфигурации бота
-    for prov, models in G4F_DEEP_SCAN_MODELS.items():
-        for mod in models:
-            key = (prov, mod)
-            if key not in seen and mod not in EXCLUDED:
-                combos.append(key)
-                seen.add(key)
-
-    # 2. Из БД (если подключена) — добавляем успешные модели
-    if SessionLocal:
-        db_models = db_manager.get_all_models()
-        for prov, mod in db_models:
-            # Пропускаем не-G4F провайдеры и исключённые модели
-            if prov in ["Groq", "OpenRouter"] or mod in EXCLUDED:
-                continue
-            key = (prov, mod)
-            if key not in seen:
-                combos.append(key)
-                seen.add(key)
-
-    return combos
-
-
-def get_all_groq_combinations() -> List[Tuple[str, str]]:
-    """Возвращает все известные модели Groq"""
-    return [("Groq", mod) for mod in GROQ_ALL_MODELS if mod not in EXCLUDED_OR_MODELS]
-
-
-def get_all_openrouter_combinations() -> List[Tuple[str, str]]:
-    """Возвращает все известные модели OpenRouter"""
-    return [("OpenRouter", mod) for mod in OR_ALL_MODELS if mod not in EXCLUDED_OR_MODELS]
 
 # ============================================================================
 # 🔧 ЛОГИРОВАНИЕ
@@ -405,7 +331,80 @@ ANALYSIS_SYSTEM_PROMPT = """
 Пример правильного ответа при отсутствии нарушений: NONE
 """
 
+# ============================================================================
+# 📚 ПОЛНЫЕ СПИСКИ МОДЕЛЕЙ ДЛЯ ТЕСТИРОВАНИЯ
+# ============================================================================
 
+# Все известные модели Groq (приоритетные + дополнительные)
+GROQ_ALL_MODELS = GROQ_PRIORITY_MODELS + [
+    "mixtral-8x7b-32768",
+    "gemma2-9b-it",
+    "llama-3.2-1b-preview",
+    "llama-3.2-3b-preview",
+    "llama-3.2-11b-vision-preview",
+    "llama-3.2-90b-vision-preview",
+    "llama-guard-3-8b",
+    "llama3-70b-8192",
+    "llama3-8b-8192",
+]
+
+# Все известные бесплатные/доступные модели OpenRouter
+OR_ALL_MODELS = OR_PRIORITY_MODELS + [
+    "meta-llama/llama-3-8b-instruct:free",
+    "meta-llama/llama-3-70b-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
+    "mistralai/mixtral-8x7b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "huggingfaceh4/zephyr-7b-beta:free",
+    "nousresearch/hermes-2-pro-mistral-7b:free",
+    "openchat/openchat-7b:free",
+    "microsoft/phi-3-mini-128k-instruct:free",
+    "microsoft/phi-3-medium-128k-instruct:free",
+]
+
+
+def get_all_g4f_combinations() -> List[Tuple[str, str]]:
+    """
+    Возвращает ВСЕ комбинации провайдер/модель для G4F:
+    - Из конфигурации G4F_DEEP_SCAN_MODELS
+    - Из БД (успешные истории)
+    - Уникальные, без дубликатов
+    """
+    combos = []
+    seen = set()
+    EXCLUDED = ["flux-pro", "liquid/lfm-2.5-1.2b-instruct:free"]
+
+    # 1. Из конфигурации бота
+    for prov, models in G4F_DEEP_SCAN_MODELS.items():
+        for mod in models:
+            key = (prov, mod)
+            if key not in seen and mod not in EXCLUDED:
+                combos.append(key)
+                seen.add(key)
+
+    # 2. Из БД (если подключена) — добавляем успешные модели
+    if SessionLocal:
+        db_models = db_manager.get_all_models()
+        for prov, mod in db_models:
+            # Пропускаем не-G4F провайдеры и исключённые модели
+            if prov in ["Groq", "OpenRouter"] or mod in EXCLUDED:
+                continue
+            key = (prov, mod)
+            if key not in seen:
+                combos.append(key)
+                seen.add(key)
+
+    return combos
+
+
+def get_all_groq_combinations() -> List[Tuple[str, str]]:
+    """Возвращает все известные модели Groq"""
+    return [("Groq", mod) for mod in GROQ_ALL_MODELS if mod not in EXCLUDED_OR_MODELS]
+
+
+def get_all_openrouter_combinations() -> List[Tuple[str, str]]:
+    """Возвращает все известные модели OpenRouter"""
+    return [("OpenRouter", mod) for mod in OR_ALL_MODELS if mod not in EXCLUDED_OR_MODELS]
 # ============================================================================
 # 🛠 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================================
