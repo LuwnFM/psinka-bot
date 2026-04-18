@@ -34,11 +34,31 @@ except ImportError:
 load_dotenv()
 
 DATABASE_URL = os.getenv('DATABASE_URL')
-IS_RAILWAY = os.getenv('RAILWAY', '').lower() == 'true'
+IS_RAILWAY = os.getenv('RAILWAY', '').lower() == 'true' or os.getenv('IS_RAILWAY', '').lower() == 'true'
 OWNER_ID = int(os.getenv('OWNER_ID', 0))
-REQUIRED_ROLE_ID = int(os.getenv('ROLE_ID', 0))
+REQUIRED_ROLE_ID = int(os.getenv('REQUIRED_ROLE_ID', 0))
+DEBUG = os.getenv('DEBUG', 'false').lower() == 'true'
+MAX_CONCURRENT = int(os.getenv('MAX_CONCURRENT', 5))
+PROXY_REFRESH_HOURS = int(os.getenv('PROXY_REFRESH_HOURS', 6))
+USE_PROXY = os.getenv('USE_PROXY', 'false').lower() == 'true'
 
-Base = declarative_base()
+
+# ✅ Проверка токенов при старте
+def check_tokens():
+    """Проверяет наличие всех необходимых токенов"""
+    tokens = {
+        'DISCORD_TOKEN': os.getenv('DISCORD_TOKEN'),
+        'GROQ_TOKEN': os.getenv('GROQ_TOKEN'),
+        'OPENR_TOKEN': os.getenv('OPENR_TOKEN'),
+    }
+
+    for name, value in tokens.items():
+        if value:
+            logger.info(f"✅ {name}: установлен")
+        else:
+            logger.warning(f"⚠️ {name}: НЕ НАЙДЕН (функционал будет ограничен)")
+
+    return tokens
 
 
 class ModelSuccessLog(Base):
@@ -486,120 +506,122 @@ def strip_think_content(text: str) -> str:
 
 
 # ============================================================================
-# 🌐 ЗАПРОСЫ К МОДЕЛЯМ
+# 🌐 ЗАПРОСЫ К МОДЕЛЯМ (ИСПРАВЛЕНО)
 # ============================================================================
 
 async def make_g4f_request(provider_name: str, model: str, prompt: str,
                            timeout: float = 45.0, system_prompt: str = None,
                            proxy_url: str = None) -> Tuple[bool, str, float]:
     """
-    Запрос к g4f с корректными параметрами согласно документации:
-    https://github.com/gpt4free/g4f.dev/blob/main/docs/legacy.md
+    Запрос к g4f с корректной обработкой провайдеров
     """
     start = time.time()
 
-    # Формируем сообщения
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    # Определяем провайдеры для перебора
-    providers_to_try = [provider_name] if provider_name else [None]
-    fallback_providers = ["PollinationsAI", "MyShell", "Perplexity"]
+    # Список провайдеров для перебора
+    providers_to_try = []
+    if provider_name and provider_name != "g4f-default":
+        providers_to_try.append(provider_name)
+    providers_to_try.extend(["PollinationsAI", "MyShell", "Perplexity", "Vercel"])
 
-    for prov_name in providers_to_try + fallback_providers:
+    for prov_name in providers_to_try:
         try:
-            # Получаем класс провайдера (или None для авто-выбора)
-            provider_arg = getattr(g4f.Provider, prov_name, None) if prov_name else None
-
             def sync_call():
                 from g4f.client import Client as G4FClient
                 client = G4FClient()
 
-                # Формируем аргументы согласно документации [[26]]
                 kwargs = {
                     "model": model,
                     "messages": messages,
                     "stream": False,
                 }
 
-                # provider указывается только если он валиден
-                if provider_arg:
-                    kwargs["provider"] = provider_arg
-
-                # proxy передаётся через клиент, не в create()
+                # Прокси передаётся в клиент
                 if proxy_url and validate_proxy_format(proxy_url):
                     kwargs["proxy"] = proxy_url
 
+                # Провайдер указываем только если он существует
+                try:
+                    provider_class = getattr(g4f.Provider, prov_name, None)
+                    if provider_class:
+                        kwargs["provider"] = provider_class
+                except:
+                    pass
+
                 return client.chat.completions.create(**kwargs)
 
-            # Выполняем в потоке, чтобы не блокировать asyncio
             response = await asyncio.wait_for(
                 asyncio.to_thread(sync_call),
-                timeout=timeout + 5
+                timeout=timeout + 10
             )
 
-            # ✅ Корректная обработка ответа
             if response is None:
                 raise Exception("Пустой ответ (None)")
 
-            # Корректная обработка ответа согласно OpenAI-compatible API [[26]][[53]]
-            if response and hasattr(response, 'choices') and response.choices:
+            if hasattr(response, 'choices') and response.choices:
                 choice = response.choices[0]
                 if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
                     answer = choice.message.content
                     if answer and answer.strip():
-                        answer = answer.strip()
+                        answer = strip_think_content(answer.strip())
+                        elapsed = time.time() - start
+                        logger.debug(f"✅ G4F {prov_name}/{model} — {elapsed:.2f}s")
+                        return True, answer, elapsed
                     else:
-                        raise Exception("Пустой content в ответе")
+                        raise Exception("Пустой content")
                 else:
-                    raise Exception("Некорректная структура ответа: нет message.content")
+                    raise Exception("Нет message.content")
             else:
-                raise Exception(f"Некорректный ответ от G4F: {type(response)}")
-
-            # Фильтруем известные ошибки в тексте ответа
-            if any(err in answer for err in ["The model does not exist", "api.airforce", "Add a", "error"]):
-                raise Exception(f"Provider Error: {answer[:50]}")
-
-            if answer:
-                elapsed = time.time() - start
-                logger.debug(f"✅ G4F {prov_name or 'Auto'}/{model} — {elapsed:.2f}s | proxy: {proxy_url or 'direct'}")
-                return True, answer, elapsed
-
-            raise Exception("Пустой ответ после обработки")
+                raise Exception(f"Некорректный ответ: {type(response)}")
 
         except asyncio.TimeoutError:
-            return False, f"Таймаут {timeout}с", time.time() - start
+            logger.debug(f"⏰ G4F {prov_name} таймаут")
+            continue
         except Exception as e:
             err_str = str(e).lower()
 
-            # Пропускаем провайдеры, требующие ключи
-            if any(kw in err_str for kw in ["api_key", "key", "unauthorized", "authentication"]):
-                logger.debug(f"⚠️ G4F {prov_name} требует авторизацию, пробуем следующий...")
+            if any(kw in err_str for kw in ["api_key", "unauthorized", "authentication", "401"]):
+                logger.debug(f"⚠️ G4F {prov_name} требует авторизацию")
                 continue
 
-            # Если это последний провайдер в списке — возвращаем ошибку
-            if prov_name == fallback_providers[-1]:
-                return False, f"G4F Error: {str(e)[:80]}", time.time() - start
-            logger.debug(f"⚠️ G4F {prov_name} ошибка: {str(e)[:60]}, пробуем fallback...")
+            if any(kw in err_str for kw in ["not found", "does not exist", "404"]):
+                logger.debug(f"⚠️ G4F {prov_name}/{model} не найдена")
+                continue
 
-    return False, "Все провайдеры G4F недоступны", time.time() - start
+            logger.debug(f"⚠️ G4F {prov_name} ошибка: {str(e)[:60]}")
+            continue
+
+    elapsed = time.time() - start
+    return False, "Все провайдеры G4F недоступны", elapsed
 
 
-async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.0, system_prompt: str = None,
-                                 proxy_url: str = None):
-    openrouter_token = os.getenv('OPENR_TOKEN')
-    if not openrouter_token: return False, "No Token", 0.0
+async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.0,
+                                 system_prompt: str = None, proxy_url: str = None) -> Tuple[bool, str, float]:
+    """
+    Запрос к OpenRouter с ВАШИМ именем переменной OPENR_TOKEN
+    """
+    openrouter_token = os.getenv('OPENR_TOKEN')  # ✅ ВАША переменная
+    if not openrouter_token:
+        return False, "No OPENR_TOKEN", 0.0
 
-    if isinstance(models, str): models = [models]
+    if isinstance(models, str):
+        models = [models]
 
     start = time.time()
     messages = []
-    if system_prompt: messages.append({"role": "system", "content": system_prompt})
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=openrouter_token)
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=openrouter_token,
+        timeout=timeout
+    )
 
     for model in models:
         try:
@@ -607,11 +629,9 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
                 return client.chat.completions.create(
                     model=model,
                     messages=messages,
-                    timeout=int(timeout),
                     extra_headers={
-                        "HTTP-Referer": "https://github.com/psiiinka-bot",  # Обязательно
-                        "X-Title": "PsIInka Bot",  # Обязательно (не X-OpenRouter-Title!)
-                        "Authorization": f"Bearer {openrouter_token}"  # Не нужно, т.к. api_key уже в client
+                        "HTTP-Referer": "https://github.com/psiiinka-bot",
+                        "X-Title": "PsIInka Bot",
                     }
                 )
 
@@ -627,33 +647,50 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
                     logger.debug(f"✅ OpenRouter/{model} — {elapsed:.2f}s")
                     return True, answer.strip(), elapsed
 
-            raise Exception("Пустой ответ")
+            raise Exception("Пустой ответ от OpenRouter")
 
         except Exception as e:
             err_str = str(e).lower()
-            if "400" in err_str or "invalid model" in err_str:
-                logger.debug(f"⚠️ OR/{model} не подошла, пробуем следующую...")
+
+            if "400" in err_str or "invalid model" in err_str or "not found" in err_str:
+                logger.debug(f"⚠️ OR/{model} не подошла")
                 continue
+
             if "timeout" in err_str:
-                return False, f"Таймаут {timeout}с", time.time() - start
+                logger.debug(f"⏰ OR/{model} таймаут")
+                continue
+
+            if "429" in err_str or "rate limit" in err_str:
+                logger.debug(f"🚫 OR/{model} rate limit")
+                await asyncio.sleep(2)
+                continue
 
             if model == models[-1]:
-                return False, f"OR Error: {str(e)[:80]}", time.time() - start
+                elapsed = time.time() - start
+                return False, f"OR Error: {str(e)[:80]}", elapsed
 
-    return False, "Все модели OpenRouter недоступны", time.time() - start
+    elapsed = time.time() - start
+    return False, "Все модели OpenRouter недоступны", elapsed
 
 
-async def test_groq_single(models: list, prompt: str, timeout: float = 45.0, system_prompt: str = None,
-                           return_model_name: bool = False):
-    groq_token = os.getenv('GROQ_TOKEN')
-    if not groq_token: return False, "No GROQ Token", 0.0
+async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
+                           system_prompt: str = None, return_model_name: bool = False) -> Tuple[bool, str, float]:
+    """
+    Запрос к Groq с ВАШИМ именем переменной GROQ_TOKEN
+    """
+    groq_token = os.getenv('GROQ_TOKEN')  # ✅ ВАША переменная
+    if not groq_token:
+        return False, "No GROQ_TOKEN", 0.0
 
-    if isinstance(models, str): models = [models]
+    if isinstance(models, str):
+        models = [models]
 
-    client = Groq(api_key=groq_token)
+    client = Groq(api_key=groq_token, timeout=timeout)
     start = time.time()
+
     messages = []
-    if system_prompt: messages.append({"role": "system", "content": system_prompt})
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
     for model in models:
@@ -663,7 +700,6 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0, sys
                     model=model,
                     messages=messages,
                     temperature=0.5,
-                    request_timeout=int(timeout)
                 )
 
             response = await asyncio.wait_for(
@@ -674,17 +710,34 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0, sys
             if response.choices and len(response.choices) > 0:
                 elapsed = time.time() - start
                 content = response.choices[0].message.content
-                logger.debug(f"✅ Groq/{model} — {elapsed:.2f}s")
 
-                if return_model_name:
-                    return True, f"{model}: {content}", elapsed
-                else:
-                    return True, content, elapsed
+                if content and content.strip():
+                    logger.debug(f"✅ Groq/{model} — {elapsed:.2f}s")
+
+                    if return_model_name:
+                        return True, f"{model}: {content}", elapsed
+                    else:
+                        return True, content, elapsed
+
+            raise Exception("Пустой ответ от Groq")
 
         except Exception as e:
             err_str = str(e).lower()
+
             if "timeout" in err_str:
-                return False, f"Таймаут {timeout}с", time.time() - start
+                logger.debug(f"⏰ Groq/{model} таймаут")
+                elapsed = time.time() - start
+                return False, f"Таймаут {timeout}с", elapsed
+
+            if "429" in err_str or "rate limit" in err_str:
+                logger.debug(f"🚫 Groq/{model} rate limit")
+                await asyncio.sleep(2)
+                continue
+
+            if "404" in err_str or "not found" in err_str:
+                logger.debug(f"⚠️ Groq/{model} не найдена")
+                continue
+
             logger.debug(f"⚠️ Groq/{model} ошибка: {str(e)[:50]}")
             continue
 
@@ -1016,7 +1069,9 @@ async def slash_say(interaction: disnake.CommandInteraction,
                     вопрос: str = commands.Param(min_length=1, description="Ваш вопрос или запрос"),
                     прокси: str = commands.Param(choices=["Да", "Нет"], default="Нет",
                                                  description="Использовать прокси")):
-    if not await check_access(interaction): return
+    if not await check_access(interaction):
+        return
+
     try:
         await interaction.response.defer()
 
@@ -1037,8 +1092,9 @@ async def slash_say(interaction: disnake.CommandInteraction,
         final_response = None
         final_prov = "?"
         final_mod = "?"
-        use_proxy = (прокси == "Да")
-        proxy_url = get_random_proxy(use_proxy)
+        final_lat = 0.0
+        use_proxy = (прокси == "Да") and USE_PROXY
+        proxy_url = get_random_proxy(use_proxy) if use_proxy else None
         used_temp_file = False
 
         for idx, (prov, mod) in enumerate(queue):
@@ -1057,17 +1113,19 @@ async def slash_say(interaction: disnake.CommandInteraction,
                     ok, ans, lat = await make_g4f_request(prov, mod, вопрос, timeout=45.0, system_prompt=system_prompt,
                                                           proxy_url=proxy_url)
 
-                if ok and ans:
+                if ok and ans and len(ans.strip()) > 0:  # ✅ Проверка на пустой ответ
                     final_response = strip_think_content(ans)
                     final_prov, final_mod = prov, mod
+                    final_lat = lat
                     pending_models = pending_test_manager.get_pending_models()
                     if (prov, mod) in pending_models:
                         used_temp_file = True
-                    if not used_temp_file:
+                    if not used_temp_file and SessionLocal:
                         db_manager.log_success(prov, mod, int(lat * 1000))
                     break
+
             except Exception as e:
-                logger.warning(f"Error {prov}/{mod}: {e}")
+                logger.warning(f"Error {prov}/{mod}: {e}", exc_info=True)
                 continue
 
         if not final_response:
@@ -1078,7 +1136,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
                 timestamp=datetime.now()
             )
             error_embed.add_field(name="💡 Что делать?",
-                                  value="• Проверь интернет 🌐\n• Попробуй позже, я отдохну 💤\n• Включи прокси 🔀",
+                                  value="• Проверь токены в .env 🔑\n• Проверь интернет 🌐\n• Попробуй позже 💤",
                                   inline=False)
             await msg.edit(embed=error_embed)
             return
@@ -1088,7 +1146,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
         header_text = f"🐕 **ПсИИнка прогавкал ответ!**\n"
         header_text += f"*виляет хвостом* Держи, хозяин:\n\n"
         header_text += f"📊 **Источник:** `{final_prov}` / `{final_mod}`\n"
-        header_text += f"⏱ **Время:** `{lat:.2f}с` | 📏 **Длина:** `{len(final_response)} симв.`\n"
+        header_text += f"⏱ **Время:** `{final_lat:.2f}с` | 📏 **Длина:** `{len(final_response)} симв.`\n"
         header_text += f"🔀 **Прокси:** `{прокси}`\n"
         header_text += f"{'─' * 40}\n\n"
 
@@ -2183,14 +2241,17 @@ async def slash_commit_tests(interaction: disnake.CommandInteraction):
 
 @bot.event
 async def on_ready():
+    check_tokens()  # ✅ Проверка токенов
     logger.info(f"Bot {bot.user} ready! (Railway: {IS_RAILWAY})")
     logger.info("🚀 MODE: NO WARMUP (DB SAVING ENABLED)")
+
     if REQUIRED_ROLE_ID == 0:
         logger.info("Mode: Role 'Псарь' access.")
     else:
         logger.info(f"Mode: Role ID {REQUIRED_ROLE_ID} access.")
 
-    asyncio.create_task(fetch_free_proxies())
+    if USE_PROXY:
+        asyncio.create_task(fetch_free_proxies())
     asyncio.create_task(heartbeat_keeper())
 
 
