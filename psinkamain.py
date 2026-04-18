@@ -60,6 +60,7 @@ def check_tokens():
 
     return tokens
 
+Base = declarative_base()
 
 class ModelSuccessLog(Base):
     __tablename__ = 'model_success_log'
