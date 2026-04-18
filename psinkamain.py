@@ -1366,7 +1366,7 @@ class TestModeView(disnake.ui.View):
         async def test_single(prov, mod):
             async with semaphore:
                 try:
-                    ok, ans, lat = await make_g4f_request(prov, mod, TEST_PROMPT, timeout=25.0)
+                    ok, ans, lat = await make_g4f_request(prov, mod, TEST_PROMPT, timeout=45.0)
                     if ok:
                         pending_test_manager.log_success(prov, mod, int(lat * 1000))
                     return {
@@ -1486,7 +1486,7 @@ class TestModeView(disnake.ui.View):
                 ok, ans, lat = await test_groq_single(
                     [model],
                     TEST_PROMPT,
-                    timeout=25.0,
+                    timeout=45.0,
                     system_prompt="Ты тестовый ИИ.",
                     return_model_name=False
                 )
@@ -1578,7 +1578,7 @@ class TestModeView(disnake.ui.View):
                 ok, ans, lat = await test_openrouter_single(
                     [model],
                     TEST_PROMPT,
-                    timeout=25.0,
+                    timeout=45.0,
                     system_prompt="Ты тестовый ИИ."
                 )
 
@@ -1665,20 +1665,18 @@ async def slash_test(interaction: disnake.CommandInteraction):
 *виляет хвостом и ждёт команду*
 
 ⚡ **Тест ВСЕ G4F** — `{g4f_count}` моделей
-   └─ Провайдеры: PollinationsAI, Vercel, FreeGPT, MyShell, Perplexity...
-   └─ Время: ~{g4f_count * 3} сек (параллельно)
+   └─ Время: ~{max(40, g4f_count * 13)} сек (параллельно ×3)
+   └─ ⚠️ Может занять до {(g4f_count * 40) // 60 + 1} мин при медленных провайдерах
 
 🦅 **Тест ВСЕ Groq** — `{groq_count}` моделей
-   └─ Модели: llama-3.3, llama-4-scout, kimi-k2, mixtral...
-   └─ Время: ~{groq_count * 2} сек
+   └─ Время: ~{groq_count * 40} сек (последовательно)
 
 🌐 **Тест ВСЕ OpenRouter** — `{or_count}` моделей
-   └─ Бесплатные: nemotron, llama-3.3, gemma-3, qwen3...
-   └─ Время: ~{or_count * 2} сек
+   └─ Время: ~{or_count * 40} сек (последовательно)
 
 🔍 **Полное сканирование** — ВСЕ провайдеры (`{total_count}` моделей)
-   └─ Время: ~5-10 минут
-   └─ Режим: параллельные запросы + прогресс-бар
+   └─ Время: ~10-20 минут (зависит от стабильности провайдеров)
+   └─ Режим: параллельные запросы (×3 для G4F) + прогресс-бар
 
 > ℹ️ Все тесты используют каскадный перебор, логируют успехи в БД 
 > и поддерживают прокси для обхода ограничений.
@@ -1756,11 +1754,11 @@ async def run_mass_test(channel):
             start = time.time()
             try:
                 if provider == "OpenRouter":
-                    ok, ans, lat = await test_openrouter_single([model], TEST_PROMPT, timeout=30.0)
+                    ok, ans, lat = await test_openrouter_single([model], TEST_PROMPT, timeout=45.0)
                 elif provider == "Groq":
-                    ok, ans, lat = await test_groq_single([model], TEST_PROMPT, timeout=30.0, return_model_name=False)
+                    ok, ans, lat = await test_groq_single([model], TEST_PROMPT, timeout=45.0, return_model_name=False)
                 else:
-                    ok, ans, lat = await make_g4f_request(provider, model, TEST_PROMPT, timeout=30.0)
+                    ok, ans, lat = await make_g4f_request(provider, model, TEST_PROMPT, timeout=45.0)
 
                 if ok:
                     pending_test_manager.log_success(provider, model, int(lat * 1000))
