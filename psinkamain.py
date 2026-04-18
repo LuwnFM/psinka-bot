@@ -1055,106 +1055,334 @@ async def slash_status(interaction: disnake.CommandInteraction):
         await interaction.followup.send(f"❌ Гав! Ошибка: {str(e)[:100]}", ephemeral=True)
 
 # ============================================================================
-# 🧪 ТЕСТИРОВАНИЕ (СОБАЧИЙ СТИЛЬ)
+# 🧪 ТЕСТИРОВАНИЕ (ОБНОВЛЁННОЕ — МАССОВОЕ ПО ПРОВАЙДЕРАМ)
 # ============================================================================
+
+async def test_provider_models(provider: str, models: list, prompt: str = TEST_PROMPT, 
+                             timeout: float = 30.0, system_prompt: str = None,
+                             use_proxy: bool = False) -> List[Dict]:
+    """Универсальная функция для тестирования всех моделей провайдера"""
+    results = []
+    
+    for model in models:
+        start = time.time()
+        try:
+            proxy_url = get_random_proxy(use_proxy) if use_proxy else None
+            
+            if provider == "OpenRouter":
+                ok, ans, lat = await test_openrouter_single([model], prompt, timeout=timeout, 
+                                                           system_prompt=system_prompt, proxy_url=proxy_url)
+            elif provider == "Groq":
+                ok, ans, lat = await test_groq_single([model], prompt, timeout=timeout, 
+                                                     system_prompt=system_prompt, return_model_name=False)
+            else:  # G4F провайдеры
+                ok, ans, lat = await make_g4f_request(provider, model, prompt, timeout=timeout, 
+                                                     system_prompt=system_prompt, proxy_url=proxy_url)
+            
+            result = {
+                'model': model,
+                'success': ok,
+                'latency': round(lat, 2),
+                'error': ans if not ok else None,
+                'answer_preview': ans[:100] if ok and ans else None
+            }
+            
+            # Логгируем успешные тесты
+            if ok:
+                pending_test_manager.log_success(provider, model, int(lat * 1000))
+            
+            results.append(result)
+            await asyncio.sleep(0.3)  # Небольшая пауза между запросами
+            
+        except Exception as e:
+            results.append({
+                'model': model,
+                'success': False,
+                'latency': 0,
+                'error': str(e)[:80],
+                'answer_preview': None
+            })
+    
+    return results
+
+
+def format_test_results(provider: str, results: List[Dict], max_show: int = 10) -> str:
+    """Форматирует результаты тестов для вывода в embed"""
+    if not results:
+        return "❌ Нет данных *скулит*"
+    
+    successful = [r for r in results if r['success']]
+    failed = [r for r in results if not r['success']]
+    
+    output = f"**Всего:** `{len(results)}` | ✅ Успешно: `{len(successful)}` | ❌ Ошибок: `{len(failed)}`\n\n"
+    
+    # Показываем топ быстрых успешных
+    if successful:
+        successful_sorted = sorted(successful, key=lambda x: x['latency'] if x['latency'] else 999)
+        output += "**🏆 Топ быстрых:**\n"
+        for r in successful_sorted[:max_show]:
+            emoji = "🥇" if r == successful_sorted[0] else "•"
+            output += f"{emoji} `{r['model']}` — `{r['latency']}с`\n"
+        if len(successful) > max_show:
+            output += f"_и ещё {len(successful) - max_show} успешных..._\n"
+        output += "\n"
+    
+    # Показываем первые ошибки если есть
+    if failed and len(failed) <= 3:
+        output += "**❌ Ошибки:**\n"
+        for r in failed[:3]:
+            output += f"• `{r['model']}`: {r['error']}\n"
+        if len(failed) > 3:
+            output += f"_и ещё {len(failed) - 3} ошибок..._\n"
+    
+    return output.strip()
+
 
 class TestModeView(disnake.ui.View):
     def __init__(self, ctx=None):
         super().__init__(timeout=None)
     
-    @disnake.ui.button(label="⚡ Экспресс G4F", style=disnake.ButtonStyle.green, custom_id="test_express")
-    async def express_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
+    @disnake.ui.button(label="⚡ Тест все G4F", style=disnake.ButtonStyle.green, custom_id="test_all_g4f")
+    async def all_g4f_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
-        log_analysis("TEST: Express G4F started", "INFO")
+        log_analysis("TEST: All G4F providers started", "INFO")
         start = time.time()
-        models = G4F_DEEP_SCAN_MODELS.get("PollinationsAI", ["deepseek-r1"])
-        success = False
-        used_model = ""
-        ans = ""
-        for mod in models:
-            ok, ans, lat = await make_g4f_request("PollinationsAI", mod, "ping", timeout=15.0)
-            if ok:
-                pending_test_manager.log_success("PollinationsAI", mod, int(lat * 1000))
-                success = True
-                used_model = mod
-                break
         
-        elapsed = time.time() - start
-        status = "✅ Успех *гав!*" if success else f"❌ Ошибка *скулит*"
-        color = 0x00FF88 if success else 0xFF4444
+        # Собираем все комбинации провайдер/модель из G4F
+        all_combinations = []
+        for prov, models in G4F_DEEP_SCAN_MODELS.items():
+            for mod in models:
+                all_combinations.append((prov, mod))
         
-        embed = disnake.Embed(
-            title="🧪 ПсИИнка тестит G4F",
-            description=f"*рычит* {status}",
-            color=color,
+        progress_embed = disnake.Embed(
+            title="🔄 ПсИИнка тестирует G4F...",
+            description=f"*нюхает* Всего моделей: `{len(all_combinations)}` 🐕",
+            color=0xFF8844,
             timestamp=datetime.now()
         )
-        embed.add_field(name="⏱ Время", value=f"{elapsed:.2f}с", inline=True)
-        embed.add_field(name="📡 Провайдер", value="PollinationsAI", inline=True)
-        if success:
-            embed.add_field(name="🤖 Модель", value=f"`{used_model}`", inline=True)
-            embed.add_field(name="💬 Ответ", value=f"```{ans[:100]}```", inline=False)
+        progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
+        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True)
         
-        log_analysis(f"TEST Result: {status}, Time: {elapsed:.2f}s", "INFO")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @disnake.ui.button(label="🦅 Groq Cloud", style=disnake.ButtonStyle.blurple, custom_id="test_groq")
-    async def groq_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
-        await interaction.response.defer()
-        log_analysis("TEST: Groq started", "INFO")
-        start = time.time()
-        ok, ans, lat = await test_groq_single(GROQ_PRIORITY_MODELS, "ping", timeout=15.0, system_prompt="Ты тестовый ИИ.", return_model_name=True)
-        elapsed = time.time() - start
+        all_results = []
+        semaphore = asyncio.Semaphore(3)  # Ограничение параллельных запросов
         
-        model_name = ans.split(':')[0] if ':' in ans and ok else "unknown"
-        if ok:
-            pending_test_manager.log_success("Groq", model_name, int(lat * 1000))
+        async def test_single(prov, mod):
+            async with semaphore:
+                try:
+                    ok, ans, lat = await make_g4f_request(prov, mod, TEST_PROMPT, timeout=25.0)
+                    if ok:
+                        pending_test_manager.log_success(prov, mod, int(lat * 1000))
+                    return {'provider': prov, 'model': mod, 'success': ok, 'latency': round(lat, 2), 'error': ans if not ok else None}
+                except Exception as e:
+                    return {'provider': prov, 'model': mod, 'success': False, 'latency': 0, 'error': str(e)[:80]}
+        
+        tasks = [test_single(p, m) for p, m in all_combinations]
+        
+        for i, task in enumerate(asyncio.as_completed(tasks)):
+            res = await task
+            all_results.append(res)
+            percent = int(((i + 1) / len(tasks)) * 100)
+            bar = create_progress_bar(i + 1, len(tasks))
             
-        status = "✅ Успех *гав!*" if ok else f"❌ Ошибка: {ans} *скулит*"
-        color = 0x00FF88 if ok else 0xFF4444
+            try:
+                progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
+                succ = len([r for r in all_results if r['success']])
+                progress_embed.description = f"*лает на* {i+1}/{len(tasks)}: `{res['provider']}`/`{res['model']}` 🐕\n✅ Успешно: `{succ}`"
+                await progress_msg.edit(embed=progress_embed)
+            except: pass
         
-        embed = disnake.Embed(
-            title="🦅 ПсИИнка тестит Groq",
-            description=f"*рычит* {status}",
-            color=color,
-            timestamp=datetime.now()
-        )
-        embed.add_field(name="⏱ Время", value=f"{elapsed:.2f}с", inline=True)
-        embed.add_field(name="📡 Провайдер", value="Groq", inline=True)
-        if ok:
-            embed.add_field(name="💬 Ответ", value=f"```{ans[:100]}```", inline=False)
-            embed.add_field(name="🏆 Модель", value=f"`{model_name}`", inline=True)
-        
-        log_analysis(f"TEST Groq Result: {status}, Time: {elapsed:.2f}s", "INFO")
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @disnake.ui.button(label="🌐 OpenRouter", style=disnake.ButtonStyle.gray, custom_id="test_openrouter")
-    async def openrouter_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
-        await interaction.response.defer()
-        log_analysis("TEST: OpenRouter started", "INFO")
-        start = time.time()
-        ok, ans, lat = await test_openrouter_single(OR_PRIORITY_MODELS, "ping", timeout=15.0, system_prompt="Ты тестовый ИИ.")
         elapsed = time.time() - start
+        successful = [r for r in all_results if r['success']]
         
-        if ok:
-            pending_test_manager.log_success("OpenRouter", OR_PRIORITY_MODELS[0], int(lat * 1000))
-            
-        status = "✅ Успех *гав!*" if ok else f"❌ Ошибка: {ans} *скулит*"
-        color = 0x00FF88 if ok else 0xFF4444
+        # Группируем результаты по провайдерам для отчёта
+        by_provider = {}
+        for r in all_results:
+            prov = r['provider']
+            if prov not in by_provider:
+                by_provider[prov] = []
+            by_provider[prov].append(r)
         
-        embed = disnake.Embed(
-            title="🌐 ПсИИнка тестит OpenRouter",
-            description=f"*рычит* {status}",
-            color=color,
+        final_embed = disnake.Embed(
+            title="✅ ПсИИнка закончил тест G4F!",
+            description=f"*виляет хвостом* Общее время: `{elapsed:.0f}с` 🐕\n📊 **Итого:** `{len(successful)}/{len(all_results)}` успешных",
+            color=0x00FF88 if successful else 0xFF4444,
             timestamp=datetime.now()
         )
-        embed.add_field(name="⏱ Время", value=f"{elapsed:.2f}с", inline=True)
-        embed.add_field(name="📡 Провайдер", value="OpenRouter", inline=True)
-        if ok:
-            embed.add_field(name="💬 Ответ", value=f"```{ans[:100]}```", inline=False)
         
-        log_analysis(f"TEST OR Result: {status}, Time: {elapsed:.2f}s", "INFO")
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        # Добавляем статистику по каждому провайдеру
+        for prov, prov_results in by_provider.items():
+            succ = len([r for r in prov_results if r['success']])
+            avg_lat = round(sum(r['latency'] for r in prov_results if r['success']) / succ, 2) if succ > 0 else 0
+            final_embed.add_field(
+                name=f"📡 {prov} ({succ}/{len(prov_results)})",
+                value=f"⏱ Ср. время: `{avg_lat}с`" if succ > 0 else "❌ Все неудачны",
+                inline=True
+            )
+        
+        # Топ-5 самых быстрых моделей
+        if successful:
+            top_fast = sorted(successful, key=lambda x: x['latency'])[:5]
+            top_text = "\n".join([f"• `{r['provider']}`/`{r['model']}` — `{r['latency']}с`" for r in top_fast])
+            final_embed.add_field(name="🏆 Топ-5 быстрых", value=top_text, inline=False)
+        
+        await progress_msg.edit(embed=final_embed)
+        log_analysis(f"TEST G4F All: {len(successful)}/{len(all_results)} success, {elapsed:.1f}s", "INFO")
+
+    @disnake.ui.button(label="🦅 Тест все Groq", style=disnake.ButtonStyle.blurple, custom_id="test_all_groq")
+    async def all_groq_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
+        await interaction.response.defer()
+        log_analysis("TEST: All Groq models started", "INFO")
+        start = time.time()
+        
+        progress_embed = disnake.Embed(
+            title="🔄 ПсИИнка тестирует Groq...",
+            description=f"*нюхает* Всего моделей: `{len(GROQ_PRIORITY_MODELS)}` 🐕",
+            color=0x5865F2,
+            timestamp=datetime.now()
+        )
+        progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
+        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True)
+        
+        all_results = []
+        
+        for i, model in enumerate(GROQ_PRIORITY_MODELS):
+            try:
+                ok, ans, lat = await test_groq_single([model], TEST_PROMPT, timeout=25.0, 
+                                                     system_prompt="Ты тестовый ИИ.", return_model_name=False)
+                
+                if ok:
+                    pending_test_manager.log_success("Groq", model, int(lat * 1000))
+                
+                result = {
+                    'model': model,
+                    'success': ok,
+                    'latency': round(lat, 2),
+                    'error': ans if not ok else None
+                }
+                all_results.append(result)
+                
+                # Обновляем прогресс
+                percent = int(((i + 1) / len(GROQ_PRIORITY_MODELS)) * 100)
+                bar = create_progress_bar(i + 1, len(GROQ_PRIORITY_MODELS))
+                progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
+                status = "✅" if ok else "❌"
+                progress_embed.description = f"*лает на* {i+1}/{len(GROQ_PRIORITY_MODELS)}: `{model}` {status} 🐕"
+                await progress_msg.edit(embed=progress_embed)
+                
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                all_results.append({
+                    'model': model,
+                    'success': False,
+                    'latency': 0,
+                    'error': str(e)[:80]
+                })
+        
+        elapsed = time.time() - start
+        successful = [r for r in all_results if r['success']]
+        
+        final_embed = disnake.Embed(
+            title="✅ ПсИИнка закончил тест Groq!",
+            description=f"*виляет хвостом* Общее время: `{elapsed:.0f}с` 🐕\n📊 **Итого:** `{len(successful)}/{len(GROQ_PRIORITY_MODELS)}` успешных",
+            color=0x00FF88 if successful else 0xFF4444,
+            timestamp=datetime.now()
+        )
+        
+        # Детали по каждой модели
+        details = ""
+        for r in sorted(all_results, key=lambda x: x['latency'] if x['success'] else 999):
+            emoji = "✅" if r['success'] else "❌"
+            latency_str = f"`{r['latency']}с`" if r['success'] else "—"
+            details += f"{emoji} `{r['model']}` — {latency_str}\n"
+        
+        final_embed.add_field(name="📋 Результаты по моделям", value=details or "❌ Нет данных", inline=False)
+        
+        if successful:
+            top_fast = sorted(successful, key=lambda x: x['latency'])[:3]
+            top_text = "\n".join([f"• `{r['model']}` — `{r['latency']}с`" for r in top_fast])
+            final_embed.add_field(name="🏆 Топ-3 быстрых", value=top_text, inline=True)
+        
+        await progress_msg.edit(embed=final_embed)
+        log_analysis(f"TEST Groq All: {len(successful)}/{len(GROQ_PRIORITY_MODELS)} success, {elapsed:.1f}s", "INFO")
+
+    @disnake.ui.button(label="🌐 Тест все OpenRouter", style=disnake.ButtonStyle.gray, custom_id="test_all_openrouter")
+    async def all_openrouter_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
+        await interaction.response.defer()
+        log_analysis("TEST: All OpenRouter models started", "INFO")
+        start = time.time()
+        
+        progress_embed = disnake.Embed(
+            title="🔄 ПсИИнка тестирует OpenRouter...",
+            description=f"*нюхает* Всего моделей: `{len(OR_PRIORITY_MODELS)}` 🐕",
+            color=0x95A5A6,
+            timestamp=datetime.now()
+        )
+        progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
+        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True)
+        
+        all_results = []
+        
+        for i, model in enumerate(OR_PRIORITY_MODELS):
+            try:
+                ok, ans, lat = await test_openrouter_single([model], TEST_PROMPT, timeout=25.0, 
+                                                           system_prompt="Ты тестовый ИИ.")
+                
+                if ok:
+                    pending_test_manager.log_success("OpenRouter", model, int(lat * 1000))
+                
+                result = {
+                    'model': model,
+                    'success': ok,
+                    'latency': round(lat, 2),
+                    'error': ans if not ok else None
+                }
+                all_results.append(result)
+                
+                # Обновляем прогресс
+                percent = int(((i + 1) / len(OR_PRIORITY_MODELS)) * 100)
+                bar = create_progress_bar(i + 1, len(OR_PRIORITY_MODELS))
+                progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
+                status = "✅" if ok else "❌"
+                progress_embed.description = f"*лает на* {i+1}/{len(OR_PRIORITY_MODELS)}: `{model}` {status} 🐕"
+                await progress_msg.edit(embed=progress_embed)
+                
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                all_results.append({
+                    'model': model,
+                    'success': False,
+                    'latency': 0,
+                    'error': str(e)[:80]
+                })
+        
+        elapsed = time.time() - start
+        successful = [r for r in all_results if r['success']]
+        
+        final_embed = disnake.Embed(
+            title="✅ ПсИИнка закончил тест OpenRouter!",
+            description=f"*виляет хвостом* Общее время: `{elapsed:.0f}с` 🐕\n📊 **Итого:** `{len(successful)}/{len(OR_PRIORITY_MODELS)}` успешных",
+            color=0x00FF88 if successful else 0xFF4444,
+            timestamp=datetime.now()
+        )
+        
+        # Детали по каждой модели
+        details = ""
+        for r in sorted(all_results, key=lambda x: x['latency'] if x['success'] else 999):
+            emoji = "✅" if r['success'] else "❌"
+            latency_str = f"`{r['latency']}с`" if r['success'] else "—"
+            details += f"{emoji} `{r['model']}` — {latency_str}\n"
+        
+        final_embed.add_field(name="📋 Результаты по моделям", value=details or "❌ Нет данных", inline=False)
+        
+        if successful:
+            top_fast = sorted(successful, key=lambda x: x['latency'])[:3]
+            top_text = "\n".join([f"• `{r['model']}` — `{r['latency']}с`" for r in top_fast])
+            final_embed.add_field(name="🏆 Топ-3 быстрых", value=top_text, inline=True)
+        
+        await progress_msg.edit(embed=final_embed)
+        log_analysis(f"TEST OpenRouter All: {len(successful)}/{len(OR_PRIORITY_MODELS)} success, {elapsed:.1f}s", "INFO")
     
     @disnake.ui.button(label="🔍 Полное сканирование", style=disnake.ButtonStyle.red, custom_id="test_full")
     async def all_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
