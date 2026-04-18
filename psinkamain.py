@@ -2618,24 +2618,21 @@ async def slash_mercenary(interaction: disnake.CommandInteraction,
             await interaction.edit_original_response(embed=error_embed)
             return
 
-        # Получаем пул навыков
-        skill_pool = MERCENARIES_DB[mercenary_name]
+        # Получаем базовый пул навыков
+        skill_pool = MERCENARIES_DB[mercenary_name].copy()  # Копируем, чтобы не менять оригинал
         
         # Проверяем специализацию
         specialization = roll_specialization(mercenary_name)
-        spec_skills = []
         
+        # Если есть специализация — ДОБАВЛЯЕМ её навыки к базовым (не заменяем!)
         if specialization:
-            # Заменяем 1-2 навыка из пула на навыки специализации
-            spec_skills = specialization["skills"][:2]  # Берём максимум 2 навыка из специализации
+            spec_skills = specialization["skills"]
+            # Добавляем навыки специализации в конец списка
+            skill_pool.extend(spec_skills)
         
         # Роллим уровни для каждого навыка
         skills_with_levels = []
-        for i, skill in enumerate(skill_pool):
-            # Если есть специализация и это один из первых навыков — заменяем
-            if specialization and i < len(spec_skills):
-                skill = spec_skills[i]
-            
+        for skill in skill_pool:
             level = roll_skill_level()
             skills_with_levels.append((skill, level))
 
@@ -2661,7 +2658,7 @@ async def slash_mercenary(interaction: disnake.CommandInteraction,
         if specialization:
             embed.add_field(
                 name="🎯 Специализация",
-                value=f"**{specialization['name']}**\n_Влияет на навыки: {', '.join(specialization['skills'])}_",
+                value=f"**{specialization['name']}**\n_Добавляет навыки: {', '.join(specialization['skills'])}_",
                 inline=False
             )
 
