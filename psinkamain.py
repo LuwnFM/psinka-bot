@@ -356,133 +356,6 @@ def has_specialization(profession: str) -> bool:
     """Проверяет, есть ли у профессии специализации"""
     return profession in MERCENARY_SPECIALIZATIONS
 
-# ============================================================================
-# 🛡️ КОМАНДА: НАЁМНИК (ОБНОВЛЁННАЯ СО СПЕЦИАЛИЗАЦИЯМИ)
-# ============================================================================
-
-def roll_skill_level() -> str:
-    """Роллит уровень навыка по заданным шансам"""
-    roll = random.randint(1, 100)
-    cumulative = 0
-    for level, chance in MERCENARY_SKILL_PROBABILITIES.items():
-        cumulative += chance
-        if roll <= cumulative:
-            return level
-    return "Новичок"
-
-
-def get_skill_level_emoji(level: str) -> str:
-    """Возвращает эмодзи для уровня навыка"""
-    emojis = {
-        "Новичок": "🔰",
-        "Опытный": "✅",
-        "Ветеран": "⭐",
-        "Мастер": "🏆",
-        "Легендарный Мастер": "👑"
-    }
-    return emojis.get(level, "•")
-
-
-@bot.slash_command(name="наёмник", description="Получить информацию о наёмнике")
-async def slash_mercenary(interaction: disnake.CommandInteraction,
-                          имя: str = commands.Param(min_length=1, description="Название наёмника (например: Гончар, Мечник)")):
-    try:
-        await interaction.response.defer()
-
-        # Нормализуем имя для поиска
-        mercenary_name = normalize_mercenary_name(имя)
-
-        if not mercenary_name or mercenary_name not in MERCENARIES_DB:
-            error_embed = disnake.Embed(
-                title="❌ Ошибка",
-                description=f"Наёмник **`{имя}`** не найден в базе.",
-                color=0xFF4444,
-                timestamp=datetime.now()
-            )
-            error_embed.set_footer(text="ПсИИнка бот | Mercenary System 🐾")
-            await interaction.edit_original_response(embed=error_embed)
-            return
-
-        # Получаем пул навыков
-        skill_pool = MERCENARIES_DB[mercenary_name]
-        
-        # Проверяем специализацию
-        specialization = roll_specialization(mercenary_name)
-        spec_skills = []
-        
-        if specialization:
-            # Заменяем 1-2 навыка из пула на навыки специализации
-            spec_skills = specialization["skills"][:2]  # Берём максимум 2 навыка из специализации
-        
-        # Роллим уровни для каждого навыка
-        skills_with_levels = []
-        for i, skill in enumerate(skill_pool):
-            # Если есть специализация и это один из первых навыков — заменяем
-            if specialization and i < len(spec_skills):
-                skill = spec_skills[i]
-            
-            level = roll_skill_level()
-            skills_with_levels.append((skill, level))
-
-        # Сортируем по уровню (от высшего к низшему)
-        level_order = ["Легендарный Мастер", "Мастер", "Ветеран", "Опытный", "Новичок"]
-        skills_with_levels.sort(key=lambda x: level_order.index(x[1]) if x[1] in level_order else 999)
-
-        # Формируем текст навыков
-        skills_text = ""
-        for skill, level in skills_with_levels:
-            emoji = get_skill_level_emoji(level)
-            skills_text += f"{emoji} **{skill}** — `{level}`\n"
-
-        # Создаём embed
-        embed = disnake.Embed(
-            title=f"🛡️ Наёмник: {mercenary_name}",
-            description=f"Карточка наёмника с навыками",
-            color=0xFF8844,
-            timestamp=datetime.now()
-        )
-
-        # Добавляем специализацию если есть
-        if specialization:
-            embed.add_field(
-                name="🎯 Специализация",
-                value=f"**{specialization['name']}**\n_Влияет на навыки: {', '.join(specialization['skills'])}_",
-                inline=False
-            )
-
-        # Блок навыков
-        embed.add_field(
-            name="📚 Навыки",
-            value=skills_text if skills_text else "❓ Навыки не определены",
-            inline=False
-        )
-
-        # Блок снаряжения (пока пустой)
-        embed.add_field(
-            name="🎒 Снаряжение",
-            value="*Ожидает заполнения...*",
-            inline=False
-        )
-
-        embed.set_footer(text=f"ПсИИнка бот | Mercenary: {mercenary_name} 🐾")
-
-        await interaction.edit_original_response(embed=embed)
-
-    except Exception as e:
-        logger.error(f"Error in /mercenary: {e}", exc_info=True)
-        error_embed = disnake.Embed(
-            title="❌ Ошибка",
-            description=f"Произошла ошибка при генерации наёмника.\n\n`{str(e)[:200]}`",
-            color=0xFF4444,
-            timestamp=datetime.now()
-        )
-        error_embed.set_footer(text="ПсИИнка бот | Error 🐾")
-        
-        if interaction.response.is_done():
-            await interaction.followup.send(embed=error_embed, ephemeral=True)
-        else:
-            await interaction.response.send_message(embed=error_embed, ephemeral=True)
-
 
 
 # ============================================================================
@@ -2698,6 +2571,133 @@ async def slash_commit_tests(interaction: disnake.CommandInteraction):
             session.close()
     else:
         await interaction.followup.send("❌ Гав! БД не подключена, данные сохранены только в файле.", ephemeral=True)
+
+# ============================================================================
+# 🛡️ КОМАНДА: НАЁМНИК (ОБНОВЛЁННАЯ СО СПЕЦИАЛИЗАЦИЯМИ)
+# ============================================================================
+
+def roll_skill_level() -> str:
+    """Роллит уровень навыка по заданным шансам"""
+    roll = random.randint(1, 100)
+    cumulative = 0
+    for level, chance in MERCENARY_SKILL_PROBABILITIES.items():
+        cumulative += chance
+        if roll <= cumulative:
+            return level
+    return "Новичок"
+
+
+def get_skill_level_emoji(level: str) -> str:
+    """Возвращает эмодзи для уровня навыка"""
+    emojis = {
+        "Новичок": "🔰",
+        "Опытный": "✅",
+        "Ветеран": "⭐",
+        "Мастер": "🏆",
+        "Легендарный Мастер": "👑"
+    }
+    return emojis.get(level, "•")
+
+
+@bot.slash_command(name="наёмник", description="Получить информацию о наёмнике")
+async def slash_mercenary(interaction: disnake.CommandInteraction,
+                          имя: str = commands.Param(min_length=1, description="Название наёмника (например: Гончар, Мечник)")):
+    try:
+        await interaction.response.defer()
+
+        # Нормализуем имя для поиска
+        mercenary_name = normalize_mercenary_name(имя)
+
+        if not mercenary_name or mercenary_name not in MERCENARIES_DB:
+            error_embed = disnake.Embed(
+                title="❌ Ошибка",
+                description=f"Наёмник **`{имя}`** не найден в базе.",
+                color=0xFF4444,
+                timestamp=datetime.now()
+            )
+            error_embed.set_footer(text="ПсИИнка бот | Mercenary System 🐾")
+            await interaction.edit_original_response(embed=error_embed)
+            return
+
+        # Получаем пул навыков
+        skill_pool = MERCENARIES_DB[mercenary_name]
+        
+        # Проверяем специализацию
+        specialization = roll_specialization(mercenary_name)
+        spec_skills = []
+        
+        if specialization:
+            # Заменяем 1-2 навыка из пула на навыки специализации
+            spec_skills = specialization["skills"][:2]  # Берём максимум 2 навыка из специализации
+        
+        # Роллим уровни для каждого навыка
+        skills_with_levels = []
+        for i, skill in enumerate(skill_pool):
+            # Если есть специализация и это один из первых навыков — заменяем
+            if specialization and i < len(spec_skills):
+                skill = spec_skills[i]
+            
+            level = roll_skill_level()
+            skills_with_levels.append((skill, level))
+
+        # Сортируем по уровню (от высшего к низшему)
+        level_order = ["Легендарный Мастер", "Мастер", "Ветеран", "Опытный", "Новичок"]
+        skills_with_levels.sort(key=lambda x: level_order.index(x[1]) if x[1] in level_order else 999)
+
+        # Формируем текст навыков
+        skills_text = ""
+        for skill, level in skills_with_levels:
+            emoji = get_skill_level_emoji(level)
+            skills_text += f"{emoji} **{skill}** — `{level}`\n"
+
+        # Создаём embed
+        embed = disnake.Embed(
+            title=f"🛡️ Наёмник: {mercenary_name}",
+            description=f"Карточка наёмника с навыками",
+            color=0xFF8844,
+            timestamp=datetime.now()
+        )
+
+        # Добавляем специализацию если есть
+        if specialization:
+            embed.add_field(
+                name="🎯 Специализация",
+                value=f"**{specialization['name']}**\n_Влияет на навыки: {', '.join(specialization['skills'])}_",
+                inline=False
+            )
+
+        # Блок навыков
+        embed.add_field(
+            name="📚 Навыки",
+            value=skills_text if skills_text else "❓ Навыки не определены",
+            inline=False
+        )
+
+        # Блок снаряжения (пока пустой)
+        embed.add_field(
+            name="🎒 Снаряжение",
+            value="*Ожидает заполнения...*",
+            inline=False
+        )
+
+        embed.set_footer(text=f"ПсИИнка бот | Mercenary: {mercenary_name} 🐾")
+
+        await interaction.edit_original_response(embed=embed)
+
+    except Exception as e:
+        logger.error(f"Error in /mercenary: {e}", exc_info=True)
+        error_embed = disnake.Embed(
+            title="❌ Ошибка",
+            description=f"Произошла ошибка при генерации наёмника.\n\n`{str(e)[:200]}`",
+            color=0xFF4444,
+            timestamp=datetime.now()
+        )
+        error_embed.set_footer(text="ПсИИнка бот | Error 🐾")
+        
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=error_embed, ephemeral=True)
 
 
 # ============================================================================
