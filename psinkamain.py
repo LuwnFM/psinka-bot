@@ -2537,27 +2537,167 @@ async def run_mass_test(channel):
 # 🔍 АНАЛИЗ КАНАЛА (СОБАЧИЙ СТИЛЬ)
 # ============================================================================
 
+DISCORD_CHANNEL_LINK_RE = re.compile(
+    r"https?://(?:canary\.|ptb\.)?discord(?:app)?\.com/channels/(?P<guild>\d+|@me)/(?P<channel>\d+)(?:/(?P<message>\d+))?",
+    re.IGNORECASE,
+)
+DISCORD_CHANNEL_MENTION_RE = re.compile(r"^<#(?P<channel>\d+)>$")
+
+
+def get_analysis_channel_types() -> List[Any]:
+    """Типы каналов, которые можно выбрать в UI slash-команды."""
+    wanted = ["text", "news", "forum", "public_thread", "private_thread", "news_thread"]
+    return [getattr(disnake.ChannelType, name) for name in wanted if hasattr(disnake.ChannelType, name)]
+
+
+ANALYSIS_CHANNEL_TYPES = get_analysis_channel_types()
+
+
+def extract_channel_reference(raw: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Достаёт guild_id и channel/thread_id из ссылки Discord, упоминания <#id> или голого ID.
+    Для message-link берётся второй ID — это канал или тред, где лежит сообщение.
+    """
+    if not raw:
+        return None, None
+
+    value = raw.strip()
+    link_match = DISCORD_CHANNEL_LINK_RE.search(value)
+    if link_match:
+        guild_raw = link_match.group("guild")
+        guild_id = int(guild_raw) if guild_raw.isdigit() else None
+        return guild_id, int(link_match.group("channel"))
+
+    mention_match = DISCORD_CHANNEL_MENTION_RE.match(value)
+    if mention_match:
+        return None, int(mention_match.group("channel"))
+
+    if value.isdigit():
+        return None, int(value)
+
+    return None, None
+
+
+async def find_thread_in_archives(guild, target_id: int):
+    """Fallback для старых/архивных тредов, если cache/fetch_channel их не нашли."""
+    if not guild:
+        return None
+
+    for channel in getattr(guild, "channels", []):
+        for thread in getattr(channel, "threads", []):
+            if getattr(thread, "id", None) == target_id:
+                return thread
+
+        archived_threads = getattr(channel, "archived_threads", None)
+        if not archived_threads:
+            continue
+
+        for private_flag in (False, True):
+            try:
+                async for thread in channel.archived_threads(private=private_flag, limit=100):
+                    if getattr(thread, "id", None) == target_id:
+                        return thread
+            except Exception as e:
+                log_analysis(
+                    f"Archive lookup skipped for {getattr(channel, 'name', '?')} private={private_flag}: {e}",
+                    "DEBUG",
+                )
+
+    return None
+
+
+async def resolve_analysis_target(interaction: disnake.CommandInteraction,
+                                  selected_channel=None,
+                                  ссылка: Optional[str] = None):
+    """
+    Возвращает канал/форум/тред для анализа.
+    Приоритет: ссылка/ID/упоминание → выбранный канал → текущий канал.
+    """
+    if not getattr(interaction, "guild", None):
+        return None, "❌ Гав! `/анализ` работает только внутри сервера."
+
+    target = None
+    link_guild_id, link_channel_id = extract_channel_reference(ссылка)
+
+    if ссылка and not link_channel_id:
+        return None, "❌ ПсИИнка не смог разобрать ссылку/ID канала. Дай ссылку Discord, `<#канал>` или числовой ID."
+
+    if link_guild_id and link_guild_id != interaction.guild.id:
+        return None, "❌ Эта ссылка ведёт на другой сервер. ПсИИнка нюхает только текущий сервер."
+
+    if link_channel_id:
+        guild = interaction.guild
+        target = guild.get_channel(link_channel_id)
+
+        if target is None and hasattr(guild, "get_thread"):
+            target = guild.get_thread(link_channel_id)
+
+        if target is None:
+            target = bot.get_channel(link_channel_id)
+
+        if target is None:
+            try:
+                target = await bot.fetch_channel(link_channel_id)
+            except Exception as e:
+                log_analysis(f"bot.fetch_channel({link_channel_id}) failed: {e}", "DEBUG")
+
+        if target is None:
+            try:
+                target = await guild.fetch_channel(link_channel_id)
+            except Exception as e:
+                log_analysis(f"guild.fetch_channel({link_channel_id}) failed: {e}", "DEBUG")
+
+        if target is None:
+            target = await find_thread_in_archives(guild, link_channel_id)
+    else:
+        target = selected_channel or interaction.channel
+
+    if target is None:
+        return None, "❌ ПсИИнка не нашёл такой канал/форум/тред. Проверь ссылку и права бота."
+
+    target_guild = getattr(target, "guild", None)
+    if target_guild and getattr(target_guild, "id", None) != interaction.guild.id:
+        return None, "❌ Этот канал не из текущего сервера."
+
+    has_history = callable(getattr(target, "history", None))
+    has_threads = hasattr(target, "threads") or callable(getattr(target, "archived_threads", None))
+    if not has_history and not has_threads:
+        return None, "❌ Это не текстовый канал, не форум и не тред. ПсИИнка там не сможет нюхать сообщения."
+
+    return target, None
+
+
+def analysis_target_name(channel) -> str:
+    if hasattr(channel, "parent") and getattr(channel, "parent", None):
+        return f"{channel.parent.name} / {channel.name}"
+    return getattr(channel, "name", str(getattr(channel, "id", "unknown")))
+
 async def collect_all_messages_debug(channel, days_limit: int, max_per_source: int = 400):
     after_date = datetime.now(timezone.utc) - timedelta(days=days_limit)
     all_messages = []
-    log_analysis(f"Start collecting #{channel.name} for {days_limit} days.", "INFO")
+    target_label = analysis_target_name(channel)
+    log_analysis(f"Start collecting #{target_label} for {days_limit} days.", "INFO")
 
-    try:
-        async for message in channel.history(limit=max_per_source, after=after_date):
-            if message.is_system() or message.author == bot.user or not message.content.strip():
-                continue
-            all_messages.append({
-                "id": len(all_messages) + 1,
-                "real_id": message.id,
-                "content": message.content[:1500],
-                "author": str(message.author),
-                "url": message.jump_url,
-                "source": f"#{channel.name}",
-                "created_at": message.created_at
-            })
-        log_analysis(f"✅ Main channel: {len(all_messages)} msgs.", "INFO")
-    except Exception as e:
-        log_analysis(f"❌ Main channel error: {e}", "ERROR")
+    history_method = getattr(channel, "history", None)
+    if callable(history_method):
+        try:
+            async for message in channel.history(limit=max_per_source, after=after_date):
+                if message.is_system() or message.author == bot.user or not message.content.strip():
+                    continue
+                all_messages.append({
+                    "id": len(all_messages) + 1,
+                    "real_id": message.id,
+                    "content": message.content[:1500],
+                    "author": str(message.author),
+                    "url": message.jump_url,
+                    "source": f"#{target_label}",
+                    "created_at": message.created_at
+                })
+            log_analysis(f"✅ Main channel/thread: {len(all_messages)} msgs.", "INFO")
+        except Exception as e:
+            log_analysis(f"❌ Main channel/thread error: {e}", "ERROR")
+    else:
+        log_analysis(f"Main history skipped for {target_label}: no direct history method.", "INFO")
 
     if hasattr(channel, 'threads'):
         for thread in channel.threads:
@@ -2633,22 +2773,39 @@ def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
     return [msg for msg in original_data if msg['id'] in found_set]
 
 
-@bot.slash_command(name="анализ", description="Анализ канала на нарушения")
+@bot.slash_command(name="анализ", description="Анализ канала, форума или треда на нарушения")
 async def slash_analyze(interaction: disnake.CommandInteraction,
-                        канал: disnake.TextChannel = commands.Param(description="Канал для анализа"),
-                        период: str = commands.Param(choices=["За последние 7 дней", "За последние 21 день"],
-                                                     description="Период анализа")):
+                        канал: Optional[disnake.abc.GuildChannel] = commands.Param(
+                            default=None,
+                            description="Канал/форум/тред для анализа",
+                            channel_types=ANALYSIS_CHANNEL_TYPES,
+                        ),
+                        ссылка: Optional[str] = commands.Param(
+                            default=None,
+                            description="Ссылка, ID или упоминание канала/форума/треда",
+                        ),
+                        период: str = commands.Param(
+                            default="За последние 7 дней",
+                            choices=["За последние 7 дней", "За последние 21 день"],
+                            description="Период анализа",
+                        )):
     if interaction.author.id != OWNER_ID:
         if not await check_access(interaction, allowed_role_names=["Псарь"]):
             return
 
+    target_channel, target_error = await resolve_analysis_target(interaction, канал, ссылка)
+    if target_error:
+        await interaction.response.send_message(target_error, ephemeral=True)
+        return
+
     days_to_check = 7 if "7 дней" in период else 21
     await interaction.response.defer()
 
-    log_analysis(f"=== START ANALYSIS: {канал.name} ({days_to_check} days) ===", "INFO")
+    target_name = analysis_target_name(target_channel)
+    log_analysis(f"=== START ANALYSIS: {target_name} ({days_to_check} days) ===", "INFO")
 
     try:
-        messages_data = await collect_all_messages_debug(канал, days_to_check, max_per_source=400)
+        messages_data = await collect_all_messages_debug(target_channel, days_to_check, max_per_source=400)
         if not messages_data:
             await interaction.edit_original_response(content="ℹ️ ПсИИнка не нашёл сообщений. *нюхает*")
             return
@@ -2658,7 +2815,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
 
         progress_embed = disnake.Embed(
             title="🔍 ПсИИнка нюхает канал",
-            description=f"*принюхивается* Канал: `#{канал.name}`\nПериод: `{days_to_check} дней` 🐕\nСообщений: `{len(messages_data)}`",
+            description=f"*принюхивается* Канал: `#{target_name}`\nПериод: `{days_to_check} дней` 🐕\nСообщений: `{len(messages_data)}`",
             color=0xFF8844,
             timestamp=datetime.now()
         )
@@ -2785,7 +2942,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             color=0xFF4444,
             timestamp=datetime.now()
         )
-        header_embed.add_field(name="Канал", value=f"#{канал.name}", inline=True)
+        header_embed.add_field(name="Канал", value=f"#{target_name}", inline=True)
         header_embed.add_field(name="Период", value=f"{days_to_check} дней", inline=True)
         header_embed.add_field(name="Сообщений проверено", value=f"`{len(messages_data)}`", inline=True)
 
