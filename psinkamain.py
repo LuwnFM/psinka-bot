@@ -330,29 +330,114 @@ MERCENARIES_DB = {
 }
 
 
-def normalize_mercenary_name(name: str) -> str:
-    """Приводит название к стандартному виду для поиска в базе"""
-    name = name.strip().lower()
-    name = re.sub(r'\s*[-–—]\s*\d+\s*$', '', name)
-    name = re.sub(r'\s+\d+\s*$', '', name)
-    name = ' '.join(name.split())
+def normalize_lookup_text(text: str) -> str:
+    """Единая нормализация: ё/е, дефисы, номера и лишние пробелы."""
+    text = (text or "").strip().lower().replace("ё", "е")
+    text = re.sub(r'\s*[-–—]\s*\d+\s*$', '', text)
+    text = re.sub(r'\s+\d+\s*$', '', text)
+    text = re.sub(r'[-–—]+', ' ', text)
+    return ' '.join(text.split())
+
+
+def normalize_mercenary_name(name: str) -> Optional[str]:
+    """Приводит название к стандартному виду для поиска в базе."""
+    normalized = normalize_lookup_text(name)
+    aliases = {
+        "шахтер": "Шахтер",
+        "шахтерское дело": "Шахтер",
+        "наемник": "Наемник",
+        "наемник обычный": "Наемник",
+    }
+    if normalized in aliases and aliases[normalized] in MERCENARIES_DB:
+        return aliases[normalized]
     for key in MERCENARIES_DB.keys():
-        if key.lower() == name:
+        if normalize_lookup_text(key) == normalized:
             return key
     return None
 
 
+def dedupe_preserve_order(items: List[str]) -> List[str]:
+    """Убирает дубли, сохраняя порядок и исходное написание первого вхождения."""
+    result = []
+    seen = set()
+    for item in items:
+        key = normalize_lookup_text(item)
+        if key and key not in seen:
+            result.append(item)
+            seen.add(key)
+    return result
+
+
+def get_known_skills() -> set:
+    """Собирает список уже существующих навыков из MERCENARIES_DB."""
+    skills = set()
+    for pool in MERCENARIES_DB.values():
+        skills.update(pool)
+    return skills
+
+
+def normalize_skill_name(skill: str, known_skills: set) -> Optional[str]:
+    """Не добавляет новые названия навыков: приводит специализации к уже имеющимся навыкам."""
+    key = normalize_lookup_text(skill)
+    aliases = {
+        "кузнец": "Кузнец",
+        "стеклодув": "Стеклодув",
+        "красильщик": "Красильщик",
+        "бронник": "Бронник",
+        "лечение": "Врачевание",
+        "мореход": "Мореходство",
+        "писатель": "Писательство",
+        "наездник": "Наездник",
+        "лучник": "Луки",
+        "тактик": "Тактика",
+        "теолог": "Теология",
+        "рунолог": "Рунология",
+        "взломщик": "Взлом",
+        "оценщик": "Оценка",
+        "пловец": "Плавание",
+        "сильный": "Сила",
+        "ловкий": "Ловкость",
+        "выносливый": "Выносливость",
+        "скрытный": "Скрытность",
+    }
+    if key in aliases and aliases[key] in known_skills:
+        return aliases[key]
+    for known in known_skills:
+        if normalize_lookup_text(known) == key:
+            return known
+    return None
+
+
+def sanitize_specialization(spec: Dict, known_skills: set) -> Optional[Dict]:
+    """Чистит навыки специализации: только существующие навыки, без дублей."""
+    if not spec:
+        return None
+    clean_skills = []
+    for skill in spec.get("skills", []):
+        normalized = normalize_skill_name(skill, known_skills)
+        if normalized:
+            clean_skills.append(normalized)
+    clean_skills = dedupe_preserve_order(clean_skills)
+    if not clean_skills:
+        return None
+    return {"name": spec.get("name", "Специализация"), "skills": clean_skills}
+
+
 def roll_specialization(profession: str) -> Optional[Dict]:
-    """Роллит специализацию для профессии, если она есть в списке"""
+    """Роллит специализацию для профессии, если она есть в списке."""
     if profession not in MERCENARY_SPECIALIZATIONS:
         return None
-    
-    specializations = MERCENARY_SPECIALIZATIONS[profession]
-    return random.choice(specializations)
+    known_skills = get_known_skills()
+    clean_specs = []
+    for spec in MERCENARY_SPECIALIZATIONS[profession]:
+        clean = sanitize_specialization(spec, known_skills)
+        if clean:
+            clean_specs.append(clean)
+    return random.choice(clean_specs) if clean_specs else None
 
 
 def has_specialization(profession: str) -> bool:
-    """Проверяет, есть ли у профессии специализации"""
+    """Проверяет, есть ли у профессии специализации."""
     return profession in MERCENARY_SPECIALIZATIONS
 
 
@@ -367,16 +452,44 @@ except ImportError:
     # Для совместимости со старыми версиями
     ProviderError = ModelNotFoundError = RequestLimitError = AuthenticationError = Exception
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(), logging.FileHandler('bot_errors.log', encoding='utf-8', delay=True)],
+    force=True
+)
+logger = logging.getLogger(__name__)
+
 load_dotenv()
 
+
+def safe_int_env(name: str, default: int = 0) -> int:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning(f"⚠️ {name}: ожидалось число, получено `{raw}`. Использую {default}.")
+        return default
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "да", "on"}
+
+
 DATABASE_URL = os.getenv('DATABASE_URL')
-IS_RAILWAY = os.getenv('RAILWAY', '').lower() == 'true' or os.getenv('IS_RAILWAY', '').lower() == 'true'
-OWNER_ID = int(os.getenv('OWNER_ID', 0))
-REQUIRED_ROLE_ID = int(os.getenv('REQUIRED_ROLE_ID', 0))
-DEBUG = os.getenv('DEBUG', 'false').lower() == 'true'
-MAX_CONCURRENT = int(os.getenv('MAX_CONCURRENT', 5))
-PROXY_REFRESH_HOURS = int(os.getenv('PROXY_REFRESH_HOURS', 6))
-USE_PROXY = os.getenv('USE_PROXY', 'false').lower() == 'true'
+IS_RAILWAY = env_bool('RAILWAY') or env_bool('IS_RAILWAY')
+OWNER_ID = safe_int_env('OWNER_ID', 0)
+REQUIRED_ROLE_ID = safe_int_env('REQUIRED_ROLE_ID', 0)
+DEBUG = env_bool('DEBUG', False)
+MAX_CONCURRENT = max(1, safe_int_env('MAX_CONCURRENT', 5))
+PROXY_REFRESH_HOURS = max(1, safe_int_env('PROXY_REFRESH_HOURS', 6))
+USE_PROXY = env_bool('USE_PROXY', False)
+ai_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
 
 # ✅ Проверка токенов при старте
@@ -498,6 +611,9 @@ class DBManager:
         finally:
             session.close()
 
+    def is_connected(self) -> bool:
+        return self.SessionLocal is not None
+
     def has_data(self) -> bool:
         if not self.SessionLocal: return False
         session = self.SessionLocal()
@@ -546,7 +662,7 @@ class PendingTestManager:
         except Exception as e:
             logger.error(f"Ошибка записи во временный лог тестов: {e}")
 
-    def read_and_clear(self) -> List[Tuple[str, str, int]]:
+    def read_records(self) -> List[Tuple[str, str, int]]:
         results = []
         if not os.path.exists(self.filename):
             return results
@@ -557,14 +673,23 @@ class PendingTestManager:
                 for row in reader:
                     if len(row) >= 3:
                         results.append((row[0], row[1], int(row[2])))
-
-            with open(self.filename, 'w', encoding='utf-8') as f:
-                f.write('provider,model,latency_ms,timestamp\n')
-
             return results
         except Exception as e:
             logger.error(f"Ошибка чтения временного лога: {e}")
             return []
+
+    def clear(self):
+        try:
+            with open(self.filename, 'w', encoding='utf-8') as f:
+                f.write('provider,model,latency_ms,timestamp\n')
+        except Exception as e:
+            logger.error(f"Ошибка очистки временного лога: {e}")
+
+    def read_and_clear(self) -> List[Tuple[str, str, int]]:
+        results = self.read_records()
+        if results:
+            self.clear()
+        return results
 
     def get_pending_models(self) -> List[Tuple[str, str]]:
         models = []
@@ -608,7 +733,8 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler('bot_errors.log', encoding='utf-8', delay=True)
-    ]
+    ],
+    force=True
 )
 logger = logging.getLogger(__name__)
 
@@ -762,11 +888,108 @@ def get_all_groq_combinations() -> List[Tuple[str, str]]:
 def get_all_openrouter_combinations() -> List[Tuple[str, str]]:
     """Возвращает все известные модели OpenRouter"""
     return [("OpenRouter", mod) for mod in OR_ALL_MODELS if mod not in EXCLUDED_OR_MODELS]
+
+
+def dedupe_combinations(combinations: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    result = []
+    seen = set()
+    for provider, model in combinations:
+        if not provider or not model or model in EXCLUDED_OR_MODELS:
+            continue
+        key = (provider, model)
+        if key not in seen:
+            result.append(key)
+            seen.add(key)
+    return result
+
+
+def get_db_combinations(provider: Optional[str] = None) -> List[Tuple[str, str]]:
+    if not SessionLocal:
+        return []
+    combos = db_manager.get_all_models()
+    if provider:
+        combos = [(p, m) for p, m in combos if p == provider]
+    return combos
+
+
+async def fetch_groq_model_ids() -> List[str]:
+    token = os.getenv('GROQ_TOKEN')
+    if not token:
+        return []
+    try:
+        headers = {"Authorization": f"Bearer {token}"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get("https://api.groq.com/openai/v1/models", timeout=15) as response:
+                if response.status != 200:
+                    logger.warning(f"Groq models list status: {response.status}")
+                    return []
+                data = await response.json()
+                return [item.get('id') for item in data.get('data', []) if item.get('id')]
+    except Exception as e:
+        logger.warning(f"Не удалось получить живой список Groq моделей: {e}")
+        return []
+
+
+async def fetch_openrouter_model_ids(free_only: bool = True) -> List[str]:
+    headers = {}
+    token = os.getenv('OPENR_TOKEN')
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get("https://openrouter.ai/api/v1/models", timeout=20) as response:
+                if response.status != 200:
+                    logger.warning(f"OpenRouter models list status: {response.status}")
+                    return []
+                data = await response.json()
+                models = []
+                for item in data.get('data', []):
+                    model_id = item.get('id')
+                    if not model_id:
+                        continue
+                    if free_only and not model_id.endswith(':free'):
+                        pricing = item.get('pricing') or {}
+                        prompt_price = str(pricing.get('prompt', ''))
+                        completion_price = str(pricing.get('completion', ''))
+                        if prompt_price not in {'0', '0.0'} or completion_price not in {'0', '0.0'}:
+                            continue
+                    models.append(model_id)
+                return models
+    except Exception as e:
+        logger.warning(f"Не удалось получить живой список OpenRouter моделей: {e}")
+        return []
+
+
+async def get_all_groq_combinations_live() -> List[Tuple[str, str]]:
+    live_models = await fetch_groq_model_ids()
+    source_models = live_models if live_models else GROQ_ALL_MODELS
+    combos = [("Groq", m) for m in GROQ_PRIORITY_MODELS]
+    combos += get_db_combinations("Groq")
+    combos += [("Groq", m) for m in source_models]
+    return dedupe_combinations(combos)
+
+
+async def get_all_openrouter_combinations_live() -> List[Tuple[str, str]]:
+    live_models = await fetch_openrouter_model_ids(free_only=True)
+    source_models = live_models if live_models else OR_ALL_MODELS
+    combos = [("OpenRouter", m) for m in OR_PRIORITY_MODELS]
+    combos += get_db_combinations("OpenRouter")
+    combos += [("OpenRouter", m) for m in source_models]
+    return dedupe_combinations(combos)
+
+
+async def get_all_test_combinations_live() -> List[Tuple[str, str]]:
+    combos = []
+    combos.extend(get_all_g4f_combinations())
+    combos.extend(await get_all_groq_combinations_live())
+    combos.extend(await get_all_openrouter_combinations_live())
+    return dedupe_combinations(combos)
 # ============================================================================
 # 🛠 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================================
 
 async def fetch_free_proxies(count: int = 20) -> List[str]:
+    """Загружает свежие HTTP-прокси. Не используется по умолчанию, только если /скажи прокси=Да."""
     try:
         async with aiohttp.ClientSession() as session:
             url = f"https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&timeout=10000&limit={count}"
@@ -774,17 +997,17 @@ async def fetch_free_proxies(count: int = 20) -> List[str]:
                 if response.status == 200:
                     text = await response.text()
                     proxies = [f"http://{p.strip()}" for p in text.split('\n') if p.strip() and ':' in p]
+                    proxies = [p for p in proxies if validate_proxy_format(p)]
                     if proxies:
                         logger.info(f"🌐 Обновлён список прокси: {len(proxies)} шт.")
                         return proxies
     except Exception as e:
         logger.warning(f"⚠️ Не удалось обновить прокси: {e}")
-    return FREE_PROXY_LIST
+    return [p for p in FREE_PROXY_LIST if validate_proxy_format(p)]
 
 
-# Добавьте эту функцию в вспомогательные:
 def validate_proxy_format(proxy: str) -> bool:
-    """Проверяет формат прокси согласно требованиям g4f [[33]]"""
+    """Проверяет формат прокси: http(s)/socks + host:port."""
     if not proxy:
         return False
     if not proxy.startswith(('http://', 'https://', 'socks4://', 'socks5://')):
@@ -793,16 +1016,45 @@ def validate_proxy_format(proxy: str) -> bool:
         host_port = proxy.split('://')[-1]
         host, port = host_port.rsplit(':', 1)
         return bool(host) and port.isdigit() and 1 <= int(port) <= 65535
-    except:
+    except Exception:
         return False
 
-# Обновите get_random_proxy:
+
+proxy_lock = asyncio.Lock()
+proxy_last_refresh = 0.0
+
+
+async def ensure_proxy_list(force: bool = False) -> List[str]:
+    """Обновляет глобальный список прокси по требованию, а не при обычном старте."""
+    global FREE_PROXY_LIST, proxy_last_refresh
+    now = time.time()
+    refresh_after = PROXY_REFRESH_HOURS * 3600
+    valid_current = [p for p in FREE_PROXY_LIST if validate_proxy_format(p)]
+    if valid_current and not force and now - proxy_last_refresh < refresh_after:
+        return valid_current
+
+    async with proxy_lock:
+        now = time.time()
+        valid_current = [p for p in FREE_PROXY_LIST if validate_proxy_format(p)]
+        if valid_current and not force and now - proxy_last_refresh < refresh_after:
+            return valid_current
+        FREE_PROXY_LIST = await fetch_free_proxies()
+        proxy_last_refresh = time.time()
+        return [p for p in FREE_PROXY_LIST if validate_proxy_format(p)]
+
+
 def get_random_proxy(use_proxy: bool) -> Optional[str]:
     if not use_proxy:
         return None
-    # Фильтруем только валидные прокси
     valid = [p for p in FREE_PROXY_LIST if validate_proxy_format(p)]
     return random.choice(valid) if valid else None
+
+
+async def get_random_proxy_async(use_proxy: bool) -> Optional[str]:
+    if not use_proxy:
+        return None
+    proxies = await ensure_proxy_list()
+    return random.choice(proxies) if proxies else None
 
 
 async def check_access(interaction: disnake.CommandInteraction, allowed_role_names: List[str] = ["Псарь"]) -> bool:
@@ -1096,6 +1348,7 @@ class DiceResult:
     def __init__(self):
         self.total = 0.0
         self.dice_rolls: List[int] = []
+        self.all_rolls: List[int] = []
         self.details: List[str] = []
         self.comment = ""
         self.exploded_rolls: List[int] = []
@@ -1119,145 +1372,196 @@ class DiceParser:
         }
 
     def parse(self, command_str: str) -> List[DiceResult]:
-        results = []
+        results: List[DiceResult] = []
         if not command_str or not command_str.strip():
             return results
 
         command_str = command_str.strip()
-        parts = command_str.split()
+        parts = command_str.split(maxsplit=1)
+        alias = parts[0].lower() if parts else ""
+        if alias in self.aliases:
+            tail = parts[1] if len(parts) > 1 else ""
+            command_str = (self.aliases[alias] + " " + tail).strip()
 
-        if parts and parts[0].lower() in self.aliases:
-            command_str = self.aliases[parts[0].lower()] + " " + " ".join(parts[1:])
-
-        sets = command_str.split(';')
-
-        for s in sets[:4]:
-            s = s.strip()
-            if not s:
+        for expression in command_str.split(';')[:4]:
+            expression = expression.strip()
+            if not expression:
                 continue
+            parsed = self._parse_expression(expression)
+            results.extend(parsed)
 
-            result = self._parse_single_roll(s)
-            if result:
-                results.append(result)
+        return results[:80]
 
-        return results
-
-    def _parse_single_roll(self, roll_str: str) -> Optional[DiceResult]:
-        res = DiceResult()
-        original_str = roll_str
-
-        if '!' in roll_str:
-            parts = roll_str.split('!', 1)
-            roll_str = parts[0].strip()
-            res.comment = parts[1].strip()
-
-        flags = []
-        flag_pattern = r'\b([a-z]{1,2})\b'
-        potential_flags = re.findall(flag_pattern, roll_str.lower())
-        for flag in potential_flags:
-            if flag in ['s', 'nr', 'p', 'ul', 'e', 'ie', 'k', 'kl', 'd', 'dl', 'r', 'ir', 't', 'f', 'b']:
-                flags.append(flag)
-
-        clean_str = roll_str
-        for flag in flags:
-            clean_str = re.sub(r'\b' + flag + r'\b', '', clean_str, flags=re.IGNORECASE)
+    def _parse_expression(self, expression: str) -> List[DiceResult]:
+        comment = ""
+        if '!' in expression:
+            expression, comment = expression.split('!', 1)
+            expression = expression.strip()
+            comment = comment.strip()
 
         num_sets = 1
-        set_match = re.match(r'^(\d+)\s+(.+)$', clean_str.strip())
-        if set_match:
-            num_sets = min(int(set_match.group(1)), 20)
-            clean_str = set_match.group(2)
+        set_match = re.match(r'^(\d+)\s+(.+)$', expression.strip())
+        if set_match and 'd' in set_match.group(2).lower():
+            num_sets = max(1, min(int(set_match.group(1)), 20))
+            expression = set_match.group(2).strip()
 
-        dice_match = re.search(r'(\d*)d(\d+)', clean_str, re.IGNORECASE)
+        results = []
+        for _ in range(num_sets):
+            result = self._roll_once(expression)
+            if result:
+                result.comment = comment
+                results.append(result)
+        return results
+
+    def _extract_modifier(self, expression: str) -> Tuple[str, Optional[Tuple[str, float]]]:
+        modifier_match = re.search(r'(?<![a-zA-Z])([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*$', expression)
+        if not modifier_match:
+            return expression, None
+        op = modifier_match.group(1)
+        value = float(modifier_match.group(2))
+        return expression[:modifier_match.start()].strip(), (op, value)
+
+    def _roll_once(self, expression: str) -> Optional[DiceResult]:
+        res = DiceResult()
+        expr_without_modifier, modifier = self._extract_modifier(expression.strip())
+
+        dice_match = re.search(r'(\d*)d(\d+)', expr_without_modifier, re.IGNORECASE)
         if not dice_match:
-            num_match = re.match(r'^(\d+)$', clean_str.strip())
+            num_match = re.fullmatch(r'\s*(-?\d+(?:\.\d+)?)\s*', expression)
             if num_match:
                 res.total = float(num_match.group(1))
-                res.details = f"Статическое значение: {res.total}"
+                res.details = [f"Статическое значение: {res.total:g}"]
                 return res
             return None
 
         num_dice = int(dice_match.group(1) or 1)
         num_sides = int(dice_match.group(2))
+        num_dice = max(1, min(num_dice, 100))
+        num_sides = max(2, min(num_sides, 100))
 
-        if num_sides > 100: num_sides = 100
-        if num_dice > 100: num_dice = 100
+        tail = expr_without_modifier[dice_match.end():]
+
+        def find_flag(names: List[str]) -> Optional[re.Match]:
+            names_sorted = sorted(names, key=len, reverse=True)
+            pattern = r'(?<![a-zA-Z])(' + '|'.join(map(re.escape, names_sorted)) + r')\s*(\d+)?\b'
+            return re.search(pattern, tail, re.IGNORECASE)
 
         rolls = [random.randint(1, num_sides) for _ in range(num_dice)]
-        res.dice_rolls = rolls.copy()
+        res.all_rolls = rolls.copy()
+        working_rolls = rolls.copy()
 
-        if 'e' in flags or 'ie' in flags:
-            explode_val = num_sides
-            infinite = 'ie' in flags
+        reroll_match = find_flag(['ir', 'r'])
+        if reroll_match:
+            threshold = int(reroll_match.group(2) or 1)
+            infinite = reroll_match.group(1).lower() == 'ir'
+            threshold = max(1, min(threshold, num_sides))
+            rerolled_count = 0
+            for i, value in enumerate(working_rolls):
+                safety = 0
+                if value <= threshold:
+                    new_value = random.randint(1, num_sides)
+                    rerolled_count += 1
+                    working_rolls[i] = new_value
+                    res.all_rolls.append(new_value)
+                    if infinite:
+                        while working_rolls[i] <= threshold and safety < 100:
+                            working_rolls[i] = random.randint(1, num_sides)
+                            res.all_rolls.append(working_rolls[i])
+                            rerolled_count += 1
+                            safety += 1
+            if rerolled_count:
+                res.rerolled = True
+                res.details.append(f"🔄 Перебросы ≤{threshold}: {rerolled_count}")
 
-            explode_match = re.search(r'(i?e)(\d+)', roll_str, re.IGNORECASE)
-            if explode_match:
-                infinite = explode_match.group(1).lower() == 'ie'
-                explode_val = int(explode_match.group(2))
-
-            rolls_to_process = list(enumerate(rolls))
+        explode_match = find_flag(['ie', 'e'])
+        if explode_match:
+            explode_val = int(explode_match.group(2) or num_sides)
+            infinite = explode_match.group(1).lower() == 'ie'
+            explode_val = max(1, min(explode_val, num_sides))
+            to_check = list(working_rolls)
             exploded_count = 0
-            max_explodes = 100 if infinite else len(rolls)
+            max_explodes = 100 if infinite else len(to_check)
+            while to_check and exploded_count < max_explodes:
+                current = to_check.pop(0)
+                if current >= explode_val:
+                    new_roll = random.randint(1, num_sides)
+                    working_rolls.append(new_roll)
+                    res.all_rolls.append(new_roll)
+                    res.exploded_rolls.append(new_roll)
+                    exploded_count += 1
+                    if infinite and new_roll >= explode_val:
+                        to_check.append(new_roll)
+            if res.exploded_rolls:
+                res.details.append(f"💥 Взрывы ≥{explode_val}: +{len(res.exploded_rolls)}")
 
-            while rolls_to_process and exploded_count < max_explodes:
-                new_rolls_to_process = []
-                for idx, val in rolls_to_process:
-                    if val >= explode_val:
-                        new_roll = random.randint(1, num_sides)
-                        res.dice_rolls.append(new_roll)
-                        res.exploded_rolls.append(new_roll)
-                        exploded_count += 1
-                        if infinite and new_roll >= explode_val and exploded_count < max_explodes:
-                            new_rolls_to_process.append((len(res.dice_rolls) - 1, new_roll))
-                rolls_to_process = new_rolls_to_process
+        selected_rolls = working_rolls.copy()
+        keep_drop_match = find_flag(['kh', 'kl', 'k', 'dh', 'dl', 'd'])
+        if keep_drop_match:
+            flag = keep_drop_match.group(1).lower()
+            amount = int(keep_drop_match.group(2) or 1)
+            amount = max(0, min(amount, len(selected_rolls)))
+            indexed = list(enumerate(selected_rolls))
+            if amount > 0 and amount < len(selected_rolls):
+                if flag in ('k', 'kh'):
+                    keep_indexes = {idx for idx, _ in sorted(indexed, key=lambda x: x[1], reverse=True)[:amount]}
+                    label = f"📌 Оставлено лучших: {amount}"
+                elif flag == 'kl':
+                    keep_indexes = {idx for idx, _ in sorted(indexed, key=lambda x: x[1])[:amount]}
+                    label = f"📌 Оставлено худших: {amount}"
+                elif flag in ('d', 'dl'):
+                    drop_indexes = {idx for idx, _ in sorted(indexed, key=lambda x: x[1])[:amount]}
+                    keep_indexes = {idx for idx, _ in indexed if idx not in drop_indexes}
+                    label = f"🗑 Сброшено худших: {amount}"
+                else:  # dh
+                    drop_indexes = {idx for idx, _ in sorted(indexed, key=lambda x: x[1], reverse=True)[:amount]}
+                    keep_indexes = {idx for idx, _ in indexed if idx not in drop_indexes}
+                    label = f"🗑 Сброшено лучших: {amount}"
 
-            res.details.append(f"💥 Взрывы: +{len(res.exploded_rolls)}")
+                res.kept_dice = [val for idx, val in indexed if idx in keep_indexes]
+                res.dropped_dice = [val for idx, val in indexed if idx not in keep_indexes]
+                selected_rolls = res.kept_dice.copy()
+                res.details.append(label)
+            elif amount >= len(selected_rolls) and flag.startswith('d'):
+                res.dropped_dice = selected_rolls.copy()
+                selected_rolls = []
+                res.details.append(f"🗑 Сброшены все кубики: {amount}")
 
-        if any(f in flags for f in ['k', 'kl', 'd', 'dl']):
-            keep_val = None
-            for flag in ['k', 'kl', 'd', 'dl']:
-                match = re.search(flag + r'(\d+)', roll_str, re.IGNORECASE)
-                if match:
-                    keep_val = int(match.group(1))
-                    break
+        target_match = find_flag(['t'])
+        if target_match:
+            target = int(target_match.group(2) or num_sides)
+            target = max(1, min(target, num_sides))
+            res.successes = sum(1 for value in selected_rolls if value >= target)
+            res.failures = len(selected_rolls) - res.successes
+            res.botches = sum(1 for value in selected_rolls if value == 1)
+            res.total = float(res.successes)
+            res.details.append(f"✅ Цель ≥{target}: успехов {res.successes}, провалов {res.failures}")
+        else:
+            res.total = float(sum(selected_rolls))
 
-            if keep_val is not None and keep_val < len(res.dice_rolls):
-                sorted_rolls = sorted(res.dice_rolls, reverse=True)
-                if 'k' in flags or 'kl' in flags:
-                    if 'kl' in flags:
-                        sorted_rolls = sorted(res.dice_rolls)
-                    res.kept_dice = sorted_rolls[:keep_val]
-                    res.dice_rolls = res.kept_dice
-                    res.details.append(f"📌 Оставлено {keep_val}")
-                elif 'd' in flags or 'dl' in flags:
-                    if 'dl' in flags:
-                        sorted_rolls = sorted(res.dice_rolls)
-                    res.dropped_dice = sorted_rolls[:keep_val]
-                    res.kept_dice = sorted_rolls[keep_val:]
-                    res.dice_rolls = res.kept_dice
-                    res.details.append(f"🗑 Сброшено {keep_val}")
-
-        modifier_match = re.search(r'([+\-*/])\s*(\d+(?:\.\d+)?)$', clean_str)
-        if modifier_match:
-            op = modifier_match.group(1)
-            val = float(modifier_match.group(2))
+        if modifier:
+            op, val = modifier
+            old_total = res.total
             if op == '+':
                 res.total += val
             elif op == '-':
                 res.total -= val
             elif op == '*':
                 res.total *= val
-            elif op == '/':
-                if val != 0: res.total /= val
-            res.details.append(f"{op}{int(val) if val == int(val) else val}")
+            elif op == '/' and val != 0:
+                res.total /= val
+            elif op == '/' and val == 0:
+                res.details.append("⚠️ Деление на ноль пропущено")
+            if not (op == '/' and val == 0):
+                display_val = int(val) if val == int(val) else val
+                res.details.append(f"🧮 Модификатор: {old_total:g} {op} {display_val} = {res.total:g}")
 
-        res.total = sum(res.dice_rolls)
-
+        res.dice_rolls = selected_rolls.copy()
+        if res.dropped_dice:
+            res.details.append(f"🗑 Сброшено: {res.dropped_dice}")
         if not res.details:
             res.details = [f"🎲 Бросок: {res.dice_rolls}"]
         else:
             res.details.insert(0, f"🎲 Бросок: {res.dice_rolls}")
-
         return res
 
     def get_help_text(self) -> str:
@@ -1268,20 +1572,28 @@ class DiceParser:
 • `XdY` — Бросить X кубиков с Y гранями (пример: `2d6`)
 • `XdY + Z` — С модификатором (пример: `1d20 + 5`)
 • `N XdY` — N наборов по XdY (пример: `6 4d6`)
+• `A; B; C` — несколько разных бросков одной командой
 
 **Модификаторы:**
-• `eZ` — Взрывающиеся кубики на Z (пример: `3d6 e6`)
-• `kZ` — Оставить Z лучших (пример: `4d6 k3`)
-• `dZ` — Сбросить Z худших
-• `rZ` — Перебросить ≤ Z
-• `tZ` — Успехи при ≥ Z
+• `eZ` — Взрывающиеся кубики на Z один раз (пример: `3d6 e6`)
+• `ieZ` — Взрывающиеся кубики с цепной реакцией
+• `kZ` / `khZ` — Оставить Z лучших (пример: `4d6 k3`)
+• `klZ` — Оставить Z худших
+• `dZ` / `dlZ` — Сбросить Z худших
+• `dhZ` — Сбросить Z лучших
+• `rZ` — Один раз перебросить кубики ≤ Z
+• `irZ` — Перебрасывать ≤ Z до успеха или лимита защиты
+• `tZ` — Считать успехи при ≥ Z вместо суммы
 
 **Алиасы:**
 • `dndstats` — 6 наборов 4d6 k3 (статы D&D)
 • `attack` — 1d20 (атака)
+• `+d20` — преимущество, 2d20 d1
+• `-d20` — помеха, 2d20 kl1
 • `stat` — 4d6 k3 (один стат)
+• `save` — 1d20 + 5
 
-**Ограничения:** макс. 100 граней, 100 кубиков, 20 наборов, 4 броска
+**Ограничения:** макс. 100 граней, 100 кубиков, 20 наборов, 4 формулы через `;`
 """
 
 
@@ -1422,6 +1734,9 @@ async def slash_say(interaction: disnake.CommandInteraction,
         status_embed.set_footer(text="Может занять до 45 секунд 🐾")
 
         msg = await interaction.edit_original_response(embed=status_embed)
+        semaphore_acquired = False
+        await ai_semaphore.acquire()
+        semaphore_acquired = True
 
         queue = await get_priority_queue()
 
@@ -1430,8 +1745,9 @@ async def slash_say(interaction: disnake.CommandInteraction,
         final_prov = "?"
         final_mod = "?"
         final_lat = 0.0
-        use_proxy = (прокси == "Да") and USE_PROXY
-        proxy_url = get_random_proxy(use_proxy) if use_proxy else None
+        use_proxy = (прокси == "Да")
+        proxy_url = await get_random_proxy_async(use_proxy)
+        proxy_display = "Да" if proxy_url else "Нет"
         used_temp_file = False
 
         for idx, (prov, mod) in enumerate(queue):
@@ -1465,6 +1781,10 @@ async def slash_say(interaction: disnake.CommandInteraction,
                 logger.warning(f"Error {prov}/{mod}: {e}", exc_info=True)
                 continue
 
+        if semaphore_acquired:
+            ai_semaphore.release()
+            semaphore_acquired = False
+
         if not final_response:
             error_embed = disnake.Embed(
                 title="❌ ПсИИнка устал...",
@@ -1484,7 +1804,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
         header_text += f"*виляет хвостом* Держи, хозяин:\n\n"
         header_text += f"📊 **Источник:** `{final_prov}` / `{final_mod}`\n"
         header_text += f"⏱ **Время:** `{final_lat:.2f}с` | 📏 **Длина:** `{len(final_response)} симв.`\n"
-        header_text += f"🔀 **Прокси:** `{прокси}`\n"
+        header_text += f"🔀 **Прокси:** `{proxy_display}`\n"
         header_text += f"{'─' * 40}\n\n"
 
         MAX_CHUNK_SIZE = 1900
@@ -1504,6 +1824,8 @@ async def slash_say(interaction: disnake.CommandInteraction,
             await interaction.channel.send(chunks[i], reference=first_msg, mention_author=False)
 
     except Exception as e:
+        if 'semaphore_acquired' in locals() and semaphore_acquired:
+            ai_semaphore.release()
         logger.error(f"Critical error in /say: {e}", exc_info=True)
         err_msg = f"❌ Гав! Ошибка: {str(e)[:100]}"
         if interaction.response.is_done():
@@ -1562,10 +1884,20 @@ async def slash_cube(interaction: disnake.CommandInteraction,
             if r.botches > 0:
                 details_extra.append(f"⚠️ Ботчи: {r.botches}")
 
+            detail_lines = []
+            for detail in r.details:
+                if detail.startswith("🎲 Бросок:"):
+                    continue
+                if detail not in detail_lines:
+                    detail_lines.append(detail)
             if details_extra:
-                field_value += "\n" + " | ".join(details_extra)
+                for detail in details_extra:
+                    if detail not in detail_lines:
+                        detail_lines.append(detail)
+            if detail_lines:
+                field_value += "\n" + "\n".join(f"• {d}" for d in detail_lines[:8])
 
-            output_embed.add_field(name=f"Бросок #{i + 1}", value=field_value, inline=False)
+            output_embed.add_field(name=f"Бросок #{i + 1}", value=field_value[:1024], inline=False)
 
         if len(results) > 1:
             output_embed.add_field(name="📈 Общая сумма", value=f"**{total_all}** *тяв!*", inline=False)
@@ -1633,8 +1965,9 @@ async def slash_status(interaction: disnake.CommandInteraction):
             embed.add_field(name="📭 Данные", value="Нет записей. *Гавкни* `/скажи` для начала сбора статистики!",
                             inline=False)
 
-        embed.add_field(name="🔧 Режим", value="Экономия ресурсов (No Warmup)\nБД: " + (
-            "✅ Подключена *гав!*" if db_manager.has_data() else "⚠️ Отключена *скулит*"), inline=False)
+        db_state = "✅ Подключена *гав!*" if db_manager.is_connected() else "⚠️ Отключена *скулит*"
+        data_state = "✅ Есть записи" if db_manager.has_data() else "📭 Записей пока нет"
+        embed.add_field(name="🔧 Режим", value=f"Экономия ресурсов (No Warmup)\nБД: {db_state}\nДанные: {data_state}", inline=False)
         embed.set_footer(text="ПсИИнка бот | Statistics 🐾")
 
         await interaction.edit_original_response(embed=embed)
@@ -1857,7 +2190,7 @@ class TestModeView(disnake.ui.View):
         start = time.time()
 
         # ✅ Используем ВСЕ известные модели Groq, а не только приоритетные
-        all_combinations = get_all_groq_combinations()
+        all_combinations = await get_all_groq_combinations_live()
 
         if not all_combinations:
             await interaction.followup.send("❌ Гав! Нет моделей Groq для теста. *нюхает*", ephemeral=True)
@@ -1949,7 +2282,7 @@ class TestModeView(disnake.ui.View):
         start = time.time()
 
         # ✅ Используем ВСЕ известные модели OpenRouter, а не только приоритетные
-        all_combinations = get_all_openrouter_combinations()
+        all_combinations = await get_all_openrouter_combinations_live()
 
         if not all_combinations:
             await interaction.followup.send("❌ Гав! Нет моделей OpenRouter для теста. *нюхает*", ephemeral=True)
@@ -2049,8 +2382,8 @@ async def slash_test(interaction: disnake.CommandInteraction):
 
         # ✅ Получаем актуальные количества моделей для отображения в описании
         g4f_count = len(get_all_g4f_combinations())
-        groq_count = len(get_all_groq_combinations())
-        or_count = len(get_all_openrouter_combinations())
+        groq_count = len(await get_all_groq_combinations_live())
+        or_count = len(await get_all_openrouter_combinations_live())
         total_count = g4f_count + groq_count + or_count
 
         embed = disnake.Embed(
@@ -2124,21 +2457,12 @@ async def run_mass_test(channel):
         timestamp=datetime.now()
     )
     progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
+    progress_embed.add_field(name="📊 Статистика", value="✅ Успешно: 0\n❌ Ошибок: 0", inline=False)
     progress_msg = await channel.send(embed=progress_embed)
 
     start_time = time.time()
 
-    combinations = []
-
-    for prov, models in G4F_DEEP_SCAN_MODELS.items():
-        for mod in models:
-            combinations.append((prov, mod))
-
-    for m in GROQ_PRIORITY_MODELS:
-        combinations.append(("Groq", m))
-
-    for m in OR_PRIORITY_MODELS:
-        combinations.append(("OpenRouter", m))
+    combinations = await get_all_test_combinations_live()
 
     results = []
     total = len(combinations)
@@ -2259,6 +2583,37 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
             except:
                 pass
 
+    # Архивные треды: добавлено без изменения основного механизма анализа.
+    if hasattr(channel, 'archived_threads'):
+        seen_thread_ids = {getattr(t, 'id', None) for t in getattr(channel, 'threads', [])}
+        for private_flag in (False, True):
+            try:
+                async for thread in channel.archived_threads(private=private_flag, limit=100):
+                    if getattr(thread, 'id', None) in seen_thread_ids or not hasattr(thread, 'history'):
+                        continue
+                    seen_thread_ids.add(getattr(thread, 'id', None))
+                    try:
+                        count = 0
+                        async for message in thread.history(limit=max_per_source, after=after_date):
+                            if message.is_system() or message.author == bot.user or not message.content.strip():
+                                continue
+                            all_messages.append({
+                                "id": len(all_messages) + 1,
+                                "real_id": message.id,
+                                "content": message.content[:1500],
+                                "author": str(message.author),
+                                "url": message.jump_url,
+                                "source": f"Archived Thread: {thread.name}",
+                                "created_at": message.created_at
+                            })
+                            count += 1
+                        log_analysis(f"✅ Archived thread {thread.name}: {count} msgs.", "INFO")
+                        await asyncio.sleep(0.5)
+                    except Exception as e:
+                        log_analysis(f"Archived thread {getattr(thread, 'name', '?')} error: {e}", "DEBUG")
+            except Exception as e:
+                log_analysis(f"Archived threads private={private_flag} unavailable: {e}", "DEBUG")
+
     return all_messages
 
 
@@ -2273,14 +2628,9 @@ def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
     if not ai_text or ai_text.strip().upper() == "NONE":
         return []
 
-    found_ids = []
-    for part in re.split(r'[,\s\n]+', ai_text):
-        try:
-            found_ids.append(int(part))
-        except:
-            pass
-
-    return [msg for msg in original_data if msg['id'] in found_ids]
+    found_ids = [int(x) for x in re.findall(r'\d+', ai_text)]
+    found_set = set(found_ids)
+    return [msg for msg in original_data if msg['id'] in found_set]
 
 
 @bot.slash_command(name="анализ", description="Анализ канала на нарушения")
@@ -2547,29 +2897,26 @@ async def slash_commit_tests(interaction: disnake.CommandInteraction):
 
     await interaction.response.defer()
 
-    records = pending_test_manager.read_and_clear()
+    if not SessionLocal:
+        await interaction.followup.send("❌ Гав! БД не подключена, временный лог не трогаю.", ephemeral=True)
+        return
+
+    records = pending_test_manager.read_records()
     if not records:
         await interaction.followup.send("ℹ️ ПсИИнка проверил временный лог — там пусто. *нюхает* 🐕", ephemeral=True)
         return
 
     count = 0
-    if SessionLocal:
-        session = SessionLocal()
-        try:
-            for prov, mod, lat in records:
-                db_manager.log_success(prov, mod, lat)
-                count += 1
-            session.commit()
-            await interaction.followup.send(f"✅ ПсИИнка записал `{count}` успешных тестов в БД! *виляет хвостом* 🐕",
-                                            ephemeral=True)
-        except Exception as e:
-            session.rollback()
-            logger.error(f"Error committing tests: {e}")
-            await interaction.followup.send(f"❌ Ошибка записи: {str(e)[:100]}", ephemeral=True)
-        finally:
-            session.close()
-    else:
-        await interaction.followup.send("❌ Гав! БД не подключена, данные сохранены только в файле.", ephemeral=True)
+    try:
+        for prov, mod, lat in records:
+            db_manager.log_success(prov, mod, lat)
+            count += 1
+        pending_test_manager.clear()
+        await interaction.followup.send(f"✅ ПсИИнка записал `{count}` успешных тестов в БД Neon! *виляет хвостом* 🐕",
+                                        ephemeral=True)
+    except Exception as e:
+        logger.error(f"Error committing tests: {e}", exc_info=True)
+        await interaction.followup.send(f"❌ Ошибка записи, временный лог НЕ очищен: {str(e)[:100]}", ephemeral=True)
 
 # ============================================================================
 # 🛡️ КОМАНДА: НАЁМНИК (ОБНОВЛЁННАЯ СО СПЕЦИАЛИЗАЦИЯМИ)
@@ -2619,16 +2966,15 @@ async def slash_mercenary(interaction: disnake.CommandInteraction,
             return
 
         # Получаем базовый пул навыков
-        skill_pool = MERCENARIES_DB[mercenary_name].copy()  # Копируем, чтобы не менять оригинал
+        skill_pool = dedupe_preserve_order(MERCENARIES_DB[mercenary_name].copy())  # Копируем, чтобы не менять оригинал
         
         # Проверяем специализацию
         specialization = roll_specialization(mercenary_name)
         
-        # Если есть специализация — ДОБАВЛЯЕМ её навыки к базовым (не заменяем!)
+        # Если есть специализация — добавляем её навыки без дублей и без новых названий навыков
         if specialization:
             spec_skills = specialization["skills"]
-            # Добавляем навыки специализации в конец списка
-            skill_pool.extend(spec_skills)
+            skill_pool = dedupe_preserve_order(skill_pool + spec_skills)
         
         # Роллим уровни для каждого навыка
         skills_with_levels = []
@@ -2712,7 +3058,7 @@ async def on_ready():
         logger.info(f"Mode: Role ID {REQUIRED_ROLE_ID} access.")
 
     if USE_PROXY:
-        asyncio.create_task(fetch_free_proxies())
+        logger.info("Proxy mode allowed by .env, but proxy list refreshes only when /скажи прокси=Да.")
     asyncio.create_task(heartbeat_keeper())
 
 
@@ -2744,6 +3090,9 @@ async def on_command_error(ctx, error):
 if __name__ == "__main__":
     logger.info("🚀 Start PsIInka Bot v2.0-Full-Integrated")
     try:
-        bot.run(os.getenv("DISCORD_TOKEN"))
+        discord_token = os.getenv("DISCORD_TOKEN")
+        if not discord_token:
+            raise RuntimeError("DISCORD_TOKEN не найден в .env")
+        bot.run(discord_token)
     except Exception as e:
         logger.critical(f"💥 Startup crash: {e}", exc_info=True)
