@@ -1,25 +1,10 @@
-# Discord framework
-disnake>=2.9.0
-
-# Переменные окружения
-python-dotenv>=1.0.0
-
-# AI провайдеры
+disnake==2.12.0
+python-dotenv==1.2.2
 git+https://github.com/xtekky/gpt4free.git
-openai>=1.0.0
-groq>=0.9.0
-
-# Асинхронные запросы
-aiohttp>=3.9.0
-
-# Мониторинг памяти (опционально, для отладки)
-psutil>=5.9.0
-
-# Утилиты
-typing-extensions>=4.0.0
-
-
-# БДШЕЧКИ
-psycopg2-binary>=2.9.9  # <-- ДОБАВИТЬ ЭТУ СТРОКУ
-sqlalchemy>=2.0.0    # <-- Опционально, для удобной работы с БД
-
+openai==2.36.0
+groq==1.2.0
+aiohttp==3.13.5
+psutil==7.2.2
+typing-extensions==4.15.0
+psycopg2-binary==2.9.12
+SQLAlchemy==2.0.49
