@@ -4404,28 +4404,44 @@ def clean_real_estate_text(text):
     return text
 
 
-@bot.command(name="недвижка")
-async def real_estate_command(ctx, *, estate_text: str = None):
-    if not has_real_estate_access(ctx.author):
-        await ctx.reply(
+REAL_ESTATE_TRIGGER = "недвижкаролл"
+
+
+@bot.listen("on_message")
+async def real_estate_message_listener(message):
+    if message.author.bot:
+        return
+
+    content = (message.content or "").strip()
+    if not content:
+        return
+
+    parts = content.split(maxsplit=1)
+    command_word = parts[0].casefold()
+
+    if command_word != REAL_ESTATE_TRIGGER.casefold():
+        return
+
+    if not has_real_estate_access(message.author):
+        await message.reply(
             "Гав... простите, но я не могу ничего поделать — вы не мой хозяин. "
             "Эта команда слушается только **Секретариат** или **Фаеркадастр**.",
             mention_author=False
         )
         return
 
-    if not estate_text:
-        await ctx.reply(
-            '❌ Укажи недвижку после команды. Пример: `!недвижка старый особняк с садом`',
+    if len(parts) < 2 or not parts[1].strip():
+        await message.reply(
+            '❌ Укажи недвижку после команды. Пример: `Недвижкаролл старый особняк с садом`',
             mention_author=False
         )
         return
 
-    estate_text = clean_real_estate_text(estate_text)
+    estate_text = clean_real_estate_text(parts[1])
     location_text, quality = roll_real_estate()
 
-    await ctx.reply(
-        f'Недвижка "{estate_text}" определилась по запросу секретаря {ctx.author.mention} '
+    await message.reply(
+        f'Недвижка "{estate_text}" определилась по запросу секретаря {message.author.mention} '
         f'как {location_text}, итоговое качество — **{quality}**.',
         mention_author=False
     )
