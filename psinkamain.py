@@ -2960,7 +2960,313 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
         logger.error(f"Critical error in /analyze: {e}", exc_info=True)
         await interaction.followup.send(f"❌ ПсИИнка ошибся... *повесил уши*\nЛог сохранен.\nОшибка: {str(e)[:100]} 🐕",
                                         ephemeral=True)
+# ============================================================================
+# 💰 КОМАНДА: ЦЕНЫ АУКЦИОНА
+# ============================================================================
 
+AUCTIONEER_USERNAMES = {"aukcionistfirewell", "lagyshka22"}
+
+NEW_AUCTION_LOT_RE = re.compile(r"Лот\s*№\s*(\d+)", re.IGNORECASE)
+ANCIENT_AUCTION_LOT_RE = re.compile(r"Номер\s+лота\s*:\s*(\d+)", re.IGNORECASE)
+
+AUCTION_LAST_BID_RE = re.compile(
+    r"Последняя\s+ставка\s*:\s*[`*_\s]*([0-9][0-9 \u00A0]*)",
+    re.IGNORECASE,
+)
+
+AUCTION_START_PRICE_RE = re.compile(
+    r"Начальная\s+стоимость\s*:\s*[`*_\s]*([0-9][0-9 \u00A0]*)",
+    re.IGNORECASE,
+)
+
+
+def get_auction_price_channel_types() -> List[Any]:
+    """Типы каналов, которые можно выбрать для /цены."""
+    wanted = ["text", "news", "public_thread", "private_thread", "news_thread"]
+    return [getattr(disnake.ChannelType, name) for name in wanted if hasattr(disnake.ChannelType, name)]
+
+
+AUCTION_PRICE_CHANNEL_TYPES = get_auction_price_channel_types()
+
+
+def auction_money_to_int(raw: Optional[str]) -> Optional[int]:
+    """Достаёт число из строки цены: `1 200`, 1200 🪙 и т.п."""
+    digits = re.sub(r"\D+", "", raw or "")
+    return int(digits) if digits else None
+
+
+def auction_message_to_text(message: disnake.Message) -> str:
+    """Собирает текст обычного сообщения и всех embed-полей в один блок."""
+    parts = []
+
+    if getattr(message, "content", None):
+        parts.append(message.content)
+
+    for embed in getattr(message, "embeds", []) or []:
+        for attr in ("title", "description"):
+            value = getattr(embed, attr, None)
+            if value:
+                parts.append(str(value))
+
+        author = getattr(embed, "author", None)
+        author_name = getattr(author, "name", None)
+        if author_name:
+            parts.append(str(author_name))
+
+        for field in getattr(embed, "fields", []) or []:
+            name = getattr(field, "name", "")
+            value = getattr(field, "value", "")
+            if name or value:
+                parts.append(f"{name}\n{value}")
+
+        footer = getattr(embed, "footer", None)
+        footer_text = getattr(footer, "text", None)
+        if footer_text:
+            parts.append(str(footer_text))
+
+    return "\n".join(parts)
+
+
+def parse_new_auction_lot(text: str) -> Optional[Dict[str, Any]]:
+    """Парсит новый формат лота с 'Лот №...' и 'Последняя ставка'."""
+    lot_match = NEW_AUCTION_LOT_RE.search(text)
+    if not lot_match:
+        return None
+
+    lot_no = int(lot_match.group(1))
+    lower = text.lower()
+
+    # Возвраты продавцу не считаем вообще.
+    if "предмет возвращен продавцу" in lower or "предмет возвращён продавцу" in lower:
+        return {"type": "returned", "lot": lot_no}
+
+    # Начальную цену новых лотов не считаем — только последнюю ставку.
+    bid_match = AUCTION_LAST_BID_RE.search(text)
+    if not bid_match:
+        return {"type": "no_bid", "lot": lot_no}
+
+    price = auction_money_to_int(bid_match.group(1))
+    if price is None:
+        return {"type": "bad_price", "lot": lot_no}
+
+    # Ищем строку "От:" после последней ставки.
+    tail = text[bid_match.end():bid_match.end() + 600]
+    bidder_line = ""
+
+    bidder_match = re.search(
+        r"(?:\*\*)?\s*От\s*:(?:\*\*)?\s*(.+)",
+        tail,
+        re.IGNORECASE,
+    )
+
+    if bidder_match:
+        bidder_line = bidder_match.group(1).strip()
+
+    bidder_area = f"{bidder_line}\n{tail[:300]}".lower().replace("*", "")
+    is_auctioneer = any(nick in bidder_area for nick in AUCTIONEER_USERNAMES)
+
+    return {
+        "type": "new",
+        "lot": lot_no,
+        "price": price,
+        "is_auctioneer": is_auctioneer,
+        "bidder": bidder_line or "не найдено поле От",
+        "closed": "торги завершены" in lower,
+    }
+
+
+def parse_ancient_auction_lot(text: str) -> Optional[Dict[str, Any]]:
+    """Парсит древний формат: 'Номер лота: ...' + только стартовая цена."""
+    ancient_match = ANCIENT_AUCTION_LOT_RE.search(text)
+    if not ancient_match:
+        return None
+
+    start_match = AUCTION_START_PRICE_RE.search(text)
+    if not start_match:
+        return {"type": "ancient_bad_price", "lot": int(ancient_match.group(1))}
+
+    price = auction_money_to_int(start_match.group(1))
+    if price is None:
+        return {"type": "ancient_bad_price", "lot": int(ancient_match.group(1))}
+
+    return {
+        "type": "ancient",
+        "lot": int(ancient_match.group(1)),
+        "price": price,
+    }
+
+
+def short_auction_bidder(text: str, max_len: int = 80) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= max_len else text[:max_len - 1] + "…"
+
+
+def format_auction_rows(rows: List[Dict[str, Any]], title: str, ancient: bool = False) -> str:
+    if not rows:
+        return f"\n**{title}:** нет\n"
+
+    lines = [f"\n**{title}:**"]
+
+    for row in sorted(rows, key=lambda x: x["lot"]):
+        if ancient:
+            lines.append(f"• Лот `{row['lot']}` — стартовая `{row['price']}` 🪙")
+        else:
+            status = "завершён" if row.get("closed") else "активен/не завершён"
+            bidder = short_auction_bidder(row.get("bidder", ""))
+            lines.append(
+                f"• Лот `{row['lot']}` — `{row['price']}` 🪙, {status}, от: {bidder}"
+            )
+
+    return "\n".join(lines) + "\n"
+
+
+@bot.slash_command(name="цены", description="Посчитать цены выкупа лотов в аукционном канале")
+async def slash_auction_prices(
+    interaction: disnake.CommandInteraction,
+    канал: Optional[disnake.abc.GuildChannel] = commands.Param(
+        default=None,
+        description="Канал или тред с лотами. Если не указать — текущий канал.",
+        channel_types=AUCTION_PRICE_CHANNEL_TYPES,
+    ),
+    лимит: int = commands.Param(
+        default=5000,
+        description="Сколько последних сообщений проверить. Максимум 10000.",
+    ),
+):
+    if interaction.author.id != OWNER_ID:
+        await interaction.response.send_message(
+            "❌ Эта команда доступна только овнеру бота.",
+            ephemeral=True,
+        )
+        return
+
+    target_channel = канал or interaction.channel
+
+    if not hasattr(target_channel, "history"):
+        await interaction.response.send_message(
+            "❌ В этом типе канала нельзя читать историю сообщений.",
+            ephemeral=True,
+        )
+        return
+
+    limit = max(1, min(int(лимит or 5000), 10000))
+
+    await interaction.response.defer(ephemeral=True)
+
+    people_rows: List[Dict[str, Any]] = []
+    auctioneer_rows: List[Dict[str, Any]] = []
+    ancient_rows: List[Dict[str, Any]] = []
+
+    seen_new_lots = set()
+    seen_ancient_lots = set()
+
+    scanned = 0
+    skipped_returned = 0
+    skipped_no_bid = 0
+    skipped_bad_price = 0
+    skipped_duplicates = 0
+
+    try:
+        async for message in target_channel.history(limit=limit, oldest_first=False):
+            scanned += 1
+
+            text = auction_message_to_text(message)
+            if not text:
+                continue
+
+            new_lot = parse_new_auction_lot(text)
+
+            if new_lot:
+                lot_no = new_lot["lot"]
+
+                # История идёт от новых сообщений к старым.
+                # Если лот встретился повторно — считаем только самый свежий вариант.
+                if lot_no in seen_new_lots:
+                    skipped_duplicates += 1
+                    continue
+
+                seen_new_lots.add(lot_no)
+
+                if new_lot["type"] == "returned":
+                    skipped_returned += 1
+                    continue
+
+                if new_lot["type"] == "no_bid":
+                    skipped_no_bid += 1
+                    continue
+
+                if new_lot["type"] == "bad_price":
+                    skipped_bad_price += 1
+                    continue
+
+                if new_lot["is_auctioneer"]:
+                    auctioneer_rows.append(new_lot)
+                else:
+                    people_rows.append(new_lot)
+
+                continue
+
+            ancient_lot = parse_ancient_auction_lot(text)
+
+            if ancient_lot:
+                lot_no = ancient_lot["lot"]
+
+                if lot_no in seen_ancient_lots:
+                    skipped_duplicates += 1
+                    continue
+
+                seen_ancient_lots.add(lot_no)
+
+                if ancient_lot["type"] == "ancient":
+                    ancient_rows.append(ancient_lot)
+                else:
+                    skipped_bad_price += 1
+
+        people_total = sum(row["price"] for row in people_rows)
+        auctioneer_total = sum(row["price"] for row in auctioneer_rows)
+        ancient_total = sum(row["price"] for row in ancient_rows)
+
+        header = (
+            f"💰 **Подсчёт цен аукциона**\n"
+            f"Канал: {target_channel.mention if hasattr(target_channel, 'mention') else target_channel}\n"
+            f"Проверено сообщений: `{scanned}` / лимит `{limit}`\n\n"
+            f"👥 **Люди:** `{people_total}` 🪙 | лотов: `{len(people_rows)}`\n"
+            f"🏛️ **Аукционист/бывший аукционист:** `{auctioneer_total}` 🪙 | лотов: `{len(auctioneer_rows)}`\n"
+            f"🏺 **Древние лоты, только стартовая цена:** `{ancient_total}` 🪙 | лотов: `{len(ancient_rows)}`\n\n"
+            f"↩️ Возвраты продавцу пропущены: `{skipped_returned}`\n"
+            f"➖ Без последней ставки пропущены: `{skipped_no_bid}`\n"
+            f"⚠️ С битой ценой пропущены: `{skipped_bad_price}`\n"
+            f"🔁 Дубликаты лотов пропущены: `{skipped_duplicates}`\n"
+        )
+
+        details = (
+            header
+            + format_auction_rows(people_rows, "Лоты, выкупленные людьми")
+            + format_auction_rows(auctioneer_rows, "Лоты, выкупленные аукционистом")
+            + format_auction_rows(ancient_rows, "Древние лоты", ancient=True)
+        )
+
+        if len(details) <= 1900:
+            await interaction.edit_original_response(content=details)
+        else:
+            await interaction.edit_original_response(
+                content=header + "\n📎 Подробный список лотов отправлен файлом."
+            )
+
+            file_obj = io.BytesIO(details.encode("utf-8"))
+            file_obj.name = f"auction_prices_{target_channel.id}.txt"
+
+            await interaction.followup.send(
+                file=disnake.File(file_obj),
+                ephemeral=True,
+            )
+
+    except Exception as e:
+        logger.error(f"Error in /цены: {e}", exc_info=True)
+        await interaction.followup.send(
+            f"❌ Ошибка при подсчёте цен: `{str(e)[:180]}`",
+            ephemeral=True,
+        )
 
 # ============================================================================
 # 💾 АДМИН КОМАНДЫ: СКАЧАТЬ ФАЙЛЫ
