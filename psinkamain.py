@@ -20,6 +20,8 @@ from groq import Groq
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, UniqueConstraint, func
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy.exc import SQLAlchemyError
+import zipfile
+from xml.sax.saxutils import escape as xml_escape
 
 # ============================================================================
 # 🛡️ БАЗА НАЁМНИКОВ, НАВЫКОВ И СПЕЦИАЛИЗАЦИЙ
@@ -2963,15 +2965,19 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
 # ============================================================================
 # 💰 КОМАНДА: ЦЕНЫ АУКЦИОНА
 # ============================================================================
+# ============================================================================
+# 💰 КОМАНДА: ЦЕНЫ АУКЦИОНА
+# ============================================================================
 
+AUCTIONEER_IDS = {839258901249523723, 754615336682127372}
 AUCTIONEER_USERNAMES = {"aukcionistfirewell", "lagyshka22"}
 
-NEW_AUCTION_LOT_RE = re.compile(r"Лот\s*№\s*(\d+)", re.IGNORECASE)
+NEW_AUCTION_LOT_RE = re.compile(r"(?:^|\s|\n)Лот\s*(?:№|#)\s*(\d+)", re.IGNORECASE)
 ANCIENT_AUCTION_LOT_RE = re.compile(r"Номер\s+лота\s*:\s*(\d+)", re.IGNORECASE)
 
 AUCTION_LAST_BID_RE = re.compile(
-    r"Последняя\s+ставка\s*:\s*[`*_\s]*([0-9][0-9 \u00A0]*)",
-    re.IGNORECASE,
+    r"Последняя\s+ставка[^\d]{0,120}([0-9][0-9 \u00A0]*)",
+    re.IGNORECASE | re.DOTALL,
 )
 
 AUCTION_START_PRICE_RE = re.compile(
@@ -2981,7 +2987,6 @@ AUCTION_START_PRICE_RE = re.compile(
 
 
 def get_auction_price_channel_types() -> List[Any]:
-    """Типы каналов, которые можно выбрать для /цены."""
     wanted = ["text", "news", "public_thread", "private_thread", "news_thread"]
     return [getattr(disnake.ChannelType, name) for name in wanted if hasattr(disnake.ChannelType, name)]
 
@@ -2990,20 +2995,60 @@ AUCTION_PRICE_CHANNEL_TYPES = get_auction_price_channel_types()
 
 
 def auction_money_to_int(raw: Optional[str]) -> Optional[int]:
-    """Достаёт число из строки цены: `1 200`, 1200 🪙 и т.п."""
     digits = re.sub(r"\D+", "", raw or "")
     return int(digits) if digits else None
 
 
+def clean_auction_text(text: str) -> str:
+    text = text or ""
+    text = text.replace("\u00A0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def flatten_embed_data(value: Any) -> List[str]:
+    """Достаёт все строки из embed.to_dict(), включая поля, footer, author и т.д."""
+    result = []
+
+    if value is None:
+        return result
+
+    if isinstance(value, str):
+        if value.strip():
+            result.append(value)
+        return result
+
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(item, str):
+                if item.strip():
+                    result.append(item)
+            else:
+                result.extend(flatten_embed_data(item))
+        return result
+
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            result.extend(flatten_embed_data(item))
+        return result
+
+    return result
+
+
 def auction_message_to_text(message: disnake.Message) -> str:
-    """Собирает текст обычного сообщения и всех embed-полей в один блок."""
+    """Собирает текст сообщения + embed максимально жёстко, чтобы не терять embed от других ботов."""
     parts = []
 
     if getattr(message, "content", None):
-        parts.append(message.content)
+        parts.append(str(message.content))
+
+    if getattr(message, "system_content", None):
+        parts.append(str(message.system_content))
 
     for embed in getattr(message, "embeds", []) or []:
-        for attr in ("title", "description"):
+        # Обычный путь
+        for attr in ("title", "description", "url"):
             value = getattr(embed, attr, None)
             if value:
                 parts.append(str(value))
@@ -3013,34 +3058,81 @@ def auction_message_to_text(message: disnake.Message) -> str:
         if author_name:
             parts.append(str(author_name))
 
-        for field in getattr(embed, "fields", []) or []:
-            name = getattr(field, "name", "")
-            value = getattr(field, "value", "")
-            if name or value:
-                parts.append(f"{name}\n{value}")
-
         footer = getattr(embed, "footer", None)
         footer_text = getattr(footer, "text", None)
         if footer_text:
             parts.append(str(footer_text))
 
-    return "\n".join(parts)
+        for field in getattr(embed, "fields", []) or []:
+            name = getattr(field, "name", "")
+            value = getattr(field, "value", "")
+            parts.append(f"{name}\n{value}")
+
+        # Запасной путь: вытаскиваем вообще все строки из сырого embed
+        try:
+            parts.extend(flatten_embed_data(embed.to_dict()))
+        except Exception:
+            pass
+
+    return clean_auction_text("\n".join(parts))
+
+
+def extract_between_labels(text: str, start_label: str, stop_labels: List[str]) -> str:
+    stop_part = "|".join(re.escape(label) for label in stop_labels)
+
+    pattern = re.compile(
+        rf"{re.escape(start_label)}\s*:?\s*(.*?)(?=\n\s*(?:{stop_part})\s*:|\n\s*=+|\Z)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    match = pattern.search(text)
+    if not match:
+        return ""
+
+    return clean_auction_text(match.group(1))
+
+
+def extract_new_item_text(text: str) -> str:
+    patterns = [
+        r"(?:^|\n)\s*#+\s*Предмет\s*\n\s*>?\s*(.*?)(?=\n\s*(?:💰|⏳|#+\s*Последняя|Последняя\s+ставка|\*\*Торги|Торги\s+завершены|-#\s*Опубликовано)|\Z)",
+        r"(?:^|\n)\s*Предмет\s*\n\s*>?\s*(.*?)(?=\n\s*(?:💰|⏳|#+\s*Последняя|Последняя\s+ставка|\*\*Торги|Торги\s+завершены|-#\s*Опубликовано)|\Z)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if match:
+            return clean_auction_text(match.group(1).lstrip("> ").strip())
+
+    return ""
+
+
+def extract_ancient_name(text: str) -> str:
+    return extract_between_labels(
+        text,
+        "Наименование",
+        ["Описание", "Начальная стоимость", "Конец торгов", "Скриншот-подтверждение владения", "Скриншот"]
+    )
+
+
+def extract_ancient_description(text: str) -> str:
+    return extract_between_labels(
+        text,
+        "Описание",
+        ["Начальная стоимость", "Конец торгов", "Скриншот-подтверждение владения", "Скриншот"]
+    )
 
 
 def parse_new_auction_lot(text: str) -> Optional[Dict[str, Any]]:
-    """Парсит новый формат лота с 'Лот №...' и 'Последняя ставка'."""
     lot_match = NEW_AUCTION_LOT_RE.search(text)
     if not lot_match:
         return None
 
     lot_no = int(lot_match.group(1))
-    lower = text.lower()
+    lower = text.lower().replace("ё", "е")
 
-    # Возвраты продавцу не считаем вообще.
-    if "предмет возвращен продавцу" in lower or "предмет возвращён продавцу" in lower:
+    if "предмет возвращен продавцу" in lower:
         return {"type": "returned", "lot": lot_no}
 
-    # Начальную цену новых лотов не считаем — только последнюю ставку.
     bid_match = AUCTION_LAST_BID_RE.search(text)
     if not bid_match:
         return {"type": "no_bid", "lot": lot_no}
@@ -3049,25 +3141,34 @@ def parse_new_auction_lot(text: str) -> Optional[Dict[str, Any]]:
     if price is None:
         return {"type": "bad_price", "lot": lot_no}
 
-    # Ищем строку "От:" после последней ставки.
-    tail = text[bid_match.end():bid_match.end() + 600]
-    bidder_line = ""
+    after_bid = text[bid_match.end():bid_match.end() + 1500]
 
+    bidder_line = ""
     bidder_match = re.search(
-        r"(?:\*\*)?\s*От\s*:(?:\*\*)?\s*(.+)",
-        tail,
-        re.IGNORECASE,
+        r"(?:^|\n)\s*(?:\*\*)?\s*От\s*:(?:\*\*)?\s*(.*?)(?=\n|$)",
+        after_bid,
+        re.IGNORECASE | re.DOTALL,
     )
 
     if bidder_match:
-        bidder_line = bidder_match.group(1).strip()
+        bidder_line = clean_auction_text(bidder_match.group(1))
 
-    bidder_area = f"{bidder_line}\n{tail[:300]}".lower().replace("*", "")
-    is_auctioneer = any(nick in bidder_area for nick in AUCTIONEER_USERNAMES)
+    bidder_area = f"{bidder_line}\n{after_bid[:700]}".lower().replace("*", "")
+
+    is_auctioneer = False
+
+    for auctioneer_id in AUCTIONEER_IDS:
+        if f"<@{auctioneer_id}>" in bidder_area or f"<@!{auctioneer_id}>" in bidder_area:
+            is_auctioneer = True
+            break
+
+    if not is_auctioneer:
+        is_auctioneer = any(nick.lower() in bidder_area for nick in AUCTIONEER_USERNAMES)
 
     return {
         "type": "new",
         "lot": lot_no,
+        "item": extract_new_item_text(text),
         "price": price,
         "is_auctioneer": is_auctioneer,
         "bidder": bidder_line or "не найдено поле От",
@@ -3076,48 +3177,242 @@ def parse_new_auction_lot(text: str) -> Optional[Dict[str, Any]]:
 
 
 def parse_ancient_auction_lot(text: str) -> Optional[Dict[str, Any]]:
-    """Парсит древний формат: 'Номер лота: ...' + только стартовая цена."""
     ancient_match = ANCIENT_AUCTION_LOT_RE.search(text)
     if not ancient_match:
         return None
 
+    lot_no = int(ancient_match.group(1))
+
     start_match = AUCTION_START_PRICE_RE.search(text)
     if not start_match:
-        return {"type": "ancient_bad_price", "lot": int(ancient_match.group(1))}
+        return {
+            "type": "ancient_bad_price",
+            "lot": lot_no,
+            "name": extract_ancient_name(text),
+            "description": extract_ancient_description(text),
+        }
 
     price = auction_money_to_int(start_match.group(1))
     if price is None:
-        return {"type": "ancient_bad_price", "lot": int(ancient_match.group(1))}
+        return {
+            "type": "ancient_bad_price",
+            "lot": lot_no,
+            "name": extract_ancient_name(text),
+            "description": extract_ancient_description(text),
+        }
 
     return {
         "type": "ancient",
-        "lot": int(ancient_match.group(1)),
+        "lot": lot_no,
+        "name": extract_ancient_name(text),
+        "description": extract_ancient_description(text),
         "price": price,
     }
 
 
-def short_auction_bidder(text: str, max_len: int = 80) -> str:
-    text = " ".join((text or "").split())
-    return text if len(text) <= max_len else text[:max_len - 1] + "…"
+def xlsx_col_name(index: int) -> str:
+    result = ""
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
 
 
-def format_auction_rows(rows: List[Dict[str, Any]], title: str, ancient: bool = False) -> str:
-    if not rows:
-        return f"\n**{title}:** нет\n"
+def clean_xlsx_value(value: Any) -> Any:
+    if value is None:
+        return ""
 
-    lines = [f"\n**{title}:**"]
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
 
-    for row in sorted(rows, key=lambda x: x["lot"]):
-        if ancient:
-            lines.append(f"• Лот `{row['lot']}` — стартовая `{row['price']}` 🪙")
-        else:
-            status = "завершён" if row.get("closed") else "активен/не завершён"
-            bidder = short_auction_bidder(row.get("bidder", ""))
-            lines.append(
-                f"• Лот `{row['lot']}` — `{row['price']}` 🪙, {status}, от: {bidder}"
-            )
+    text = str(value)
+    text = re.sub(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]", "", text)
+    return text
 
-    return "\n".join(lines) + "\n"
+
+def xlsx_cell(value: Any, row_idx: int, col_idx: int) -> str:
+    value = clean_xlsx_value(value)
+    cell_ref = f"{xlsx_col_name(col_idx)}{row_idx}"
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f'<c r="{cell_ref}"><v>{value}</v></c>'
+
+    text = xml_escape(str(value))
+    return f'<c r="{cell_ref}" t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>'
+
+
+def make_sheet_xml(rows: List[List[Any]]) -> str:
+    sheet_rows = []
+
+    for row_idx, row in enumerate(rows, start=1):
+        cells = []
+        for col_idx, value in enumerate(row, start=1):
+            cells.append(xlsx_cell(value, row_idx, col_idx))
+        sheet_rows.append(f'<row r="{row_idx}">{"".join(cells)}</row>')
+
+    return f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheetViews><sheetView workbookViewId="0"/></sheetViews>
+<sheetData>{"".join(sheet_rows)}</sheetData>
+</worksheet>'''
+
+
+def make_xlsx_file(sheets: List[Tuple[str, List[List[Any]]]], filename: str) -> io.BytesIO:
+    file_obj = io.BytesIO()
+
+    with zipfile.ZipFile(file_obj, "w", zipfile.ZIP_DEFLATED) as z:
+        sheet_overrides = "\n".join(
+            f'<Override PartName="/xl/worksheets/sheet{i}.xml" '
+            f'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            for i in range(1, len(sheets) + 1)
+        )
+
+        z.writestr("[Content_Types].xml", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+{sheet_overrides}
+<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>''')
+
+        z.writestr("_rels/.rels", '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>''')
+
+        workbook_sheets = "\n".join(
+            f'<sheet name="{xml_escape(name[:31])}" sheetId="{i}" r:id="rId{i}"/>'
+            for i, (name, _) in enumerate(sheets, start=1)
+        )
+
+        z.writestr("xl/workbook.xml", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<sheets>{workbook_sheets}</sheets>
+</workbook>''')
+
+        workbook_rels = "\n".join(
+            f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>'
+            for i in range(1, len(sheets) + 1)
+        )
+
+        z.writestr("xl/_rels/workbook.xml.rels", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+{workbook_rels}
+</Relationships>''')
+
+        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+        z.writestr("docProps/core.xml", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+xmlns:dc="http://purl.org/dc/elements/1.1/"
+xmlns:dcterms="http://purl.org/dc/terms/"
+xmlns:dcmitype="http://purl.org/dc/dcmitype/"
+xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<dc:creator>PsIInka Bot</dc:creator>
+<cp:lastModifiedBy>PsIInka Bot</cp:lastModifiedBy>
+<dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created>
+<dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified>
+</cp:coreProperties>''')
+
+        z.writestr("docProps/app.xml", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
+xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+<Application>PsIInka Bot</Application>
+</Properties>''')
+
+        for i, (_, rows) in enumerate(sheets, start=1):
+            z.writestr(f"xl/worksheets/sheet{i}.xml", make_sheet_xml(rows))
+
+    file_obj.seek(0)
+    file_obj.name = filename
+    return file_obj
+
+
+def build_auction_prices_xlsx(
+    people_rows: List[Dict[str, Any]],
+    auctioneer_rows: List[Dict[str, Any]],
+    ancient_rows: List[Dict[str, Any]],
+    target_channel,
+    scanned: int,
+    limit: int,
+    skipped_returned: int,
+    skipped_no_bid: int,
+    skipped_bad_price: int,
+    skipped_duplicates: int,
+) -> io.BytesIO:
+    people_total = sum(row["price"] for row in people_rows)
+    auctioneer_total = sum(row["price"] for row in auctioneer_rows)
+    ancient_total = sum(row["price"] for row in ancient_rows)
+
+    summary_rows = [
+        ["Подсчёт цен аукциона"],
+        ["Канал", getattr(target_channel, "name", str(target_channel))],
+        ["Проверено сообщений", scanned],
+        ["Лимит проверки", limit],
+        [],
+        ["Категория", "Сумма", "Количество лотов"],
+        ["Люди", people_total, len(people_rows)],
+        ["Аукционист и бывший аукционист", auctioneer_total, len(auctioneer_rows)],
+        ["Древние лоты", ancient_total, len(ancient_rows)],
+        [],
+        ["Пропущено"],
+        ["Возвраты продавцу", skipped_returned],
+        ["Без последней ставки", skipped_no_bid],
+        ["С битой ценой", skipped_bad_price],
+        ["Дубликаты лотов", skipped_duplicates],
+    ]
+
+    new_headers = ["№ лота", "Предмет", "Итоговая цена", "Статус", "Ставка от", "Ссылка на сообщение"]
+
+    people_sheet = [new_headers]
+    for row in sorted(people_rows, key=lambda x: x["lot"]):
+        people_sheet.append([
+            row["lot"],
+            row.get("item", ""),
+            row["price"],
+            "Завершён" if row.get("closed") else "Активен/не завершён",
+            row.get("bidder", ""),
+            row.get("message_url", ""),
+        ])
+
+    auctioneer_sheet = [new_headers]
+    for row in sorted(auctioneer_rows, key=lambda x: x["lot"]):
+        auctioneer_sheet.append([
+            row["lot"],
+            row.get("item", ""),
+            row["price"],
+            "Завершён" if row.get("closed") else "Активен/не завершён",
+            row.get("bidder", ""),
+            row.get("message_url", ""),
+        ])
+
+    ancient_sheet = [["№ лота", "Наименование", "Описание", "Стартовая цена", "Ссылка на сообщение"]]
+    for row in sorted(ancient_rows, key=lambda x: x["lot"]):
+        ancient_sheet.append([
+            row["lot"],
+            row.get("name", ""),
+            row.get("description", ""),
+            row["price"],
+            row.get("message_url", ""),
+        ])
+
+    filename = f"auction_prices_{getattr(target_channel, 'id', 'channel')}.xlsx"
+
+    return make_xlsx_file(
+        [
+            ("Итоги", summary_rows),
+            ("Люди", people_sheet),
+            ("Аукционисты", auctioneer_sheet),
+            ("Древние", ancient_sheet),
+        ],
+        filename=filename,
+    )
 
 
 @bot.slash_command(name="цены", description="Посчитать цены выкупа лотов в аукционном канале")
@@ -3129,8 +3424,8 @@ async def slash_auction_prices(
         channel_types=AUCTION_PRICE_CHANNEL_TYPES,
     ),
     лимит: int = commands.Param(
-        default=5000,
-        description="Сколько последних сообщений проверить. Максимум 10000.",
+        default=10000,
+        description="Сколько последних сообщений проверить. Максимум 20000.",
     ),
 ):
     if interaction.author.id != OWNER_ID:
@@ -3149,9 +3444,10 @@ async def slash_auction_prices(
         )
         return
 
-    limit = max(1, min(int(лимит or 5000), 10000))
+    limit = max(1, min(int(лимит or 10000), 20000))
 
-    await interaction.response.defer(ephemeral=True)
+    # ВАЖНО: без ephemeral=True, чтобы итог ушёл публично в чат вызова команды
+    await interaction.response.defer()
 
     people_rows: List[Dict[str, Any]] = []
     auctioneer_rows: List[Dict[str, Any]] = []
@@ -3165,10 +3461,14 @@ async def slash_auction_prices(
     skipped_no_bid = 0
     skipped_bad_price = 0
     skipped_duplicates = 0
+    embed_messages_seen = 0
 
     try:
         async for message in target_channel.history(limit=limit, oldest_first=False):
             scanned += 1
+
+            if getattr(message, "embeds", None):
+                embed_messages_seen += len(message.embeds)
 
             text = auction_message_to_text(message)
             if not text:
@@ -3179,8 +3479,6 @@ async def slash_auction_prices(
             if new_lot:
                 lot_no = new_lot["lot"]
 
-                # История идёт от новых сообщений к старым.
-                # Если лот встретился повторно — считаем только самый свежий вариант.
                 if lot_no in seen_new_lots:
                     skipped_duplicates += 1
                     continue
@@ -3198,6 +3496,8 @@ async def slash_auction_prices(
                 if new_lot["type"] == "bad_price":
                     skipped_bad_price += 1
                     continue
+
+                new_lot["message_url"] = getattr(message, "jump_url", "")
 
                 if new_lot["is_auctioneer"]:
                     auctioneer_rows.append(new_lot)
@@ -3218,6 +3518,7 @@ async def slash_auction_prices(
                 seen_ancient_lots.add(lot_no)
 
                 if ancient_lot["type"] == "ancient":
+                    ancient_lot["message_url"] = getattr(message, "jump_url", "")
                     ancient_rows.append(ancient_lot)
                 else:
                     skipped_bad_price += 1
@@ -3226,40 +3527,38 @@ async def slash_auction_prices(
         auctioneer_total = sum(row["price"] for row in auctioneer_rows)
         ancient_total = sum(row["price"] for row in ancient_rows)
 
-        header = (
-            f"💰 **Подсчёт цен аукциона**\n"
-            f"Канал: {target_channel.mention if hasattr(target_channel, 'mention') else target_channel}\n"
-            f"Проверено сообщений: `{scanned}` / лимит `{limit}`\n\n"
-            f"👥 **Люди:** `{people_total}` 🪙 | лотов: `{len(people_rows)}`\n"
-            f"🏛️ **Аукционист/бывший аукционист:** `{auctioneer_total}` 🪙 | лотов: `{len(auctioneer_rows)}`\n"
-            f"🏺 **Древние лоты, только стартовая цена:** `{ancient_total}` 🪙 | лотов: `{len(ancient_rows)}`\n\n"
+        xlsx_file = build_auction_prices_xlsx(
+            people_rows=people_rows,
+            auctioneer_rows=auctioneer_rows,
+            ancient_rows=ancient_rows,
+            target_channel=target_channel,
+            scanned=scanned,
+            limit=limit,
+            skipped_returned=skipped_returned,
+            skipped_no_bid=skipped_no_bid,
+            skipped_bad_price=skipped_bad_price,
+            skipped_duplicates=skipped_duplicates,
+        )
+
+        summary = (
+            f"💰 **Подсчёт цен аукциона готов**\n"
+            f"Канал проверки: {target_channel.mention if hasattr(target_channel, 'mention') else target_channel}\n"
+            f"Проверено сообщений: `{scanned}` / лимит `{limit}`\n"
+            f"Найдено embed-объектов: `{embed_messages_seen}`\n\n"
+            f"👥 Люди: `{people_total}` 🪙 | лотов: `{len(people_rows)}`\n"
+            f"🏛️ Аукционисты: `{auctioneer_total}` 🪙 | лотов: `{len(auctioneer_rows)}`\n"
+            f"🏺 Древние лоты: `{ancient_total}` 🪙 | лотов: `{len(ancient_rows)}`\n\n"
             f"↩️ Возвраты продавцу пропущены: `{skipped_returned}`\n"
             f"➖ Без последней ставки пропущены: `{skipped_no_bid}`\n"
             f"⚠️ С битой ценой пропущены: `{skipped_bad_price}`\n"
-            f"🔁 Дубликаты лотов пропущены: `{skipped_duplicates}`\n"
+            f"🔁 Дубликаты лотов пропущены: `{skipped_duplicates}`\n\n"
+            f"📎 Excel-таблица прикреплена ниже."
         )
 
-        details = (
-            header
-            + format_auction_rows(people_rows, "Лоты, выкупленные людьми")
-            + format_auction_rows(auctioneer_rows, "Лоты, выкупленные аукционистом")
-            + format_auction_rows(ancient_rows, "Древние лоты", ancient=True)
+        await interaction.followup.send(
+            content=summary,
+            file=disnake.File(xlsx_file, filename=xlsx_file.name),
         )
-
-        if len(details) <= 1900:
-            await interaction.edit_original_response(content=details)
-        else:
-            await interaction.edit_original_response(
-                content=header + "\n📎 Подробный список лотов отправлен файлом."
-            )
-
-            file_obj = io.BytesIO(details.encode("utf-8"))
-            file_obj.name = f"auction_prices_{target_channel.id}.txt"
-
-            await interaction.followup.send(
-                file=disnake.File(file_obj),
-                ephemeral=True,
-            )
 
     except Exception as e:
         logger.error(f"Error in /цены: {e}", exc_info=True)
@@ -3267,6 +3566,7 @@ async def slash_auction_prices(
             f"❌ Ошибка при подсчёте цен: `{str(e)[:180]}`",
             ephemeral=True,
         )
+
 
 # ============================================================================
 # 💾 АДМИН КОМАНДЫ: СКАЧАТЬ ФАЙЛЫ
