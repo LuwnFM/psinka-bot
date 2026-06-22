@@ -4445,6 +4445,105 @@ async def real_estate_message_listener(message):
         f'как {location_text}, итоговое качество — **{quality}**.',
         mention_author=False
     )
+
+# ============================================================================
+# 🎲 КОМАНДА: Качестворолл
+# ============================================================================
+
+QUALITY_ROLL_ALLOWED_ROLES = ["Секретариат", "Фаеркадастр", "Анкетолог"]
+
+QUALITY_ROLL_TRIGGER = "качестворолл"
+
+QUALITY_ROLL_REFERENCE_TEXT = (
+    "Если предмет из любого пака, кроме Легпака, материал по стандарту Железо. "
+    "Начиная с качества Отличное, есть возможность выбрать другой материал по прочности "
+    "на 1 пункт выше Железа или любой другой сходной прочности или ниже по прочности, "
+    "кроме совсем дорогих, не подходящих предмету. Если предмет из Легпака, то по стандарту "
+    "всё оттуда Сталь, и правило работает так же, но с опорой на Сталь и большую ценность "
+    "предмета как выпавшего из Легпака."
+)
+
+QUALITY_ROLL_QUALITIES = [
+    "Ужасное",          # 2%
+    "Плохое",           # 5%
+    "Ниже среднего",    # 10%
+    "Приемлемое",       # 14%
+    "Нормальное",       # 34%
+    "Хорошее",          # 20%
+    "Очень хорошее",    # 10%
+    "Отличное",         # 4%
+    "Шедевр",           # 1%
+]
+
+QUALITY_ROLL_WEIGHTS = [
+    2,
+    5,
+    10,
+    14,
+    34,
+    20,
+    10,
+    4,
+    1,
+]
+
+
+def has_quality_roll_access(member):
+    member_roles = getattr(member, "roles", [])
+    member_role_names = {role.name.strip().lower() for role in member_roles}
+    allowed_role_names = {role_name.strip().lower() for role_name in QUALITY_ROLL_ALLOWED_ROLES}
+
+    return bool(member_role_names & allowed_role_names)
+
+
+def roll_item_quality():
+    return random.choices(
+        QUALITY_ROLL_QUALITIES,
+        weights=QUALITY_ROLL_WEIGHTS,
+        k=1
+    )[0]
+
+
+@bot.listen("on_message")
+async def quality_roll_message_listener(message):
+    if message.author.bot:
+        return
+
+    content = (message.content or "").strip()
+    if not content:
+        return
+
+    parts = content.split(maxsplit=1)
+    command_word = parts[0].casefold()
+
+    if command_word != QUALITY_ROLL_TRIGGER.casefold():
+        return
+
+    if not has_quality_roll_access(message.author):
+        await message.reply(
+            "Гав... простите, но я не могу ничего поделать — эта команда слушается только "
+            "**Секретариат**, **Фаеркадастр** или **Анкетолог**.",
+            mention_author=False
+        )
+        return
+
+    if len(parts) < 2 or not parts[1].strip():
+        await message.reply(
+            '❌ Укажи предмет после команды. Пример: `Качестворолл меч из пака`',
+            mention_author=False
+        )
+        return
+
+    item_text = clean_real_estate_text(parts[1])
+    quality = roll_item_quality()
+
+    await message.reply(
+        f'Предмет "{item_text}" определился по запросу секретаря {message.author.mention}, '
+        f'итоговое качество — **{quality}**.\n\n'
+        f'**Справка:**\n{QUALITY_ROLL_REFERENCE_TEXT}',
+        mention_author=False
+    )
+
 # ============================================================================
 # 🛡️ КОМАНДА: НАЁМНИК (ОБНОВЛЁННАЯ СО СПЕЦИАЛИЗАЦИЯМИ)
 # ============================================================================
