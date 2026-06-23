@@ -770,7 +770,6 @@ OPENROUTER_PRIORITY = "nvidia/nemotron-3-super-120b-a12b:free"
 GROQ_PRIORITY_MODELS = [
     "llama-3.3-70b-versatile",
     "meta-llama/llama-4-scout-17b-16e-instruct",
-    "llama-3.1-8b-instant",
     "moonshotai/kimi-k2-instruct-0905",
 ]
 
