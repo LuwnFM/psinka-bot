@@ -764,7 +764,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 PRIORITY_TIER_1 = [("Default", "deepseek-r1"), ("Default", "deepseek-v3")]
 PRIORITY_TIER_2 = [("PollinationsAI", "deepseek-r1"), ("Vercel", "deepseek-r1")]
-EXCLUDED_OR_MODELS = ["liquid/lfm-2.5-1.2b-instruct:free", "groq/llama-3.1-8b-instant"]
+EXCLUDED_OR_MODELS = ["liquid/lfm-2.5-1.2b-instruct:free", "llama-3.1-8b-instant"]
 OPENROUTER_PRIORITY = "nvidia/nemotron-3-super-120b-a12b:free"
 
 GROQ_PRIORITY_MODELS = [
