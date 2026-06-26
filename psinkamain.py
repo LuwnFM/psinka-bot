@@ -4237,6 +4237,271 @@ async def slash_owner_write(
             await interaction.response.send_message(error_text, ephemeral=True)    
 
 # ============================================================================
+# 📝 КОМАНДА И РЕАКЦИЯ ДЛЯ ВЛАДЕЛЬЦА: РЕДАКТИРОВАТЬ СООБЩЕНИЕ БОТА
+# /редактируй сообщение:<ссылка> текст:<новый текст>
+# Реакция 📝 на сообщение бота -> бот спрашивает новый текст в ЛС
+# ============================================================================
+
+PENCIL_EMOJI = "📝"
+
+
+def parse_discord_message_link(raw: str) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+    """
+    Достаёт guild_id, channel_id, message_id из:
+    - ссылки Discord: https://discord.com/channels/GUILD_ID/CHANNEL_ID/MESSAGE_ID
+    - ссылки Discord canary/ptb
+    - пары ID через пробел: CHANNEL_ID MESSAGE_ID
+    """
+    if not raw:
+        return None, None, None
+
+    raw = raw.strip()
+
+    link_match = re.search(
+        r"discord(?:app)?\.com/channels/(\d{15,25})/(\d{15,25})/(\d{15,25})",
+        raw
+    )
+    if link_match:
+        return int(link_match.group(1)), int(link_match.group(2)), int(link_match.group(3))
+
+    ids = re.findall(r"\d{15,25}", raw)
+    if len(ids) >= 3:
+        return int(ids[-3]), int(ids[-2]), int(ids[-1])
+    if len(ids) == 2:
+        return None, int(ids[0]), int(ids[1])
+
+    return None, None, None
+
+
+async def fetch_bot_message_from_link(message_link: str) -> Optional[disnake.Message]:
+    """Находит сообщение по ссылке/ID и проверяет, что оно принадлежит этому боту."""
+    guild_id, channel_id, message_id = parse_discord_message_link(message_link)
+
+    if not channel_id or not message_id:
+        return None
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except Exception as e:
+            logger.error(f"Не удалось получить канал {channel_id}: {e}", exc_info=True)
+            return None
+
+    if not hasattr(channel, "fetch_message"):
+        return None
+
+    try:
+        message = await channel.fetch_message(message_id)
+    except Exception as e:
+        logger.error(f"Не удалось получить сообщение {message_id}: {e}", exc_info=True)
+        return None
+
+    if not bot.user or message.author.id != bot.user.id:
+        return None
+
+    return message
+
+
+def prepare_edited_bot_text(text: str, guild: Optional[disnake.Guild]) -> str:
+    """
+    Готовит текст для отправки/редактирования:
+    - заменяет @НазваниеРоли на настоящий пинг роли, если сообщение в серверном канале;
+    - не трогает @everyone/@here, они запрещены через AllowedMentions.
+    """
+    text = text or ""
+
+    if guild:
+        try:
+            text = replace_role_name_mentions_for_guild(text, guild)
+        except NameError:
+            # Если ты вдруг не вставил функцию из блока /напиши — просто отправит текст как есть.
+            pass
+
+    return text
+
+
+def get_owner_allowed_mentions() -> disnake.AllowedMentions:
+    """
+    Разрешаем роли и пользователей, но не @everyone/@here.
+    """
+    try:
+        return build_allowed_mentions_for_owner_message()
+    except NameError:
+        return disnake.AllowedMentions(
+            everyone=False,
+            users=True,
+            roles=True,
+            replied_user=False
+        )
+
+
+async def edit_bot_message_content(
+    target_message: disnake.Message,
+    new_text: str
+) -> Tuple[bool, str]:
+    """Редактирует сообщение бота."""
+    if not bot.user or target_message.author.id != bot.user.id:
+        return False, "Это сообщение написал не бот."
+
+    if not new_text or not new_text.strip():
+        return False, "Новый текст пустой."
+
+    final_text = prepare_edited_bot_text(new_text, target_message.guild)
+
+    if len(final_text) > 2000:
+        return False, f"Текст слишком длинный: `{len(final_text)}` символов. Для редактирования одного сообщения максимум `2000`."
+
+    try:
+        await target_message.edit(
+            content=final_text,
+            allowed_mentions=get_owner_allowed_mentions()
+        )
+        return True, "Сообщение отредактировано."
+    except disnake.Forbidden:
+        return False, "У меня нет прав редактировать это сообщение."
+    except Exception as e:
+        logger.error(f"Ошибка редактирования сообщения: {e}", exc_info=True)
+        return False, str(e)[:300]
+
+
+@bot.slash_command(
+    name="редактируй",
+    description="Редактировать сообщение бота по ссылке. Только для владельца.",
+    dm_permission=True
+)
+async def slash_owner_edit_bot_message(
+    interaction: disnake.CommandInteraction,
+    сообщение: str = commands.Param(
+        min_length=1,
+        description="Ссылка на сообщение бота"
+    ),
+    текст: str = commands.Param(
+        min_length=1,
+        description="Новый текст сообщения"
+    )
+):
+    try:
+        if interaction.author.id != OWNER_ID:
+            await interaction.response.send_message(
+                "❌ Гав! Эта команда доступна только владельцу бота.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        target_message = await fetch_bot_message_from_link(сообщение)
+        if not target_message:
+            await interaction.edit_original_response(
+                "❌ Не нашёл сообщение или это сообщение написал не бот. Пришли ссылку именно на сообщение бота."
+            )
+            return
+
+        ok, info = await edit_bot_message_content(target_message, текст)
+
+        if ok:
+            jump_url = getattr(target_message, "jump_url", None)
+            if jump_url:
+                await interaction.edit_original_response(
+                    f"✅ {info}\n{jump_url}"
+                )
+            else:
+                await interaction.edit_original_response(f"✅ {info}")
+        else:
+            await interaction.edit_original_response(f"❌ {info}")
+
+    except Exception as e:
+        logger.error(f"Ошибка в /редактируй: {e}", exc_info=True)
+        error_text = f"❌ Гав! Ошибка при редактировании:\n`{str(e)[:300]}`"
+
+        if interaction.response.is_done():
+            await interaction.edit_original_response(error_text)
+        else:
+            await interaction.response.send_message(error_text, ephemeral=True)
+
+
+@bot.event
+async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
+    """
+    Если владелец ставит 📝 на сообщение бота, бот спрашивает новый текст в ЛС
+    и редактирует это сообщение.
+    """
+    try:
+        # Игнор самого бота и всех, кроме владельца.
+        if payload.user_id != OWNER_ID:
+            return
+
+        if str(payload.emoji) != PENCIL_EMOJI:
+            return
+
+        channel = bot.get_channel(payload.channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(payload.channel_id)
+            except Exception as e:
+                logger.error(f"Не удалось получить канал реакции {payload.channel_id}: {e}", exc_info=True)
+                return
+
+        if not hasattr(channel, "fetch_message"):
+            return
+
+        try:
+            target_message = await channel.fetch_message(payload.message_id)
+        except Exception as e:
+            logger.error(f"Не удалось получить сообщение реакции {payload.message_id}: {e}", exc_info=True)
+            return
+
+        # Редактировать можно только сообщения самого бота.
+        if not bot.user or target_message.author.id != bot.user.id:
+            return
+
+        owner = bot.get_user(OWNER_ID)
+        if owner is None:
+            try:
+                owner = await bot.fetch_user(OWNER_ID)
+            except Exception as e:
+                logger.error(f"Не удалось получить владельца {OWNER_ID}: {e}", exc_info=True)
+                return
+
+        jump_url = getattr(target_message, "jump_url", "ссылка недоступна")
+
+        await owner.send(
+            "📝 Ты поставила реакцию на сообщение бота.\n"
+            f"Сообщение: {jump_url}\n\n"
+            "Пришли мне **новый текст одним сообщением** в течение 5 минут.\n"
+            "Чтобы отменить, напиши `отмена`."
+        )
+
+        def check(dm_message: disnake.Message) -> bool:
+            return (
+                dm_message.author.id == OWNER_ID
+                and isinstance(dm_message.channel, disnake.DMChannel)
+            )
+
+        try:
+            reply = await bot.wait_for("message", check=check, timeout=300)
+        except asyncio.TimeoutError:
+            await owner.send("⌛ Время вышло, редактирование отменено.")
+            return
+
+        new_text = reply.content or ""
+
+        if new_text.strip().lower() in {"отмена", "cancel", "стоп"}:
+            await owner.send("❌ Редактирование отменено.")
+            return
+
+        ok, info = await edit_bot_message_content(target_message, new_text)
+
+        if ok:
+            await owner.send(f"✅ {info}\n{jump_url}")
+        else:
+            await owner.send(f"❌ Не получилось отредактировать: {info}")
+
+    except Exception as e:
+        logger.error(f"Ошибка в on_raw_reaction_add для редактирования: {e}", exc_info=True)
+
+# ============================================================================
 # 🏠 КОМАНДА: !недвижка
 # ============================================================================
 
