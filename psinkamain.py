@@ -4382,19 +4382,22 @@ async def slash_owner_edit_bot_message(
     )
 ):
     try:
+        # Только владелец бота.
         if interaction.author.id != OWNER_ID:
             await interaction.response.send_message(
                 "❌ Гав! Эта команда доступна только владельцу бота.",
-                ephemeral=True
+                ephemeral=(interaction.guild is not None)
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
+        # В ЛС ephemeral не нужен, на сервере — скрываем ответ.
+        await interaction.response.defer(ephemeral=(interaction.guild is not None))
 
         target_message = await fetch_bot_message_from_link(сообщение)
         if not target_message:
             await interaction.edit_original_response(
-                "❌ Не нашёл сообщение или это сообщение написал не бот. Пришли ссылку именно на сообщение бота."
+                "❌ Не нашёл сообщение или это сообщение написал не бот. "
+                "Пришли ссылку именно на сообщение бота."
             )
             return
 
@@ -4418,7 +4421,10 @@ async def slash_owner_edit_bot_message(
         if interaction.response.is_done():
             await interaction.edit_original_response(error_text)
         else:
-            await interaction.response.send_message(error_text, ephemeral=True)
+            await interaction.response.send_message(
+                error_text,
+                ephemeral=(interaction.guild is not None)
+            )
 
 
 @bot.event
