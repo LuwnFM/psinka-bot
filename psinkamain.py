@@ -3859,6 +3859,383 @@ async def slash_commit_tests(interaction: disnake.CommandInteraction):
     except Exception as e:
         logger.error(f"Error committing tests: {e}", exc_info=True)
         await interaction.followup.send(f"❌ Ошибка записи, временный лог НЕ очищен: {str(e)[:100]}", ephemeral=True)
+
+# ============================================================================
+# ✉️ КОМАНДА ДЛЯ ВЛАДЕЛЬЦА: НАПИСАТЬ В КАНАЛ ОТ ЛИЦА БОТА
+# /напиши канал:<канал> текст:<текст> закрепить:<Да/Нет>
+# ============================================================================
+
+def normalize_channel_lookup_text(text: str) -> str:
+    """Нормализация для поиска каналов по названию/серверу."""
+    text = (text or "").strip().lower().replace("ё", "е")
+    text = re.sub(r"[_\-–—#/\\|]+", " ", text)
+    return " ".join(text.split())
+
+
+def parse_discord_channel_id(raw: str) -> Optional[int]:
+    """
+    Достаёт ID канала из:
+    - значения autocomplete: 123456789012345678
+    - ссылки Discord: https://discord.com/channels/GUILD_ID/CHANNEL_ID
+    - ссылки на сообщение: https://discord.com/channels/GUILD_ID/CHANNEL_ID/MESSAGE_ID
+    - упоминания канала: <#123456789012345678>
+    """
+    if not raw:
+        return None
+
+    raw = raw.strip()
+
+    mention_match = re.fullmatch(r"<#(\d{15,25})>", raw)
+    if mention_match:
+        return int(mention_match.group(1))
+
+    if re.fullmatch(r"\d{15,25}", raw):
+        return int(raw)
+
+    link_match = re.search(
+        r"discord(?:app)?\.com/channels/\d{15,25}/(\d{15,25})(?:/\d{15,25})?",
+        raw
+    )
+    if link_match:
+        return int(link_match.group(1))
+
+    return None
+
+
+def split_discord_message(text: str, limit: int = 2000) -> List[str]:
+    """Делит длинный текст на куски до лимита Discord."""
+    text = text or ""
+    chunks = []
+
+    while text:
+        if len(text) <= limit:
+            chunks.append(text)
+            break
+
+        cut = text.rfind("\n", 0, limit)
+        if cut == -1 or cut < limit // 2:
+            cut = limit
+
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+
+    return chunks or [""]
+
+
+def get_writable_text_channels() -> List[disnake.TextChannel]:
+    """Все текстовые каналы, куда бот может писать."""
+    result = []
+
+    for guild in bot.guilds:
+        bot_member = guild.me or guild.get_member(bot.user.id)
+        if not bot_member:
+            continue
+
+        for channel in guild.text_channels:
+            perms = channel.permissions_for(bot_member)
+            if perms.view_channel and perms.send_messages:
+                result.append(channel)
+
+    return result
+
+
+def find_channels_by_query(query: str, limit: int = 25) -> List[disnake.TextChannel]:
+    """Ищет каналы по названию канала, названию сервера или ID."""
+    query_norm = normalize_channel_lookup_text(query)
+    channels = get_writable_text_channels()
+
+    if not query_norm:
+        return channels[:limit]
+
+    exact_id = parse_discord_channel_id(query)
+    if exact_id:
+        exact_channel = bot.get_channel(exact_id)
+        if isinstance(exact_channel, disnake.TextChannel):
+            return [exact_channel]
+
+    scored = []
+
+    for channel in channels:
+        guild_name = channel.guild.name if channel.guild else ""
+        channel_name = channel.name
+
+        channel_norm = normalize_channel_lookup_text(channel_name)
+        guild_norm = normalize_channel_lookup_text(guild_name)
+        full_norm = normalize_channel_lookup_text(f"{guild_name} {channel_name} {channel.id}")
+
+        score = 0
+
+        if query_norm == channel_norm:
+            score += 100
+        elif channel_norm.startswith(query_norm):
+            score += 80
+        elif query_norm in channel_norm:
+            score += 60
+
+        if query_norm == guild_norm:
+            score += 40
+        elif query_norm in guild_norm:
+            score += 25
+
+        if query_norm in full_norm:
+            score += 10
+
+        if score > 0:
+            scored.append((score, guild_name.lower(), channel_name.lower(), channel))
+
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return [item[3] for item in scored[:limit]]
+
+
+async def owner_channel_autocomplete(
+    interaction: disnake.ApplicationCommandInteraction,
+    user_input: str
+):
+    """
+    Всплывающий список каналов для /напиши.
+    Показывает каналы всех серверов, где бот может писать.
+    """
+    if interaction.author.id != OWNER_ID:
+        return []
+
+    matches = find_channels_by_query(user_input, limit=25)
+    choices = {}
+
+    for channel in matches:
+        guild_name = channel.guild.name if channel.guild else "Без сервера"
+        label = f"{guild_name} / #{channel.name}"
+
+        if len(label) > 100:
+            label = label[:97] + "..."
+
+        if label in choices:
+            label = f"{label[:75]}... ({channel.id})"
+
+        choices[label] = str(channel.id)
+
+    return choices
+
+
+def replace_role_name_mentions_for_guild(text: str, guild: disnake.Guild) -> str:
+    """
+    Заменяет текстовые @Роль на настоящие Discord-упоминания ролей.
+    Например:
+    @Фаеркадастр -> <@&ID_РОЛИ>
+
+    Работает по ролям конкретного сервера, куда бот отправляет сообщение.
+    """
+    if not text or not guild:
+        return text
+
+    result = text
+
+    # Сначала длинные роли, чтобы не сломать похожие названия:
+    # @Анкетолог-специалист раньше @Анкетолог.
+    roles_sorted = sorted(
+        [role for role in guild.roles if role.name and role.name != "@everyone"],
+        key=lambda role: len(role.name),
+        reverse=True
+    )
+
+    for role in roles_sorted:
+        role_name = role.name.strip()
+        if not role_name:
+            continue
+
+        # Ищет именно @НазваниеРоли, без замены внутри уже готовых <@&...>
+        pattern = re.compile(
+            rf"(?<![<\w])@{re.escape(role_name)}(?![\w>])",
+            flags=re.IGNORECASE
+        )
+
+        result = pattern.sub(role.mention, result)
+
+    return result
+
+
+def build_allowed_mentions_for_owner_message() -> disnake.AllowedMentions:
+    """
+    Разрешаем пинговать роли и пользователей, но не @everyone/@here.
+    @everyone/@here специально выключены, чтобы случайно не снести сервер.
+    """
+    return disnake.AllowedMentions(
+        everyone=False,
+        users=True,
+        roles=True,
+        replied_user=False
+    )
+
+
+@bot.slash_command(
+    name="напиши",
+    description="Отправить сообщение в выбранный канал от лица бота. Только для владельца.",
+    dm_permission=True
+)
+async def slash_owner_write(
+    interaction: disnake.CommandInteraction,
+    канал: str = commands.Param(
+        min_length=1,
+        autocomplete=owner_channel_autocomplete,
+        description="Начни вводить название канала/сервера или вставь ссылку/ID"
+    ),
+    текст: str = commands.Param(
+        min_length=1,
+        description="Текст, который бот отправит в канал"
+    ),
+    закрепить: str = commands.Param(
+        choices=["Нет", "Да"],
+        default="Нет",
+        description="Закрепить отправленное сообщение в канале?"
+    )
+):
+    try:
+        # Только владелец бота.
+        if interaction.author.id != OWNER_ID:
+            await interaction.response.send_message(
+                "❌ Гав! Эта команда доступна только владельцу бота.",
+                ephemeral=True
+            )
+            return
+
+        # Команда задумана для ЛС боту.
+        # В сервере тоже не даём пользоваться, чтобы текст не светился в командном канале.
+        if interaction.guild is not None:
+            await interaction.response.send_message(
+                "❌ Гав! Эту команду пиши мне в ЛС, чтобы текст не светился на сервере.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        channel_id = parse_discord_channel_id(канал)
+
+        # Если пользователь не выбрал вариант из списка, а просто написал название руками.
+        if not channel_id:
+            matches = find_channels_by_query(канал, limit=5)
+
+            if len(matches) == 1:
+                channel_id = matches[0].id
+
+            elif len(matches) > 1:
+                variants = "\n".join(
+                    f"• `{ch.guild.name} / #{ch.name}` — `{ch.id}`"
+                    for ch in matches
+                )
+                await interaction.edit_original_response(
+                    "❌ Нашлось несколько похожих каналов. "
+                    "Выбери точный канал из всплывающего списка или вставь ID.\n\n"
+                    f"{variants}"
+                )
+                return
+
+            else:
+                await interaction.edit_original_response(
+                    "❌ Не нашёл канал. Начни вводить название канала/сервера и выбери вариант из списка, "
+                    "либо вставь ссылку/ID."
+                )
+                return
+
+        target_channel = bot.get_channel(channel_id)
+
+        if target_channel is None:
+            try:
+                target_channel = await bot.fetch_channel(channel_id)
+            except Exception as e:
+                logger.error(f"Не удалось получить канал {channel_id}: {e}", exc_info=True)
+                await interaction.edit_original_response(
+                    "❌ Не смог найти канал. Проверь ссылку/ID и убедись, что бот есть на этом сервере."
+                )
+                return
+
+        if not isinstance(target_channel, disnake.TextChannel):
+            await interaction.edit_original_response(
+                "❌ Это не обычный текстовый канал, куда я могу писать."
+            )
+            return
+
+        bot_member = target_channel.guild.me or target_channel.guild.get_member(bot.user.id)
+        if not bot_member:
+            await interaction.edit_original_response(
+                "❌ Не смог проверить свои права на этом сервере."
+            )
+            return
+
+        perms = target_channel.permissions_for(bot_member)
+        if not perms.view_channel or not perms.send_messages:
+            await interaction.edit_original_response(
+                "❌ У меня нет прав видеть этот канал или писать туда."
+            )
+            return
+
+        should_pin = закрепить == "Да"
+
+        if should_pin and not perms.manage_messages:
+            await interaction.edit_original_response(
+                "❌ Я могу написать в этот канал, но не могу закреплять сообщения. "
+                "Нужно право `Manage Messages / Управлять сообщениями`."
+            )
+            return
+
+        # Превращаем @НазваниеРоли в настоящие <@&role_id> на сервере целевого канала.
+        final_text = replace_role_name_mentions_for_guild(текст, target_channel.guild)
+
+        chunks = split_discord_message(final_text, limit=2000)
+        allowed_mentions = build_allowed_mentions_for_owner_message()
+
+        sent_messages = []
+        for chunk in chunks:
+            sent_msg = await target_channel.send(
+                chunk,
+                allowed_mentions=allowed_mentions
+            )
+            sent_messages.append(sent_msg)
+
+        pinned = False
+        pin_error = None
+
+        if should_pin and sent_messages:
+            try:
+                # Если текст разбился на несколько сообщений, закрепляем первое.
+                await sent_messages[0].pin(
+                    reason=f"Закреплено владельцем бота через /напиши: {interaction.author}"
+                )
+                pinned = True
+            except disnake.Forbidden:
+                pin_error = "нет прав закреплять сообщения"
+            except Exception as e:
+                logger.error(f"Ошибка закрепления сообщения: {e}", exc_info=True)
+                pin_error = str(e)[:200]
+
+        result_text = (
+            f"✅ Гав! Отправил сообщение в `{target_channel.guild.name} / #{target_channel.name}`.\n"
+            f"Кусков сообщения: `{len(sent_messages)}`."
+        )
+
+        if should_pin:
+            if pinned:
+                result_text += "\n📌 Сообщение закреплено."
+            else:
+                result_text += f"\n⚠️ Сообщение отправлено, но не закреплено: `{pin_error}`."
+
+        await interaction.edit_original_response(result_text)
+
+    except disnake.Forbidden:
+        logger.warning("Нет прав отправить сообщение в указанный канал.", exc_info=True)
+        if interaction.response.is_done():
+            await interaction.edit_original_response("❌ У меня нет прав писать в этот канал.")
+        else:
+            await interaction.response.send_message("❌ У меня нет прав писать в этот канал.", ephemeral=True)
+
+    except Exception as e:
+        logger.error(f"Ошибка в /напиши: {e}", exc_info=True)
+        error_text = f"❌ Гав! Ошибка при отправке сообщения:\n`{str(e)[:300]}`"
+
+        if interaction.response.is_done():
+            await interaction.edit_original_response(error_text)
+        else:
+            await interaction.response.send_message(error_text, ephemeral=True)    
+
 # ============================================================================
 # 🏠 КОМАНДА: !недвижка
 # ============================================================================
