@@ -4052,7 +4052,117 @@ def replace_role_name_mentions_for_guild(text: str, guild: disnake.Guild) -> str
 
     return result
 
+async def ensure_guild_members_loaded(guild: disnake.Guild):
+    """
+    Подгружает участников сервера в кэш, чтобы бот мог найти @ник по имени.
+    Требует включённый Server Members Intent в Discord Developer Portal.
+    """
+    if not guild:
+        return
 
+    try:
+        # Если участники уже загружены, не дёргаем лишний раз.
+        if getattr(guild, "chunked", False):
+            return
+
+        if hasattr(guild, "chunk"):
+            await guild.chunk(cache=True)
+    except Exception as e:
+        logger.warning(f"Не удалось подгрузить участников сервера {guild.name}: {e}")
+
+
+def get_member_ping_names(member: disnake.Member) -> Set[str]:
+    """
+    Какие варианты имени разрешаем писать в /напиши:
+    @username
+    @серверный_ник
+    @глобальное_имя
+    @display_name
+    """
+    names = set()
+
+    for value in (
+        getattr(member, "name", None),
+        getattr(member, "nick", None),
+        getattr(member, "display_name", None),
+        getattr(member, "global_name", None),
+    ):
+        if value and str(value).strip():
+            names.add(str(value).strip())
+
+    return names
+
+
+async def replace_member_name_mentions_for_guild(text: str, guild: disnake.Guild) -> str:
+    """
+    Заменяет текстовые @ники участников на настоящие Discord-пинги.
+
+    Пример:
+    @imcekcu_q -> <@123456789012345678>
+
+    Если имя неоднозначное, например два человека с одинаковым ником,
+    бот его не заменяет, чтобы не пингануть не того.
+    """
+    if not text or not guild:
+        return text
+
+    await ensure_guild_members_loaded(guild)
+
+    result = text
+    name_to_member = {}
+    original_name_by_key = {}
+    ambiguous = set()
+
+    for member in guild.members:
+        if member.bot:
+            continue
+
+        for name in get_member_ping_names(member):
+            key = name.casefold()
+
+            if key in name_to_member and name_to_member[key].id != member.id:
+                ambiguous.add(key)
+                continue
+
+            name_to_member[key] = member
+            original_name_by_key[key] = name
+
+    replacements = []
+
+    for key, member in name_to_member.items():
+        if key in ambiguous:
+            continue
+
+        raw_name = original_name_by_key[key]
+        replacements.append((raw_name, member))
+
+    # Сначала длинные имена, чтобы @ivan_ivanov не сломался из-за @ivan
+    replacements.sort(key=lambda item: len(item[0]), reverse=True)
+
+    for raw_name, member in replacements:
+        pattern = re.compile(
+            rf"(?<![<@!&\w])@{re.escape(raw_name)}(?![\w>])",
+            flags=re.IGNORECASE,
+        )
+        result = pattern.sub(member.mention, result)
+
+    return result
+
+
+async def prepare_owner_message_text(text: str, guild: disnake.Guild) -> str:
+    """
+    Общая подготовка текста для /напиши:
+    - @Роль -> <@&role_id>
+    - @участник -> <@user_id>
+    """
+    text = text or ""
+
+    if guild:
+        text = replace_role_name_mentions_for_guild(text, guild)
+        text = await replace_member_name_mentions_for_guild(text, guild)
+
+    return text
+    
 def build_allowed_mentions_for_owner_message() -> disnake.AllowedMentions:
     """
     Разрешаем пинговать роли и пользователей, но не @everyone/@here.
@@ -4178,7 +4288,7 @@ async def slash_owner_write(
             return
 
         # Превращаем @НазваниеРоли в настоящие <@&role_id> на сервере целевого канала.
-        final_text = replace_role_name_mentions_for_guild(текст, target_channel.guild)
+        final_text = await prepare_owner_message_text(текст, target_channel.guild)
 
         chunks = split_discord_message(final_text, limit=2000)
         allowed_mentions = build_allowed_mentions_for_owner_message()
