@@ -4346,6 +4346,11 @@ async def slash_owner_write(
         else:
             await interaction.response.send_message(error_text, ephemeral=True)    
 #жопажопа
+
+# ============================================================================
+# ЛС-ПЕРЕПИСКА ОТ ЛИЦА БОТА: /напиши_юзеру + пересылка ответов овнеру
+# ============================================================================
+
 def extract_discord_user_id(raw: str) -> Optional[int]:
     """
     Достаёт ID пользователя из:
@@ -4371,7 +4376,6 @@ def extract_discord_user_id(raw: str) -> Optional[int]:
 def normalize_user_search_name(raw: str) -> str:
     """
     @imcekcu_q -> imcekcu_q
-    пробелы по краям убирает
     """
     raw = raw or ""
     raw = raw.strip()
@@ -4383,13 +4387,6 @@ def normalize_user_search_name(raw: str) -> str:
 
 
 def get_member_search_names(member: disnake.Member) -> set[str]:
-    """
-    Имена, по которым можно искать участника:
-    - username
-    - серверный ник
-    - display_name
-    - global_name
-    """
     names = set()
 
     for value in (
@@ -4406,14 +4403,11 @@ def get_member_search_names(member: disnake.Member) -> set[str]:
 
 async def find_user_for_owner_dm(raw_target: str) -> Tuple[Optional[disnake.User], Optional[str]]:
     """
-    Ищет пользователя для /напиши_юзеру.
-
-    Возвращает:
-    - user, None — если найден
-    - None, error_text — если ошибка/не найдено/неоднозначно
+    Ищет пользователя по:
+    - числовому ID
+    - mention
+    - @username / username / серверному нику
     """
-
-    # 1. Если дали ID или готовый Discord mention
     user_id = extract_discord_user_id(raw_target)
 
     if user_id:
@@ -4433,7 +4427,6 @@ async def find_user_for_owner_dm(raw_target: str) -> Tuple[Optional[disnake.User
             logger.error(f"Ошибка поиска пользователя по ID {user_id}: {e}", exc_info=True)
             return None, f"❌ Ошибка поиска пользователя по ID: `{str(e)[:200]}`"
 
-    # 2. Если дали @username / username / ник
     search_name = normalize_user_search_name(raw_target)
 
     if not search_name:
@@ -4443,8 +4436,6 @@ async def find_user_for_owner_dm(raw_target: str) -> Tuple[Optional[disnake.User
 
     for guild in bot.guilds:
         try:
-            # Использует функцию из прошлого блока.
-            # Если её нет — просто убери эти 2 строки, но поиск будет хуже.
             await ensure_guild_members_loaded(guild)
         except NameError:
             pass
@@ -4461,7 +4452,7 @@ async def find_user_for_owner_dm(raw_target: str) -> Tuple[Optional[disnake.User
     if not matches:
         return None, (
             "❌ Не нашёл пользователя по такому нику.\n"
-            "Попробуй указать числовой ID пользователя — так надёжнее."
+            "Лучше укажи числовой ID пользователя."
         )
 
     if len(matches) > 1:
@@ -4471,18 +4462,18 @@ async def find_user_for_owner_dm(raw_target: str) -> Tuple[Optional[disnake.User
         )
 
         return None, (
-            "❌ Нашлось несколько похожих пользователей. "
+            "❌ Нашлось несколько пользователей с таким именем. "
             "Укажи точный числовой ID.\n\n"
             f"{variants}"
         )
 
     member = next(iter(matches.values()))
     return member, None
-
+    
 @bot.slash_command(
     name="напиши_юзеру",
-    description="Отправить сообщение пользователю в ЛС от лица бота. Только для владельца.",
-    dm_permission=True
+    description="Отправить пользователю ЛС от лица бота. Только для владельца.",
+    contexts=disnake.InteractionContextTypes(bot_dm=True)
 )
 async def slash_owner_write_user(
     interaction: disnake.CommandInteraction,
@@ -4496,23 +4487,19 @@ async def slash_owner_write_user(
     )
 ):
     try:
-        # Только владелец бота
         if interaction.author.id != OWNER_ID:
             await interaction.response.send_message(
-                "❌ Гав! Эта команда доступна только владельцу бота.",
-                ephemeral=True
+                "❌ Эта команда доступна только владельцу бота."
             )
             return
 
-        # Лучше писать команду в ЛС боту, чтобы текст не светился на сервере
         if interaction.guild is not None:
             await interaction.response.send_message(
-                "❌ Гав! Эту команду пиши мне в ЛС, чтобы текст не светился на сервере.",
-                ephemeral=True
+                "❌ Эта команда работает только в ЛС бота."
             )
             return
 
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
 
         target_user, error_text = await find_user_for_owner_dm(пользователь)
 
@@ -4540,28 +4527,98 @@ async def slash_owner_write_user(
             )
             sent_count += 1
 
+        preview = текст
+        if len(preview) > 1500:
+            preview = preview[:1500] + "\n... [текст обрезан в отчёте]"
+
         await interaction.edit_original_response(
-            f"✅ Гав! Отправил ЛС пользователю `{target_user}`.\n"
+            f"✅ Отправил ЛС пользователю `{target_user}`.\n"
             f"ID: `{target_user.id}`\n"
-            f"Кусков сообщения: `{sent_count}`."
+            f"Кусков сообщения: `{sent_count}`\n\n"
+            f"**Отправленный текст:**\n"
+            f"```text\n{preview}\n```"
         )
 
     except disnake.Forbidden:
         await interaction.edit_original_response(
-            "❌ Не смог отправить ЛС. У пользователя закрыты личные сообщения от бота "
-            "или он не принимает сообщения с общего сервера."
+            "❌ Не смог отправить ЛС. У пользователя закрыты личные сообщения "
+            "или он не принимает сообщения от бота."
         )
 
     except Exception as e:
         logger.error(f"Ошибка в /напиши_юзеру: {e}", exc_info=True)
 
-        error_text = f"❌ Гав! Ошибка при отправке ЛС:\n`{str(e)[:300]}`"
+        error_text = f"❌ Ошибка при отправке ЛС:\n`{str(e)[:300]}`"
 
         if interaction.response.is_done():
             await interaction.edit_original_response(error_text)
         else:
-            await interaction.response.send_message(error_text, ephemeral=True)
+            await interaction.response.send_message(error_text)
 
+@bot.listen("on_message")
+async def owner_dm_relay_listener(message: disnake.Message):
+    """
+    Если пользователь пишет боту в ЛС, бот пересылает это владельцу.
+    Сообщения самого владельца не пересылаем, чтобы не ловить собственные команды/текст.
+    """
+    if message.author.bot:
+        return
+
+    if message.guild is not None:
+        return
+
+    if message.author.id == OWNER_ID:
+        return
+
+    try:
+        owner = bot.get_user(OWNER_ID)
+
+        if owner is None:
+            owner = await bot.fetch_user(OWNER_ID)
+
+        if owner is None:
+            logger.warning("Не смог найти OWNER_ID для пересылки ЛС.")
+            return
+
+        content = message.content or ""
+
+        attachments_text = ""
+
+        if message.attachments:
+            attachments_text = "\n\n**Вложения:**\n" + "\n".join(
+                f"• {attachment.filename}: {attachment.url}"
+                for attachment in message.attachments
+            )
+
+        if not content.strip() and not attachments_text:
+            content = "[пустое сообщение]"
+
+        header = (
+            f"📩 **Ответ в ЛС боту**\n"
+            f"От: `{message.author}`\n"
+            f"ID: `{message.author.id}`\n\n"
+            f"Чтобы ответить:\n"
+            f"`/напиши_юзеру пользователь: {message.author.id} текст: ...`\n\n"
+            f"**Сообщение:**\n"
+        )
+
+        full_text = f"{header}{content}{attachments_text}"
+
+        chunks = split_discord_message(full_text, limit=2000)
+
+        for chunk in chunks:
+            await owner.send(
+                chunk,
+                allowed_mentions=disnake.AllowedMentions(
+                    everyone=False,
+                    users=False,
+                    roles=False,
+                    replied_user=False
+                )
+            )
+
+    except Exception as e:
+        logger.error(f"Ошибка пересылки ЛС владельцу: {e}", exc_info=True)
 
 # ============================================================================
 # 📝 КОМАНДА И РЕАКЦИЯ ДЛЯ ВЛАДЕЛЬЦА: РЕДАКТИРОВАТЬ СООБЩЕНИЕ БОТА
