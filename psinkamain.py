@@ -4345,6 +4345,223 @@ async def slash_owner_write(
             await interaction.edit_original_response(error_text)
         else:
             await interaction.response.send_message(error_text, ephemeral=True)    
+#жопажопа
+def extract_discord_user_id(raw: str) -> Optional[int]:
+    """
+    Достаёт ID пользователя из:
+    - 123456789012345678
+    - <@123456789012345678>
+    - <@!123456789012345678>
+    """
+    if not raw:
+        return None
+
+    raw = raw.strip()
+    match = re.search(r"<?@?!?(\d{15,25})>?", raw)
+
+    if not match:
+        return None
+
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def normalize_user_search_name(raw: str) -> str:
+    """
+    @imcekcu_q -> imcekcu_q
+    пробелы по краям убирает
+    """
+    raw = raw or ""
+    raw = raw.strip()
+
+    if raw.startswith("@"):
+        raw = raw[1:]
+
+    return raw.strip().casefold()
+
+
+def get_member_search_names(member: disnake.Member) -> set[str]:
+    """
+    Имена, по которым можно искать участника:
+    - username
+    - серверный ник
+    - display_name
+    - global_name
+    """
+    names = set()
+
+    for value in (
+        getattr(member, "name", None),
+        getattr(member, "nick", None),
+        getattr(member, "display_name", None),
+        getattr(member, "global_name", None),
+    ):
+        if value and str(value).strip():
+            names.add(str(value).strip().casefold())
+
+    return names
+
+
+async def find_user_for_owner_dm(raw_target: str) -> Tuple[Optional[disnake.User], Optional[str]]:
+    """
+    Ищет пользователя для /напиши_юзеру.
+
+    Возвращает:
+    - user, None — если найден
+    - None, error_text — если ошибка/не найдено/неоднозначно
+    """
+
+    # 1. Если дали ID или готовый Discord mention
+    user_id = extract_discord_user_id(raw_target)
+
+    if user_id:
+        try:
+            user = bot.get_user(user_id)
+
+            if user is None:
+                user = await bot.fetch_user(user_id)
+
+            return user, None
+
+        except disnake.NotFound:
+            return None, "❌ Не нашёл пользователя по этому ID."
+        except disnake.Forbidden:
+            return None, "❌ Discord не дал получить этого пользователя."
+        except Exception as e:
+            logger.error(f"Ошибка поиска пользователя по ID {user_id}: {e}", exc_info=True)
+            return None, f"❌ Ошибка поиска пользователя по ID: `{str(e)[:200]}`"
+
+    # 2. Если дали @username / username / ник
+    search_name = normalize_user_search_name(raw_target)
+
+    if not search_name:
+        return None, "❌ Пустой пользователь."
+
+    matches = {}
+
+    for guild in bot.guilds:
+        try:
+            # Использует функцию из прошлого блока.
+            # Если её нет — просто убери эти 2 строки, но поиск будет хуже.
+            await ensure_guild_members_loaded(guild)
+        except NameError:
+            pass
+        except Exception as e:
+            logger.warning(f"Не удалось подгрузить участников {guild.name}: {e}")
+
+        for member in guild.members:
+            if member.bot:
+                continue
+
+            if search_name in get_member_search_names(member):
+                matches[member.id] = member
+
+    if not matches:
+        return None, (
+            "❌ Не нашёл пользователя по такому нику.\n"
+            "Попробуй указать числовой ID пользователя — так надёжнее."
+        )
+
+    if len(matches) > 1:
+        variants = "\n".join(
+            f"• `{member}` / `{member.display_name}` — `{member.id}`"
+            for member in list(matches.values())[:10]
+        )
+
+        return None, (
+            "❌ Нашлось несколько похожих пользователей. "
+            "Укажи точный числовой ID.\n\n"
+            f"{variants}"
+        )
+
+    member = next(iter(matches.values()))
+    return member, None
+
+@bot.slash_command(
+    name="напиши_юзеру",
+    description="Отправить сообщение пользователю в ЛС от лица бота. Только для владельца.",
+    dm_permission=True
+)
+async def slash_owner_write_user(
+    interaction: disnake.CommandInteraction,
+    пользователь: str = commands.Param(
+        min_length=1,
+        description="ID пользователя, mention или @username"
+    ),
+    текст: str = commands.Param(
+        min_length=1,
+        description="Текст, который бот отправит человеку в ЛС"
+    )
+):
+    try:
+        # Только владелец бота
+        if interaction.author.id != OWNER_ID:
+            await interaction.response.send_message(
+                "❌ Гав! Эта команда доступна только владельцу бота.",
+                ephemeral=True
+            )
+            return
+
+        # Лучше писать команду в ЛС боту, чтобы текст не светился на сервере
+        if interaction.guild is not None:
+            await interaction.response.send_message(
+                "❌ Гав! Эту команду пиши мне в ЛС, чтобы текст не светился на сервере.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        target_user, error_text = await find_user_for_owner_dm(пользователь)
+
+        if error_text:
+            await interaction.edit_original_response(error_text)
+            return
+
+        if target_user is None:
+            await interaction.edit_original_response("❌ Не смог найти пользователя.")
+            return
+
+        chunks = split_discord_message(текст, limit=2000)
+
+        sent_count = 0
+
+        for chunk in chunks:
+            await target_user.send(
+                chunk,
+                allowed_mentions=disnake.AllowedMentions(
+                    everyone=False,
+                    users=False,
+                    roles=False,
+                    replied_user=False
+                )
+            )
+            sent_count += 1
+
+        await interaction.edit_original_response(
+            f"✅ Гав! Отправил ЛС пользователю `{target_user}`.\n"
+            f"ID: `{target_user.id}`\n"
+            f"Кусков сообщения: `{sent_count}`."
+        )
+
+    except disnake.Forbidden:
+        await interaction.edit_original_response(
+            "❌ Не смог отправить ЛС. У пользователя закрыты личные сообщения от бота "
+            "или он не принимает сообщения с общего сервера."
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка в /напиши_юзеру: {e}", exc_info=True)
+
+        error_text = f"❌ Гав! Ошибка при отправке ЛС:\n`{str(e)[:300]}`"
+
+        if interaction.response.is_done():
+            await interaction.edit_original_response(error_text)
+        else:
+            await interaction.response.send_message(error_text, ephemeral=True)
+
 
 # ============================================================================
 # 📝 КОМАНДА И РЕАКЦИЯ ДЛЯ ВЛАДЕЛЬЦА: РЕДАКТИРОВАТЬ СООБЩЕНИЕ БОТА
