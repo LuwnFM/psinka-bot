@@ -5883,7 +5883,750 @@ def resolve_mercenary_query(query: str) -> Tuple[Optional[str], List[str]]:
 
 
 load_mercenary_database_from_xlsx()
+# ============================================================================
+# ТЕМНИЦА: обычное сообщение без префикса + временная роль «Спит»
+#
+# Использование ответом на сообщение:
+# Ты отправляешься в темницу на 15 минут за 2.14
+#
+# Использование через упоминание:
+# @Пользователь ты отправляешься в темницу на 15 минут за 2.14
+# ============================================================================
 
+JAIL_ROLE_ID = 682406180370513978
+
+# Администраторы проверяются по праву administrator.
+# Эти две роли пока проверяются по названиям, поскольку их ID не указаны.
+JAIL_GUARD_ROLE_NAMES = {
+    "гвардеец",
+    "старший гвардеец",
+}
+
+# Максимальный срок — 30 суток.
+MAX_JAIL_MINUTES = 43_200
+
+
+JAIL_PATTERN = re.compile(
+    r"^\s*"
+    r"(?:(?P<mention><@!?\d{15,25}>)\s*[,—–-]?\s*)?"
+    r"ты\s+отправляешься\s+в\s+темницу\s+на\s+"
+    r"(?P<minutes>\d{1,6})\s*"
+    r"(?:минут(?:у|ы)?|мин\.?)"
+    r"\s+за\s+"
+    r"(?P<reason>.+?)"
+    r"\s*[.!]?\s*$",
+    flags=re.IGNORECASE,
+)
+
+
+# ============================================================================
+# ТАБЛИЦА ДЛЯ СОХРАНЕНИЯ СРОКОВ В БАЗЕ
+# ============================================================================
+
+class JailSentence(Base):
+    __tablename__ = "jail_sentences"
+
+    guild_id = Column(String(32), primary_key=True)
+    user_id = Column(String(32), primary_key=True)
+
+    role_id = Column(String(32), nullable=False)
+    moderator_id = Column(String(32), nullable=False)
+
+    reason = Column(String(500), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
+# Основная инициализация БД в боте происходит раньше объявления этой модели,
+# поэтому создаём новую таблицу отдельно.
+if db_engine is not None:
+    try:
+        Base.metadata.create_all(db_engine)
+        logger.info("✅ Таблица jail_sentences готова.")
+    except Exception as e:
+        logger.error(
+            f"Не удалось создать таблицу jail_sentences: {e}",
+            exc_info=True,
+        )
+
+
+# Активные таймеры:
+# ключ — (ID сервера, ID участника)
+jail_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
+jail_deadlines: Dict[Tuple[int, int], datetime] = {}
+
+jail_timers_restored = False
+
+
+# ============================================================================
+# ПРОВЕРКА ДОСТУПА
+# ============================================================================
+
+def has_jail_access(member: disnake.Member) -> bool:
+    """
+    Разрешает использовать темницу:
+
+    1. Всем с серверным правом «Администратор».
+    2. Участникам с ролью «Гвардеец».
+    3. Участникам с ролью «Старший Гвардеец».
+    """
+
+    if member.guild_permissions.administrator:
+        return True
+
+    member_role_names = {
+        role.name.strip().casefold()
+        for role in member.roles
+    }
+
+    return bool(member_role_names & JAIL_GUARD_ROLE_NAMES)
+
+
+# ============================================================================
+# РАБОТА СО ВРЕМЕНЕМ И БАЗОЙ
+# ============================================================================
+
+def normalize_jail_datetime(value: datetime) -> datetime:
+    """Приводит дату к UTC с часовым поясом."""
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc)
+
+
+def save_jail_sentence_db(
+    guild_id: int,
+    user_id: int,
+    moderator_id: int,
+    reason: str,
+    expires_at: datetime,
+) -> None:
+    """Создаёт или обновляет срок темницы в базе данных."""
+
+    if SessionLocal is None:
+        return
+
+    session = SessionLocal()
+
+    try:
+        record = (
+            session.query(JailSentence)
+            .filter_by(
+                guild_id=str(guild_id),
+                user_id=str(user_id),
+            )
+            .first()
+        )
+
+        if record is None:
+            record = JailSentence(
+                guild_id=str(guild_id),
+                user_id=str(user_id),
+                role_id=str(JAIL_ROLE_ID),
+                moderator_id=str(moderator_id),
+                reason=reason,
+                expires_at=expires_at,
+            )
+
+            session.add(record)
+
+        else:
+            record.role_id = str(JAIL_ROLE_ID)
+            record.moderator_id = str(moderator_id)
+            record.reason = reason
+            record.expires_at = expires_at
+
+        session.commit()
+
+    except Exception:
+        session.rollback()
+        raise
+
+    finally:
+        session.close()
+
+
+def delete_jail_sentence_db(
+    guild_id: int,
+    user_id: int,
+) -> None:
+    """Удаляет завершившийся срок из базы."""
+
+    if SessionLocal is None:
+        return
+
+    session = SessionLocal()
+
+    try:
+        (
+            session.query(JailSentence)
+            .filter_by(
+                guild_id=str(guild_id),
+                user_id=str(user_id),
+            )
+            .delete(synchronize_session=False)
+        )
+
+        session.commit()
+
+    except Exception:
+        session.rollback()
+        raise
+
+    finally:
+        session.close()
+
+
+def load_jail_sentences_db() -> List[Tuple[int, int, datetime]]:
+    """Загружает действующие сроки после перезапуска бота."""
+
+    if SessionLocal is None:
+        return []
+
+    session = SessionLocal()
+
+    try:
+        rows = session.query(JailSentence).all()
+
+        return [
+            (
+                int(row.guild_id),
+                int(row.user_id),
+                normalize_jail_datetime(row.expires_at),
+            )
+            for row in rows
+        ]
+
+    finally:
+        session.close()
+
+
+# ============================================================================
+# ПОИСК НАРУШИТЕЛЯ
+# ============================================================================
+
+async def get_jail_reply_target(
+    message: disnake.Message,
+) -> Optional[disnake.Member]:
+    """
+    Получает автора сообщения, на которое ответил модератор.
+    """
+
+    reference = message.reference
+
+    if reference is None or reference.message_id is None:
+        return None
+
+    referenced_message = reference.resolved
+
+    if not isinstance(referenced_message, disnake.Message):
+        try:
+            referenced_message = await message.channel.fetch_message(
+                reference.message_id
+            )
+
+        except (
+            disnake.NotFound,
+            disnake.Forbidden,
+            disnake.HTTPException,
+        ):
+            return None
+
+    author_id = referenced_message.author.id
+
+    member = message.guild.get_member(author_id)
+
+    if member is not None:
+        return member
+
+    try:
+        return await message.guild.fetch_member(author_id)
+
+    except (
+        disnake.NotFound,
+        disnake.Forbidden,
+        disnake.HTTPException,
+    ):
+        return None
+
+
+async def get_jail_mentioned_target(
+    message: disnake.Message,
+    mention_text: Optional[str],
+) -> Optional[disnake.Member]:
+    """
+    Получает участника из упоминания перед фразой.
+    """
+
+    if not mention_text:
+        return None
+
+    user_id_match = re.search(r"\d{15,25}", mention_text)
+
+    if user_id_match is None:
+        return None
+
+    user_id = int(user_id_match.group(0))
+
+    member = message.guild.get_member(user_id)
+
+    if member is not None:
+        return member
+
+    try:
+        return await message.guild.fetch_member(user_id)
+
+    except (
+        disnake.NotFound,
+        disnake.Forbidden,
+        disnake.HTTPException,
+    ):
+        return None
+
+
+# ============================================================================
+# СНЯТИЕ РОЛИ ПОСЛЕ ОКОНЧАНИЯ СРОКА
+# ============================================================================
+
+async def jail_release_worker(
+    guild_id: int,
+    user_id: int,
+) -> None:
+    """Ждёт окончания срока и снимает роль «Спит»."""
+
+    key = (guild_id, user_id)
+
+    try:
+        while True:
+            expires_at = jail_deadlines.get(key)
+
+            if expires_at is None:
+                return
+
+            delay = (
+                expires_at - datetime.now(timezone.utc)
+            ).total_seconds()
+
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            # Если участнику уже назначили новый срок,
+            # старый таймер не должен снимать роль.
+            if jail_deadlines.get(key) != expires_at:
+                continue
+
+            guild = bot.get_guild(guild_id)
+
+            if guild is None:
+                logger.warning(
+                    f"Темница: сервер {guild_id} не найден."
+                )
+
+                jail_deadlines.pop(key, None)
+
+                await asyncio.to_thread(
+                    delete_jail_sentence_db,
+                    guild_id,
+                    user_id,
+                )
+
+                return
+
+            sleep_role = guild.get_role(JAIL_ROLE_ID)
+
+            if sleep_role is None:
+                logger.error(
+                    f"Темница: роль {JAIL_ROLE_ID} "
+                    f"на сервере {guild_id} не найдена."
+                )
+
+                jail_deadlines.pop(key, None)
+
+                await asyncio.to_thread(
+                    delete_jail_sentence_db,
+                    guild_id,
+                    user_id,
+                )
+
+                return
+
+            member = guild.get_member(user_id)
+
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+
+                except disnake.NotFound:
+                    member = None
+
+                except (
+                    disnake.Forbidden,
+                    disnake.HTTPException,
+                ) as e:
+                    logger.error(
+                        f"Темница: не удалось получить участника "
+                        f"{user_id}: {e}",
+                        exc_info=True,
+                    )
+
+                    await asyncio.sleep(300)
+                    continue
+
+            if member is not None and sleep_role in member.roles:
+                try:
+                    await member.remove_roles(
+                        sleep_role,
+                        reason="Срок пребывания в темнице истёк",
+                    )
+
+                except disnake.Forbidden:
+                    logger.error(
+                        "Темница: Discord запретил снять роль «Спит». "
+                        "Проверь право «Управлять ролями» и иерархию."
+                    )
+
+                    # Через пять минут бот попробует снова.
+                    await asyncio.sleep(300)
+                    continue
+
+                except disnake.HTTPException as e:
+                    logger.error(
+                        f"Темница: ошибка при снятии роли: {e}",
+                        exc_info=True,
+                    )
+
+                    await asyncio.sleep(300)
+                    continue
+
+            jail_deadlines.pop(key, None)
+
+            await asyncio.to_thread(
+                delete_jail_sentence_db,
+                guild_id,
+                user_id,
+            )
+
+            logger.info(
+                f"Темница: роль снята с участника {user_id} "
+                f"на сервере {guild_id}."
+            )
+
+            return
+
+    except asyncio.CancelledError:
+        return
+
+    except Exception as e:
+        logger.error(
+            f"Ошибка таймера темницы для "
+            f"{guild_id}/{user_id}: {e}",
+            exc_info=True,
+        )
+
+    finally:
+        current_task = asyncio.current_task()
+
+        if jail_tasks.get(key) is current_task:
+            jail_tasks.pop(key, None)
+
+
+def schedule_jail_release(
+    guild_id: int,
+    user_id: int,
+    expires_at: datetime,
+) -> None:
+    """Создаёт или заменяет таймер снятия роли."""
+
+    key = (guild_id, user_id)
+
+    expires_at = normalize_jail_datetime(expires_at)
+    jail_deadlines[key] = expires_at
+
+    old_task = jail_tasks.get(key)
+
+    if old_task is not None and not old_task.done():
+        old_task.cancel()
+
+    jail_tasks[key] = asyncio.create_task(
+        jail_release_worker(
+            guild_id,
+            user_id,
+        )
+    )
+
+
+# ============================================================================
+# ВОССТАНОВЛЕНИЕ ТАЙМЕРОВ ПОСЛЕ ПЕРЕЗАПУСКА
+# ============================================================================
+
+@bot.listen("on_ready")
+async def restore_jail_timers_after_restart() -> None:
+    global jail_timers_restored
+
+    # on_ready может срабатывать повторно после переподключения.
+    if jail_timers_restored:
+        return
+
+    jail_timers_restored = True
+
+    if SessionLocal is None:
+        logger.warning(
+            "⚠️ DATABASE_URL не настроен: "
+            "сроки темницы не переживут перезапуск бота."
+        )
+        return
+
+    try:
+        records = await asyncio.to_thread(
+            load_jail_sentences_db
+        )
+
+        for guild_id, user_id, expires_at in records:
+            schedule_jail_release(
+                guild_id,
+                user_id,
+                expires_at,
+            )
+
+        logger.info(
+            f"Темница: восстановлено таймеров — {len(records)}."
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Не удалось восстановить таймеры темницы: {e}",
+            exc_info=True,
+        )
+
+
+# ============================================================================
+# ОБЫЧНОЕ СООБЩЕНИЕ-КОМАНДА БЕЗ «!» И БЕЗ СЛЭША
+# ============================================================================
+
+@bot.listen("on_message")
+async def jail_sentence_listener(
+    message: disnake.Message,
+) -> None:
+
+    # Не реагируем на ботов и личные сообщения.
+    if message.author.bot or message.guild is None:
+        return
+
+    content = (message.content or "").strip()
+
+    # Проверяем, совпадает ли сообщение с нужной фразой.
+    match = JAIL_PATTERN.fullmatch(content)
+
+    if match is None:
+        return
+
+    # Проверяем права автора команды.
+    if (
+        not isinstance(message.author, disnake.Member)
+        or not has_jail_access(message.author)
+    ):
+        await message.reply(
+            "❌ Эту команду могут использовать только администраторы, "
+            "Гвардейцы и Старшие Гвардейцы.",
+            mention_author=False,
+        )
+        return
+
+    minutes = int(match.group("minutes"))
+    reason = match.group("reason").strip()
+
+    if not 1 <= minutes <= MAX_JAIL_MINUTES:
+        await message.reply(
+            f"❌ Срок должен быть от 1 до "
+            f"{MAX_JAIL_MINUTES} минут.",
+            mention_author=False,
+        )
+        return
+
+    if len(reason) > 500:
+        await message.reply(
+            "❌ Примечание слишком длинное. "
+            "Максимум — 500 символов.",
+            mention_author=False,
+        )
+        return
+
+    # Если перед фразой есть упоминание — используем его.
+    target = await get_jail_mentioned_target(
+        message,
+        match.group("mention"),
+    )
+
+    # Если упоминания нет — ищем сообщение, на которое ответили.
+    if target is None and match.group("mention") is None:
+        target = await get_jail_reply_target(message)
+
+    if target is None:
+        await message.reply(
+            "❌ Не понял, кого отправлять в темницу.\n"
+            "Ответь этой фразой на сообщение нарушителя либо "
+            "поставь его настоящее упоминание перед фразой.",
+            mention_author=False,
+        )
+        return
+
+    if target.bot:
+        await message.reply(
+            "❌ Ботов отправлять в темницу нельзя.",
+            mention_author=False,
+        )
+        return
+
+    if target.id == message.author.id:
+        await message.reply(
+            "❌ Нельзя отправить в темницу самого себя.",
+            mention_author=False,
+        )
+        return
+
+    sleep_role = message.guild.get_role(JAIL_ROLE_ID)
+
+    if sleep_role is None:
+        await message.reply(
+            f"❌ Не нашёл роль `Спит` с ID `{JAIL_ROLE_ID}`.",
+            mention_author=False,
+        )
+        return
+
+    bot_member = message.guild.me
+
+    if (
+        bot_member is None
+        or not bot_member.guild_permissions.manage_roles
+    ):
+        await message.reply(
+            "❌ У бота нет права **Управлять ролями**.",
+            mention_author=False,
+        )
+        return
+
+    if sleep_role.managed:
+        await message.reply(
+            "❌ Роль `Спит` управляется интеграцией, "
+            "поэтому бот не может её выдавать.",
+            mention_author=False,
+        )
+        return
+
+    if sleep_role >= bot_member.top_role:
+        await message.reply(
+            "❌ Роль бота должна находиться выше роли `Спит` "
+            "в списке ролей сервера.",
+            mention_author=False,
+        )
+        return
+
+    if (
+        target.id == message.guild.owner_id
+        or target.top_role >= bot_member.top_role
+    ):
+        await message.reply(
+            "❌ Бот не может изменять роли этого участника: "
+            "его высшая роль находится не ниже роли бота.",
+            mention_author=False,
+        )
+        return
+
+    expires_at = (
+        datetime.now(timezone.utc)
+        + timedelta(minutes=minutes)
+    )
+
+    audit_reason = (
+        f"Темница на {minutes} мин.; "
+        f"причина: {reason[:300]}; "
+        f"модератор: {message.author} "
+        f"({message.author.id})"
+    )
+
+    try:
+        if sleep_role not in target.roles:
+            await target.add_roles(
+                sleep_role,
+                reason=audit_reason,
+            )
+
+        # Сохраняем срок в БД, чтобы он пережил перезапуск.
+        try:
+            await asyncio.to_thread(
+                save_jail_sentence_db,
+                message.guild.id,
+                target.id,
+                message.author.id,
+                reason,
+                expires_at,
+            )
+
+        except Exception as db_error:
+            # Без записи в БД таймер всё равно работает,
+            # но только до перезапуска процесса.
+            logger.error(
+                f"Темница: не удалось сохранить срок в БД: "
+                f"{db_error}",
+                exc_info=True,
+            )
+
+        # Если роль уже была выдана, новый срок заменит старый.
+        schedule_jail_release(
+            message.guild.id,
+            target.id,
+            expires_at,
+        )
+
+        release_timestamp = int(expires_at.timestamp())
+
+        await message.reply(
+            f"🔒 {target.mention} отправляется в темницу "
+            f"на **{minutes} мин.**\n"
+            f"**Причина:** {reason}\n"
+            f"**Освобождение:** "
+            f"<t:{release_timestamp}:F> "
+            f"(<t:{release_timestamp}:R>)",
+            mention_author=False,
+            allowed_mentions=disnake.AllowedMentions(
+                everyone=False,
+                roles=False,
+                users=True,
+                replied_user=False,
+            ),
+        )
+
+    except disnake.Forbidden:
+        await message.reply(
+            "❌ Discord запретил выдать роль. "
+            "Проверь право **Управлять ролями**, "
+            "иерархию ролей бота и нарушителя.",
+            mention_author=False,
+        )
+
+    except disnake.HTTPException as e:
+        logger.error(
+            f"Ошибка Discord при выдаче роли `Спит`: {e}",
+            exc_info=True,
+        )
+
+        await message.reply(
+            f"❌ Discord вернул ошибку при выдаче роли: "
+            f"`{str(e)[:250]}`",
+            mention_author=False,
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Неожиданная ошибка команды темницы: {e}",
+            exc_info=True,
+        )
+
+        await message.reply(
+            "❌ При выполнении команды произошла "
+            "непредвиденная ошибка.",
+            mention_author=False,
+        )
 
 # ============================================================================
 # 🛡️ СЛЭШ-КОМАНДА: /наёмник
