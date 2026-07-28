@@ -7755,9 +7755,14 @@ async def slash_count_posts(
         description="Конец включительно: ДД.ММ.ГГ или ДД.ММ.ГГГГ",
     ),
 ):
+    # Пустой вызов показывает публичный FAQ в канале.
     if пользователь is None and слово is None and с_даты is None and по_дату is None:
-        await interaction.response.send_message(embed=pc_posts_faq(), ephemeral=True)
+        await interaction.response.send_message(
+            embed=pc_posts_faq(),
+            ephemeral=False,
+        )
         return
+
     if not interaction.guild:
         await interaction.response.send_message(
             "❌ Команда серверная. Искать все серверные каналы из лички — замысел эффектный, но бесполезный.",
@@ -7768,7 +7773,8 @@ async def slash_count_posts(
     allowed_roles = PC_STORE.values(interaction.guild.id, "roles")
     if not pc_can_count(interaction, allowed_roles):
         await interaction.response.send_message(
-            "❌ Нужны права администратора или роль из `/роли_подсчёта`. Самоназначение полномочий через поле команды не предусмотрено.",
+            "❌ Нужны права администратора или роль из `/роли_подсчёта`. "
+            "Самоназначение полномочий через поле команды не предусмотрено.",
             ephemeral=True,
         )
         return
@@ -7782,10 +7788,13 @@ async def slash_count_posts(
         missing.append("с_даты")
     if not по_дату or not по_дату.strip():
         missing.append("по_дату")
+
     if missing:
         await interaction.response.send_message(
-            "❌ Не заполнены поля: " + ", ".join(f"`{name}`" for name in missing) +
-            ". Discord пока не извлекает недостающие данные из силы намерения. Пустой вызов показывает FAQ.",
+            "❌ Не заполнены поля: "
+            + ", ".join(f"`{name}`" for name in missing)
+            + ". Discord пока не извлекает недостающие данные из силы намерения. "
+              "Пустой вызов показывает FAQ.",
             ephemeral=True,
         )
         return
@@ -7794,7 +7803,8 @@ async def slash_count_posts(
         period = pc_parse_period(с_даты, по_дату)
     except PCDateError as exc:
         await interaction.response.send_message(
-            "❌ Дата оформлена так, будто календарь должен догадаться сам. Используй `ДД.ММ.ГГ` или `ДД.ММ.ГГГГ`. "
+            "❌ Дата оформлена так, будто календарь должен догадаться сам. "
+            "Используй `ДД.ММ.ГГ` или `ДД.ММ.ГГГГ`. "
             f"Завышать разрешено только день конечной даты. Причина: `{exc}`.",
             ephemeral=True,
         )
@@ -7802,12 +7812,14 @@ async def slash_count_posts(
 
     families = pc_template_mode(слово)
     word_pattern = None
+
     if families is None:
         try:
             word_pattern = pc_word_pattern(слово)
         except ValueError:
             await interaction.response.send_message(
-                "❌ После удаления Discord-разметки поле «слово» оказалось пустым. Минимализм впечатляет, искать нечего.",
+                "❌ После удаления Discord-разметки поле «слово» оказалось пустым. "
+                "Минимализм впечатляет, искать нечего.",
                 ephemeral=True,
             )
             return
@@ -7815,61 +7827,128 @@ async def slash_count_posts(
     category_ids = PC_STORE.values(interaction.guild.id, "categories")
     if not category_ids:
         await interaction.response.send_message(
-            "❌ Категории не настроены. Владелец должен заполнить `/категории_подсчёта`; бот не назначает себе пространство поиска самостоятельно.",
+            "❌ Категории не настроены. Владелец должен заполнить "
+            "`/категории_подсчёта`; бот не назначает себе пространство "
+            "поиска самостоятельно.",
             ephemeral=True,
         )
         return
 
-    await interaction.response.defer(ephemeral=True)
+    # Публичный defer: дальнейшие edit_original_response редактируют
+    # одно обычное сообщение, видимое всем в канале.
+    await interaction.response.defer(ephemeral=False)
     started = time.monotonic()
+
+    mode_label = (
+        ", ".join(PC_LABELS[family] for family in families)
+        if families
+        else f"слово/фраза `{слово}`"
+    )
+
+    # Первый публичный статус появляется сразу.
+    await interaction.edit_original_response(
+        content=(
+            "🔎 **Подготавливаю подсчёт сообщений**\n"
+            f"Пользователь: {пользователь.mention}\n"
+            f"Режим: {mode_label}\n"
+            f"Период: `{period.start_date:%d.%m.%Y}` — "
+            f"`{period.end_date:%d.%m.%Y}` включительно, МСК.\n"
+            "Собираю текстовые каналы, форумы, медиаканалы и ветки "
+            "из настроенных категорий…"
+        ),
+        embed=None,
+    )
+
     try:
-        targets, discovery_errors = await pc_collect_targets(interaction.guild, category_ids)
+        targets, discovery_errors = await pc_collect_targets(
+            interaction.guild,
+            category_ids,
+        )
     except Exception as exc:
         logger.error("Ошибка сбора каналов: %s", exc, exc_info=True)
         await interaction.edit_original_response(
-            content=f"❌ Получить каналы не удалось. Discord API внёс вклад в происходящее: `{str(exc)[:300]}`"
+            content=(
+                "❌ Получить каналы не удалось. Discord API внёс вклад "
+                f"в происходящее: `{str(exc)[:300]}`"
+            ),
+            embed=None,
         )
         return
 
     if not targets:
         await interaction.edit_original_response(
-            content="❌ В выбранных категориях нет доступных текстовых каналов, форумов или веток. Пустоту считать можно, но результат заранее известен."
+            content=(
+                "❌ В выбранных категориях нет доступных текстовых каналов, "
+                "форумов или веток. Пустоту считать можно, но результат "
+                "заранее известен."
+            ),
+            embed=None,
         )
         return
 
-    mode_label = (
-        ", ".join(PC_LABELS[family] for family in families)
-        if families else f"слово/фраза `{слово}`"
+    await interaction.edit_original_response(
+        content=(
+            "🔎 **Подсчёт сообщений начат**\n"
+            f"Пользователь: {пользователь.mention}\n"
+            f"Режим: {mode_label}\n"
+            f"Период: `{period.start_date:%d.%m.%Y}` — "
+            f"`{period.end_date:%d.%m.%Y}` включительно, МСК.\n"
+            f"Каналов и веток: `{len(targets)}`.\n"
+            f"Прогресс: `0/{len(targets)}`.\n"
+            "Проверено сообщений: `0`.\n"
+            "Подходящих сообщений пока: `0`."
+        ),
+        embed=None,
     )
-    await interaction.edit_original_response(content=(
-        f"🔎 Считаю сообщения {пользователь.mention}; режим: {mode_label}.\n"
-        f"Период: `{period.start_date:%d.%m.%Y}` — `{period.end_date:%d.%m.%Y}` включительно, МСК.\n"
-        f"Каналов и веток: `{len(targets)}`."
-    ))
 
     semaphore = asyncio.Semaphore(PC_CONCURRENCY)
-    tasks = [asyncio.create_task(pc_scan_target(
-        target,
-        пользователь.id,
-        word_pattern,
-        families,
-        period,
-        semaphore,
-    )) for target in targets]
+    tasks = [
+        asyncio.create_task(
+            pc_scan_target(
+                target,
+                пользователь.id,
+                word_pattern,
+                families,
+                period,
+                semaphore,
+            )
+        )
+        for target in targets
+    ]
 
     results = []
     last_progress = time.monotonic()
+
     for completed, task in enumerate(asyncio.as_completed(tasks), start=1):
         results.append(await task)
         now = time.monotonic()
+
         if now - last_progress >= PC_PROGRESS_SECONDS:
+            current_scanned = sum(item["scanned"] for item in results)
+            current_matched = sum(item["matched"] for item in results)
+            current_failed = sum(1 for item in results if item["error"])
+            elapsed_now = now - started
+
             try:
-                await interaction.edit_original_response(content=(
-                    f"🔎 Подсчёт идёт: `{completed}/{len(tasks)}` каналов и веток.\n"
-                    f"Подходящих сообщений пока: `{sum(x['matched'] for x in results)}`."
-                ))
-            except Exception:
-                pass
+                await interaction.edit_original_response(
+                    content=(
+                        "🔎 **Подсчёт сообщений идёт**\n"
+                        f"Пользователь: {пользователь.mention}\n"
+                        f"Режим: {mode_label}\n"
+                        f"Прогресс: `{completed}/{len(tasks)}` каналов и веток.\n"
+                        f"Проверено сообщений: `{current_scanned}`.\n"
+                        f"Подходящих сообщений пока: `{current_matched}`.\n"
+                        f"Ошибок чтения пока: `{current_failed}`.\n"
+                        f"Прошло времени: `{elapsed_now:.1f} сек.`"
+                    ),
+                    embed=None,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Не удалось обновить прогресс /подсчёт_постов: %s",
+                    exc,
+                )
+
             last_progress = now
 
     matched = sum(item["matched"] for item in results)
@@ -7881,78 +7960,176 @@ async def slash_count_posts(
         title="📊 Подсчёт постов завершён",
         color=0xFFAA00 if failed else 0x4CAF50,
     )
-    embed.add_field(name="Пользователь", value=f"{пользователь.mention}\n`{пользователь.id}`", inline=True)
-    embed.add_field(name="Режим", value=f"`{слово[:200]}`", inline=True)
+    embed.add_field(
+        name="Пользователь",
+        value=f"{пользователь.mention}\n`{пользователь.id}`",
+        inline=True,
+    )
+    embed.add_field(
+        name="Режим",
+        value=f"`{слово[:200]}`",
+        inline=True,
+    )
     embed.add_field(
         name="Период (МСК)",
-        value=f"`{period.start_date:%d.%m.%Y}` — `{period.end_date:%d.%m.%Y}` включительно",
+        value=(
+            f"`{period.start_date:%d.%m.%Y}` — "
+            f"`{period.end_date:%d.%m.%Y}` включительно"
+        ),
         inline=False,
     )
-    embed.add_field(name="Найдено сообщений", value=f"**{matched}**", inline=True)
-    embed.add_field(name="Проверено сообщений", value=f"`{scanned}`", inline=True)
-    embed.add_field(name="Каналы/ветки", value=f"`{len(results) - len(failed)}/{len(results)}` успешно", inline=True)
+    embed.add_field(
+        name="Найдено сообщений",
+        value=f"**{matched}**",
+        inline=True,
+    )
+    embed.add_field(
+        name="Проверено сообщений",
+        value=f"`{scanned}`",
+        inline=True,
+    )
+    embed.add_field(
+        name="Каналы/ветки",
+        value=f"`{len(results) - len(failed)}/{len(results)}` успешно",
+        inline=True,
+    )
 
     report = None
     filename = "post-count-report.txt"
+
     if families:
         stats = pc_merge_stats(results, families)
+
         for family in families:
             data = stats[family]
             embed.add_field(
-                name=f"{PC_LABELS[family]} — сообщений `{data['messages']}`, меток `{data['occurrences']}`",
+                name=(
+                    f"{PC_LABELS[family]} — сообщений "
+                    f"`{data['messages']}`, меток `{data['occurrences']}`"
+                ),
                 value=pc_family_preview(data),
                 inline=False,
             )
-        report = pc_full_report(пользователь, period, stats, families, matched, scanned)
-        filename = f"post-templates-{пользователь.id}-{period.start_date:%Y%m%d}-{period.end_date:%Y%m%d}.txt"
+
+        report = pc_full_report(
+            пользователь,
+            period,
+            stats,
+            families,
+            matched,
+            scanned,
+        )
+        filename = (
+            f"post-templates-{пользователь.id}-"
+            f"{period.start_date:%Y%m%d}-{period.end_date:%Y%m%d}.txt"
+        )
     else:
         top = sorted(
             (item for item in results if item["matched"]),
             key=lambda item: item["matched"],
             reverse=True,
         )[:10]
-        top_text = "\n".join(f"• `{item['matched']}` — {item['label']}" for item in top) or "Совпадений нет."
-        embed.add_field(name="Где найдено больше всего", value=top_text[:1024], inline=False)
+        top_text = "\n".join(
+            f"• `{item['matched']}` — {item['label']}"
+            for item in top
+        ) or "Совпадений нет."
+        embed.add_field(
+            name="Где найдено больше всего",
+            value=top_text[:1024],
+            inline=False,
+        )
 
     notes = []
+
     if period.end_was_clamped:
         notes.append(
-            f"Конечный день `{period.requested_end_day}` не существует; использован `{period.actual_end_day}`. Календарь победил импровизацию."
+            f"Конечный день `{period.requested_end_day}` не существует; "
+            f"использован `{period.actual_end_day}`. "
+            "Календарь победил импровизацию."
         )
-    if discovery_errors:
-        notes.append(f"Ошибок при поиске веток: `{len(discovery_errors)}`.")
-    if failed:
-        preview = "; ".join(f"{item['label']}: {item['error']}" for item in failed[:5])
-        notes.append(f"Не прочитано целей: `{len(failed)}`. {preview}")
-    if families:
-        notes.append("Полный список групп и всех исходных вариаций приложен TXT-файлом.")
-    notes.append(f"Время выполнения: `{elapsed:.1f} сек.`")
-    embed.add_field(name="Примечания", value="\n".join(notes)[:1024], inline=False)
-    embed.set_footer(text=(
-        "Шаблонный режим: сообщение считается один раз; несколько меток внутри него считаются отдельно."
-        if families else "Одно сообщение считается один раз, даже если слово повторено несколько раз."
-    ))
 
+    if discovery_errors:
+        notes.append(
+            f"Ошибок при поиске веток: `{len(discovery_errors)}`."
+        )
+
+    if failed:
+        preview = "; ".join(
+            f"{item['label']}: {item['error']}"
+            for item in failed[:5]
+        )
+        notes.append(
+            f"Не прочитано целей: `{len(failed)}`. {preview}"
+        )
+
+    if families:
+        notes.append(
+            "Полный список групп и всех исходных вариаций "
+            "приложен TXT-файлом."
+        )
+
+    notes.append(f"Время выполнения: `{elapsed:.1f} сек.`")
+
+    embed.add_field(
+        name="Примечания",
+        value="\n".join(notes)[:1024],
+        inline=False,
+    )
+    embed.set_footer(
+        text=(
+            "Шаблонный режим: сообщение считается один раз; "
+            "несколько меток внутри него считаются отдельно."
+            if families
+            else (
+                "Одно сообщение считается один раз, даже если слово "
+                "повторено несколько раз."
+            )
+        )
+    )
+
+    # То же публичное сообщение с прогрессом превращается в финальную сводку.
     try:
-        await interaction.edit_original_response(content=None, embed=embed)
-        if report:
+        await interaction.edit_original_response(
+            content=None,
+            embed=embed,
+        )
+    except Exception as exc:
+        logger.error(
+            "Не удалось отредактировать публичный итог /подсчёт_постов: %s",
+            exc,
+            exc_info=True,
+        )
+        try:
+            await interaction.channel.send(
+                content=interaction.author.mention,
+                embed=embed,
+            )
+        except Exception:
+            pass
+        return
+
+    # Полный отчёт отправляется отдельным обычным сообщением в том же канале.
+    if report:
+        try:
             await interaction.followup.send(
                 content="📎 Полный отчёт по всем найденным вариациям:",
                 file=pc_txt_file(report, filename),
-                ephemeral=True,
+                ephemeral=False,
             )
-    except Exception:
-        try:
-            kwargs = {"embed": embed}
-            if report:
-                kwargs["file"] = pc_txt_file(report, filename)
-            await interaction.author.send(**kwargs)
-        except Exception:
+        except Exception as exc:
+            logger.error(
+                "Не удалось отправить публичный TXT-отчёт: %s",
+                exc,
+                exc_info=True,
+            )
             try:
-                kwargs = {"content": interaction.author.mention, "embed": embed}
-                if report:
-                    kwargs["file"] = pc_txt_file(report, filename)
-                await interaction.channel.send(**kwargs)
+                await interaction.channel.send(
+                    content=(
+                        f"{interaction.author.mention}\n"
+                        "📎 Полный отчёт по всем найденным вариациям:"
+                    ),
+                    file=pc_txt_file(report, filename),
+                )
             except Exception:
                 pass
 
@@ -7962,7 +8139,6 @@ logger.info(
     PC_SETTINGS_FILE,
 )
 # ============================ КОНЕЦ БЛОКА ============================
-
 
 # ============================================================================
 # СОБЫТИЯ
