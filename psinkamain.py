@@ -6811,11 +6811,20 @@ async def slash_mercenary(
 # 📊 ПОДСЧЁТ ПОСТОВ — вставить сразу после:
 # bot = commands.Bot(command_prefix="!", intents=intents)
 # ============================================================================
-
 PC_MOSCOW_TZ = timezone(timedelta(hours=3), name="MSK")
 PC_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "post_count_settings.json")
 PC_CONCURRENCY = max(1, min(safe_int_env("POST_COUNT_CONCURRENCY", 3), 8))
 PC_PROGRESS_SECONDS = 8.0
+
+# Быстрый серверный поиск Discord:
+# https://discord.com/api/v10/guilds/{guild_id}/messages/search
+PC_SEARCH_API_BASE = "https://discord.com/api/v10"
+PC_SEARCH_CHANNEL_BATCH = 500
+PC_SEARCH_PAGE_LIMIT = 25
+PC_SEARCH_INDEX_RETRIES = 3
+PC_SEARCH_HTTP_RETRIES = 4
+PC_SEARCH_MAX_RETRY_WAIT = 15.0
+PC_DISCORD_EPOCH_MS = 1420070400000
 
 PC_DATE_RE = re.compile(r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{2}|\d{4})\s*$")
 PC_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
@@ -6851,6 +6860,14 @@ PC_MODE_ALIASES = {
 
 class PCDateError(ValueError):
     pass
+
+
+class PCSearchUnavailable(RuntimeError):
+    """Быстрый поиск Discord недоступен; нужно перейти на history()."""
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 class PCPeriod:
@@ -7359,9 +7376,9 @@ async def pc_collect_targets(guild: disnake.Guild, category_ids: Set[int]):
     return list(targets.values()), errors
 
 
-async def pc_scan_target(target, user_id, word_pattern, families, period, semaphore):
+def pc_empty_result(label, families):
     result = {
-        "label": pc_channel_label(target),
+        "label": label,
         "matched": 0,
         "scanned": 0,
         "error": None,
@@ -7372,6 +7389,59 @@ async def pc_scan_target(target, user_id, word_pattern, families, period, semaph
             family: {"messages": 0, "occurrences": 0, "groups": {}}
             for family in families
         }
+    return result
+
+
+def pc_apply_content(result, content, word_pattern, families):
+    """Проверяет одно сообщение уже выбранного пользователя."""
+    result["scanned"] += 1
+    content = content or ""
+
+    if families:
+        matches = pc_find_templates(content, families)
+        if not matches:
+            return
+
+        result["matched"] += 1
+        message_families = set()
+
+        for match in matches:
+            message_families.add(match.family)
+            family_data = result["families"][match.family]
+            family_data["occurrences"] += 1
+
+            group = family_data["groups"].setdefault(
+                match.payload_key,
+                {
+                    "canonical": match.canonical,
+                    "occurrences": 0,
+                    "exact": 0,
+                    "variants": {},
+                },
+            )
+            group["occurrences"] += 1
+
+            if match.exact_surface:
+                group["exact"] += 1
+            else:
+                group["variants"][match.raw_variant] = (
+                    group["variants"].get(match.raw_variant, 0) + 1
+                )
+
+        for family in message_families:
+            result["families"][family]["messages"] += 1
+
+    elif word_pattern.search(pc_normalize_text(content)):
+        result["matched"] += 1
+
+
+async def pc_scan_target(target, user_id, word_pattern, families, period, semaphore):
+    """
+    Резервный медленный путь через history().
+    В отличие от старой версии, scanned считает только сообщения нужного автора,
+    чтобы итог совпадал с быстрым Search Guild Messages.
+    """
+    result = pc_empty_result(pc_channel_label(target), families)
 
     async with semaphore:
         try:
@@ -7383,45 +7453,445 @@ async def pc_scan_target(target, user_id, word_pattern, families, period, semaph
             ):
                 if not (period.start_utc <= message.created_at < period.end_exclusive_utc):
                     continue
-                result["scanned"] += 1
                 if getattr(message.author, "id", None) != user_id:
                     continue
-                content = message.content or ""
 
-                if families:
-                    matches = pc_find_templates(content, families)
-                    if not matches:
-                        continue
-                    result["matched"] += 1
-                    message_families = set()
-                    for match in matches:
-                        message_families.add(match.family)
-                        family_data = result["families"][match.family]
-                        family_data["occurrences"] += 1
-                        group = family_data["groups"].setdefault(match.payload_key, {
-                            "canonical": match.canonical,
-                            "occurrences": 0,
-                            "exact": 0,
-                            "variants": {},
-                        })
-                        group["occurrences"] += 1
-                        if match.exact_surface:
-                            group["exact"] += 1
-                        else:
-                            group["variants"][match.raw_variant] = (
-                                group["variants"].get(match.raw_variant, 0) + 1
-                            )
-                    for family in message_families:
-                        result["families"][family]["messages"] += 1
-                elif word_pattern.search(pc_normalize_text(content)):
-                    result["matched"] += 1
+                pc_apply_content(
+                    result,
+                    message.content or "",
+                    word_pattern,
+                    families,
+                )
+
         except disnake.Forbidden:
             result["error"] = "нет доступа к истории"
         except disnake.HTTPException as exc:
             result["error"] = f"Discord API: {exc}"
         except Exception as exc:
             result["error"] = f"{type(exc).__name__}: {exc}"
+
     return result
+
+
+def pc_datetime_to_snowflake(value, high=False):
+    """
+    Создаёт Snowflake-границу из UTC datetime.
+    high=True ставит все младшие 22 бита, то есть конец миллисекунды.
+    """
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    value = value.astimezone(timezone.utc)
+    milliseconds = int(value.timestamp() * 1000)
+    snowflake = max(0, milliseconds - PC_DISCORD_EPOCH_MS) << 22
+    if high:
+        snowflake |= (1 << 22) - 1
+    return snowflake
+
+
+def pc_api_timestamp(raw):
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def pc_chunks(values, size):
+    for index in range(0, len(values), size):
+        yield values[index:index + size]
+
+
+def pc_search_headers():
+    token = (os.getenv("DISCORD_TOKEN") or "").strip()
+    if not token:
+        raise PCSearchUnavailable("DISCORD_TOKEN не найден")
+
+    authorization = token if token.lower().startswith("bot ") else f"Bot {token}"
+    return {
+        "Authorization": authorization,
+        "User-Agent": "DiscordBot (https://github.com/LuwnFM/psinka-bot, post-counter)",
+    }
+
+
+async def pc_search_request(session, guild_id, params, search_info):
+    """
+    Один HTTP-запрос к Search Guild Messages.
+    Обрабатывает индексацию (202), rate limit (429) и временные 5xx.
+    """
+    url = f"{PC_SEARCH_API_BASE}/guilds/{guild_id}/messages/search"
+    index_attempts = 0
+    http_attempts = 0
+
+    while True:
+        try:
+            async with session.get(url, params=params) as response:
+                search_info["api_requests"] += 1
+
+                try:
+                    data = await response.json(content_type=None)
+                except Exception:
+                    body = await response.text()
+                    data = {"message": body[:500]}
+
+                if response.status == 200:
+                    if not isinstance(data, dict):
+                        raise PCSearchUnavailable(
+                            "Discord Search вернул неожиданный формат",
+                            status=200,
+                        )
+                    return data
+
+                if response.status == 202:
+                    index_attempts += 1
+                    search_info["index_waits"] += 1
+                    retry_after = data.get("retry_after", 0) if isinstance(data, dict) else 0
+                    try:
+                        retry_after = float(retry_after)
+                    except (TypeError, ValueError):
+                        retry_after = 0.0
+                    retry_after = max(1.0, min(retry_after or 1.0, PC_SEARCH_MAX_RETRY_WAIT))
+
+                    if index_attempts > PC_SEARCH_INDEX_RETRIES:
+                        raise PCSearchUnavailable(
+                            "поисковый индекс Discord ещё не готов после повторных попыток",
+                            status=202,
+                        )
+
+                    await asyncio.sleep(retry_after)
+                    continue
+
+                if response.status == 429:
+                    http_attempts += 1
+                    retry_after = data.get("retry_after", 1) if isinstance(data, dict) else 1
+                    try:
+                        retry_after = float(retry_after)
+                    except (TypeError, ValueError):
+                        retry_after = 1.0
+                    retry_after = max(0.5, min(retry_after, PC_SEARCH_MAX_RETRY_WAIT))
+
+                    if http_attempts > PC_SEARCH_HTTP_RETRIES:
+                        raise PCSearchUnavailable(
+                            "Discord Search слишком долго ограничивает частоту запросов",
+                            status=429,
+                        )
+
+                    await asyncio.sleep(retry_after)
+                    continue
+
+                if 500 <= response.status <= 599:
+                    http_attempts += 1
+                    if http_attempts <= PC_SEARCH_HTTP_RETRIES:
+                        await asyncio.sleep(min(2 ** (http_attempts - 1), 8))
+                        continue
+
+                message = (
+                    data.get("message")
+                    if isinstance(data, dict)
+                    else str(data)
+                )
+                raise PCSearchUnavailable(
+                    f"Discord Search ответил HTTP {response.status}: {message}",
+                    status=response.status,
+                )
+
+        except PCSearchUnavailable:
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            http_attempts += 1
+            if http_attempts <= PC_SEARCH_HTTP_RETRIES:
+                await asyncio.sleep(min(2 ** (http_attempts - 1), 8))
+                continue
+            raise PCSearchUnavailable(
+                f"сетевая ошибка Discord Search: {type(exc).__name__}: {exc}"
+            ) from exc
+
+
+def pc_flatten_search_messages(data):
+    """
+    Discord возвращает nested array: [[message], [message], ...].
+    На случай изменения/старого формата поддерживаем и плоский массив.
+    """
+    flattened = []
+    raw_groups = data.get("messages", []) if isinstance(data, dict) else []
+
+    if not isinstance(raw_groups, list):
+        return flattened
+
+    for group in raw_groups:
+        if isinstance(group, dict):
+            flattened.append(group)
+        elif isinstance(group, list):
+            flattened.extend(item for item in group if isinstance(item, dict))
+
+    return flattened
+
+
+async def pc_search_batch(
+    session,
+    guild_id,
+    batch_targets,
+    user_id,
+    word_pattern,
+    families,
+    period,
+    search_info,
+    on_page=None,
+):
+    """
+    Быстро получает только сообщения указанного пользователя по группе
+    максимум из 500 каналов/веток.
+
+    Если пакет не удаётся дочитать полностью, результаты пакета не используются:
+    вызывающий код откатывает весь пакет на history(), поэтому дублей не будет.
+    """
+    target_map = {int(target.id): target for target in batch_targets}
+    local_results = {
+        channel_id: pc_empty_result(pc_channel_label(target), families)
+        for channel_id, target in target_map.items()
+    }
+
+    # min_id означает strictly after, поэтому ставим границу на единицу ниже
+    # первого Snowflake начальной миллисекунды.
+    min_id = max(0, pc_datetime_to_snowflake(period.start_utc) - 1)
+
+    # max_id означает strictly before. Snowflake начала следующего дня
+    # идеально задаёт нашу end-exclusive границу.
+    cursor_max_id = pc_datetime_to_snowflake(period.end_exclusive_utc)
+
+    seen_message_ids = set()
+    batch_pages = 0
+
+    while cursor_max_id > min_id:
+        params = [
+            ("limit", str(PC_SEARCH_PAGE_LIMIT)),
+            ("author_id", str(user_id)),
+            ("min_id", str(min_id)),
+            ("max_id", str(cursor_max_id)),
+            ("sort_by", "timestamp"),
+            ("sort_order", "desc"),
+            ("include_nsfw", "true"),
+        ]
+        params.extend(
+            ("channel_id", str(channel_id))
+            for channel_id in target_map
+        )
+
+        data = await pc_search_request(
+            session,
+            guild_id,
+            params,
+            search_info,
+        )
+        page_messages = pc_flatten_search_messages(data)
+        batch_pages += 1
+        search_info["search_pages"] += 1
+
+        if not page_messages:
+            break
+
+        returned_ids = []
+
+        for raw_message in page_messages:
+            try:
+                message_id = int(raw_message.get("id"))
+                channel_id = int(raw_message.get("channel_id"))
+                author_id = int((raw_message.get("author") or {}).get("id"))
+            except (TypeError, ValueError):
+                continue
+
+            returned_ids.append(message_id)
+
+            if message_id in seen_message_ids:
+                continue
+            seen_message_ids.add(message_id)
+
+            # Защита от неожиданного контекста/неверной фильтрации API.
+            if channel_id not in target_map or author_id != user_id:
+                continue
+
+            created_at = pc_api_timestamp(raw_message.get("timestamp"))
+            if created_at is not None and not (
+                period.start_utc <= created_at < period.end_exclusive_utc
+            ):
+                continue
+
+            pc_apply_content(
+                local_results[channel_id],
+                raw_message.get("content") or "",
+                word_pattern,
+                families,
+            )
+
+        if on_page is not None:
+            await on_page(
+                list(local_results.values()),
+                {
+                    "batch_pages": batch_pages,
+                    "cursor_max_id": cursor_max_id,
+                    "total_results_hint": data.get("total_results"),
+                },
+            )
+
+        # Документация запрещает считать короткую страницу концом пагинации.
+        # Двигаемся по самому старому реально возвращённому Snowflake.
+        if not returned_ids:
+            break
+
+        next_cursor = min(returned_ids)
+        if next_cursor <= min_id or next_cursor >= cursor_max_id:
+            break
+
+        cursor_max_id = next_cursor
+
+    return list(local_results.values())
+
+
+async def pc_search_or_fallback(
+    guild,
+    targets,
+    user_id,
+    word_pattern,
+    families,
+    period,
+    progress_callback=None,
+):
+    """
+    Основной гибридный механизм:
+    1. Search Guild Messages фильтрует по author_id, датам и channel_id.
+    2. Каналы делятся на пакеты по 500.
+    3. Любой недочитанный пакет целиком уходит в надёжный history()-fallback.
+    """
+    search_info = {
+        "method": "discord_search",
+        "api_requests": 0,
+        "search_pages": 0,
+        "index_waits": 0,
+        "search_batches": 0,
+        "completed_search_batches": 0,
+        "fallback_targets": 0,
+        "fallback_completed": 0,
+        "search_errors": [],
+    }
+
+    target_batches = list(pc_chunks(list(targets), PC_SEARCH_CHANNEL_BATCH))
+    search_info["search_batches"] = len(target_batches)
+
+    completed_results = []
+    fallback_targets = []
+
+    try:
+        headers = pc_search_headers()
+    except PCSearchUnavailable as exc:
+        headers = None
+        fallback_targets = list(targets)
+        search_info["search_errors"].append(str(exc))
+
+    if headers is not None:
+        timeout = aiohttp.ClientTimeout(total=60)
+
+        async with aiohttp.ClientSession(
+            headers=headers,
+            timeout=timeout,
+        ) as session:
+            for batch_number, batch_targets in enumerate(target_batches, start=1):
+                temporary_results = []
+
+                async def on_page(local_results, page_info):
+                    nonlocal temporary_results
+                    temporary_results = local_results
+
+                    if progress_callback is not None:
+                        await progress_callback(
+                            {
+                                **search_info,
+                                "phase": "search",
+                                "current_batch": batch_number,
+                                "current_batch_pages": page_info["batch_pages"],
+                            },
+                            completed_results + temporary_results,
+                        )
+
+                try:
+                    batch_results = await pc_search_batch(
+                        session=session,
+                        guild_id=guild.id,
+                        batch_targets=batch_targets,
+                        user_id=user_id,
+                        word_pattern=word_pattern,
+                        families=families,
+                        period=period,
+                        search_info=search_info,
+                        on_page=on_page,
+                    )
+                    completed_results.extend(batch_results)
+                    search_info["completed_search_batches"] += 1
+
+                except PCSearchUnavailable as exc:
+                    fallback_targets.extend(batch_targets)
+                    search_info["search_errors"].append(
+                        f"пакет {batch_number}: {exc}"
+                    )
+                    logger.warning(
+                        "Discord Search недоступен для пакета %s/%s, "
+                        "перехожу на history(): %s",
+                        batch_number,
+                        len(target_batches),
+                        exc,
+                    )
+
+                if progress_callback is not None:
+                    await progress_callback(
+                        {
+                            **search_info,
+                            "phase": "search",
+                            "current_batch": batch_number,
+                            "current_batch_pages": 0,
+                        },
+                        completed_results,
+                    )
+
+    if fallback_targets:
+        search_info["fallback_targets"] = len(fallback_targets)
+        search_info["method"] = (
+            "history_fallback"
+            if not completed_results
+            else "discord_search+history_fallback"
+        )
+
+        semaphore = asyncio.Semaphore(PC_CONCURRENCY)
+        tasks = [
+            asyncio.create_task(
+                pc_scan_target(
+                    target,
+                    user_id,
+                    word_pattern,
+                    families,
+                    period,
+                    semaphore,
+                )
+            )
+            for target in fallback_targets
+        ]
+
+        fallback_results = []
+
+        for completed, task in enumerate(asyncio.as_completed(tasks), start=1):
+            fallback_results.append(await task)
+            search_info["fallback_completed"] = completed
+
+            if progress_callback is not None:
+                await progress_callback(
+                    {
+                        **search_info,
+                        "phase": "fallback",
+                    },
+                    completed_results + fallback_results,
+                )
+
+        completed_results.extend(fallback_results)
+
+    return completed_results, search_info
 
 
 def pc_merge_stats(results, families):
@@ -7487,7 +7957,7 @@ def pc_full_report(user, period, stats, families, matched, scanned):
         f"Пользователь: {user} ({user.id})",
         f"Период МСК: {period.start_date:%d.%m.%Y} — {period.end_date:%d.%m.%Y} включительно",
         f"Сообщений хотя бы с одним шаблоном: {matched}",
-        f"Проверено сообщений: {scanned}",
+        f"Проверено сообщений пользователя: {scanned}",
         "",
     ]
     for family in families:
@@ -7564,7 +8034,7 @@ def pc_roles_faq():
 def pc_posts_faq():
     return pc_faq(
         "FAQ: /подсчёт_постов",
-        "Считает сообщения выбранного пользователя во всех доступных каналах и ветках настроенных категорий.",
+        "Считает сообщения выбранного пользователя во всех доступных каналах и ветках настроенных категорий. Сначала использует быстрый серверный поиск Discord по автору; при его недоступности автоматически возвращается к обычному обходу истории.",
         [
             ("пользователь", "Участник, чьи сообщения нужно считать."),
             ("слово — обычный режим", "Слово или фраза. Регистр и оформление `||`, `**`, `__`, `~~`, обратные кавычки игнорируются. Сообщение считается один раз независимо от повторений."),
@@ -7572,7 +8042,7 @@ def pc_posts_faq():
             ("Допуски шаблонов", "Игнорируются регистр, `#`, дефисы, подчёркивания, скобки и Discord-разметка. В служебном префиксе разрешена одна вставка, потеря, замена символа или перестановка соседних букв."),
             ("с_даты", "Начало включительно: `ДД.ММ.ГГ` или `ДД.ММ.ГГГГ`. Начальная дата обязана существовать."),
             ("по_дату", "Конец включительно. Завышенный день заменяется последним днём месяца: `99.06.2026` → `30.06.2026`."),
-            ("Результат шаблонов", "Показывает сообщения и метки каждого семейства, группы по хвостам, все найденные опечатки/вариации и прикладывает полный TXT."),
+            ("Результат шаблонов", "Показывает сообщения и метки каждого семейства, группы по хвостам, все найденные опечатки/вариации и прикладывает полный TXT. Поле «проверено» означает число сообщений именно выбранного пользователя, полученных через быстрый поиск или резервный обход."),
         ],
     )
 
@@ -7765,7 +8235,8 @@ async def slash_count_posts(
 
     if not interaction.guild:
         await interaction.response.send_message(
-            "❌ Команда серверная. Искать все серверные каналы из лички — замысел эффектный, но бесполезный.",
+            "❌ Команда серверная. Искать все серверные каналы из лички — "
+            "замысел эффектный, но бесполезный.",
             ephemeral=True,
         )
         return
@@ -7793,8 +8264,8 @@ async def slash_count_posts(
         await interaction.response.send_message(
             "❌ Не заполнены поля: "
             + ", ".join(f"`{name}`" for name in missing)
-            + ". Discord пока не извлекает недостающие данные из силы намерения. "
-              "Пустой вызов показывает FAQ.",
+            + ". Discord пока не извлекает недостающие данные из силы "
+              "намерения. Пустой вызов показывает FAQ.",
             ephemeral=True,
         )
         return
@@ -7818,8 +8289,8 @@ async def slash_count_posts(
             word_pattern = pc_word_pattern(слово)
         except ValueError:
             await interaction.response.send_message(
-                "❌ После удаления Discord-разметки поле «слово» оказалось пустым. "
-                "Минимализм впечатляет, искать нечего.",
+                "❌ После удаления Discord-разметки поле «слово» оказалось "
+                "пустым. Минимализм впечатляет, искать нечего.",
                 ephemeral=True,
             )
             return
@@ -7834,8 +8305,7 @@ async def slash_count_posts(
         )
         return
 
-    # Публичный defer: дальнейшие edit_original_response редактируют
-    # одно обычное сообщение, видимое всем в канале.
+    # Публичный defer: статус, прогресс и итог видны всему каналу.
     await interaction.response.defer(ephemeral=False)
     started = time.monotonic()
 
@@ -7845,7 +8315,6 @@ async def slash_count_posts(
         else f"слово/фраза `{слово}`"
     )
 
-    # Первый публичный статус появляется сразу.
     await interaction.edit_original_response(
         content=(
             "🔎 **Подготавливаю подсчёт сообщений**\n"
@@ -7886,75 +8355,139 @@ async def slash_count_posts(
         )
         return
 
+    batches_total = (
+        len(targets) + PC_SEARCH_CHANNEL_BATCH - 1
+    ) // PC_SEARCH_CHANNEL_BATCH
+
     await interaction.edit_original_response(
         content=(
-            "🔎 **Подсчёт сообщений начат**\n"
+            "⚡ **Быстрый подсчёт сообщений начат**\n"
             f"Пользователь: {пользователь.mention}\n"
             f"Режим: {mode_label}\n"
             f"Период: `{period.start_date:%d.%m.%Y}` — "
             f"`{period.end_date:%d.%m.%Y}` включительно, МСК.\n"
             f"Каналов и веток: `{len(targets)}`.\n"
-            f"Прогресс: `0/{len(targets)}`.\n"
-            "Проверено сообщений: `0`.\n"
-            "Подходящих сообщений пока: `0`."
+            f"Пакетов Discord Search API: `{batches_total}`.\n"
+            "Discord сначала отдаёт только сообщения выбранного пользователя."
         ),
         embed=None,
     )
 
-    semaphore = asyncio.Semaphore(PC_CONCURRENCY)
-    tasks = [
-        asyncio.create_task(
-            pc_scan_target(
-                target,
-                пользователь.id,
-                word_pattern,
-                families,
-                period,
-                semaphore,
-            )
-        )
-        for target in targets
-    ]
+    last_progress = 0.0
 
-    results = []
-    last_progress = time.monotonic()
+    async def update_progress(search_state, partial_results, force=False):
+        nonlocal last_progress
 
-    for completed, task in enumerate(asyncio.as_completed(tasks), start=1):
-        results.append(await task)
         now = time.monotonic()
+        if not force and now - last_progress < PC_PROGRESS_SECONDS:
+            return
 
-        if now - last_progress >= PC_PROGRESS_SECONDS:
-            current_scanned = sum(item["scanned"] for item in results)
-            current_matched = sum(item["matched"] for item in results)
-            current_failed = sum(1 for item in results if item["error"])
-            elapsed_now = now - started
+        current_scanned = sum(
+            item.get("scanned", 0)
+            for item in partial_results
+        )
+        current_matched = sum(
+            item.get("matched", 0)
+            for item in partial_results
+        )
+        current_failed = sum(
+            1 for item in partial_results
+            if item.get("error")
+        )
+        elapsed_now = now - started
+        phase = search_state.get("phase")
 
-            try:
-                await interaction.edit_original_response(
-                    content=(
-                        "🔎 **Подсчёт сообщений идёт**\n"
-                        f"Пользователь: {пользователь.mention}\n"
-                        f"Режим: {mode_label}\n"
-                        f"Прогресс: `{completed}/{len(tasks)}` каналов и веток.\n"
-                        f"Проверено сообщений: `{current_scanned}`.\n"
-                        f"Подходящих сообщений пока: `{current_matched}`.\n"
-                        f"Ошибок чтения пока: `{current_failed}`.\n"
-                        f"Прошло времени: `{elapsed_now:.1f} сек.`"
-                    ),
-                    embed=None,
-                )
-            except Exception as exc:
-                logger.debug(
-                    "Не удалось обновить прогресс /подсчёт_постов: %s",
-                    exc,
-                )
+        if phase == "fallback":
+            content = (
+                "🛟 **Резервный обход истории идёт**\n"
+                f"Пользователь: {пользователь.mention}\n"
+                f"Режим: {mode_label}\n"
+                "Быстрый поиск не смог полностью обработать часть каналов, "
+                "поэтому бот дочитывает только их старым надёжным способом.\n"
+                f"Резервный прогресс: "
+                f"`{search_state.get('fallback_completed', 0)}/"
+                f"{search_state.get('fallback_targets', 0)}` каналов и веток.\n"
+                f"Сообщений пользователя проверено: `{current_scanned}`.\n"
+                f"Подходящих сообщений пока: `{current_matched}`.\n"
+                f"Ошибок чтения пока: `{current_failed}`.\n"
+                f"Запросов Search API: "
+                f"`{search_state.get('api_requests', 0)}`.\n"
+                f"Прошло времени: `{elapsed_now:.1f} сек.`"
+            )
+        else:
+            current_batch = search_state.get("current_batch", 0)
+            total_batches = search_state.get("search_batches", batches_total)
+            content = (
+                "⚡ **Discord ищет сообщения выбранного пользователя**\n"
+                f"Пользователь: {пользователь.mention}\n"
+                f"Режим: {mode_label}\n"
+                f"Пакет каналов: `{current_batch}/{total_batches}`.\n"
+                f"Завершено пакетов: "
+                f"`{search_state.get('completed_search_batches', 0)}/"
+                f"{total_batches}`.\n"
+                f"Страниц результатов: "
+                f"`{search_state.get('search_pages', 0)}`.\n"
+                f"Запросов API: `{search_state.get('api_requests', 0)}`.\n"
+                f"Ожиданий индекса: "
+                f"`{search_state.get('index_waits', 0)}`.\n"
+                f"Сообщений пользователя получено: `{current_scanned}`.\n"
+                f"Подходящих сообщений пока: `{current_matched}`.\n"
+                f"Прошло времени: `{elapsed_now:.1f} сек.`"
+            )
 
+        try:
+            await interaction.edit_original_response(
+                content=content,
+                embed=None,
+            )
             last_progress = now
+        except Exception as exc:
+            logger.debug(
+                "Не удалось обновить прогресс /подсчёт_постов: %s",
+                exc,
+            )
+
+    try:
+        results, search_info = await pc_search_or_fallback(
+            guild=interaction.guild,
+            targets=targets,
+            user_id=пользователь.id,
+            word_pattern=word_pattern,
+            families=families,
+            period=period,
+            progress_callback=update_progress,
+        )
+    except Exception as exc:
+        logger.error(
+            "Критическая ошибка гибридного подсчёта: %s",
+            exc,
+            exc_info=True,
+        )
+        await interaction.edit_original_response(
+            content=(
+                "❌ Подсчёт прерван внутренней ошибкой. Даже резервный путь "
+                f"не смог достойно закончить начатое: `{str(exc)[:300]}`"
+            ),
+            embed=None,
+        )
+        return
 
     matched = sum(item["matched"] for item in results)
     scanned = sum(item["scanned"] for item in results)
     failed = [item for item in results if item["error"]]
     elapsed = time.monotonic() - started
+
+    method_labels = {
+        "discord_search": "Discord Search API — фильтрация по автору",
+        "discord_search+history_fallback": (
+            "Discord Search API + резервный обход части каналов"
+        ),
+        "history_fallback": "Резервный обход истории каналов",
+    }
+    method_label = method_labels.get(
+        search_info.get("method"),
+        str(search_info.get("method") or "неизвестно"),
+    )
 
     embed = disnake.Embed(
         title="📊 Подсчёт постов завершён",
@@ -7971,6 +8504,11 @@ async def slash_count_posts(
         inline=True,
     )
     embed.add_field(
+        name="Метод поиска",
+        value=method_label,
+        inline=False,
+    )
+    embed.add_field(
         name="Период (МСК)",
         value=(
             f"`{period.start_date:%d.%m.%Y}` — "
@@ -7984,7 +8522,7 @@ async def slash_count_posts(
         inline=True,
     )
     embed.add_field(
-        name="Проверено сообщений",
+        name="Проверено сообщений пользователя",
         value=f"`{scanned}`",
         inline=True,
     )
@@ -8053,6 +8591,32 @@ async def slash_count_posts(
             f"Ошибок при поиске веток: `{len(discovery_errors)}`."
         )
 
+    search_errors = search_info.get("search_errors") or []
+    if search_errors:
+        notes.append(
+            f"Быстрый поиск потребовал резервный путь: "
+            f"`{len(search_errors)}` пакет(а)."
+        )
+
+    if search_info.get("api_requests"):
+        notes.append(
+            f"Запросов Discord Search API: "
+            f"`{search_info['api_requests']}`; "
+            f"страниц: `{search_info.get('search_pages', 0)}`."
+        )
+
+    if search_info.get("index_waits"):
+        notes.append(
+            f"Ожиданий поискового индекса Discord: "
+            f"`{search_info['index_waits']}`."
+        )
+
+    if search_info.get("fallback_targets"):
+        notes.append(
+            f"Через резервный history()-обход прочитано целей: "
+            f"`{search_info['fallback_targets']}`."
+        )
+
     if failed:
         preview = "; ".join(
             f"{item['label']}: {item['error']}"
@@ -8087,7 +8651,7 @@ async def slash_count_posts(
         )
     )
 
-    # То же публичное сообщение с прогрессом превращается в финальную сводку.
+    # Публичное сообщение прогресса превращается в финальную сводку.
     try:
         await interaction.edit_original_response(
             content=None,
@@ -8108,7 +8672,7 @@ async def slash_count_posts(
             pass
         return
 
-    # Полный отчёт отправляется отдельным обычным сообщением в том же канале.
+    # Полный отчёт отправляется отдельным обычным сообщением.
     if report:
         try:
             await interaction.followup.send(
@@ -8139,6 +8703,7 @@ logger.info(
     PC_SETTINGS_FILE,
 )
 # ============================ КОНЕЦ БЛОКА ============================
+
 
 # ============================================================================
 # СОБЫТИЯ
