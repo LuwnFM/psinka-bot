@@ -24,7 +24,8 @@ import zipfile
 from xml.sax.saxutils import escape as xml_escape
 import json
 import xml.etree.ElementTree as ET
-
+import calendar as pc_calendar
+import unicodedata as pc_unicodedata
 
 
 # ============================================================================
@@ -6805,6 +6806,1163 @@ async def slash_mercenary(
             await interaction.edit_original_response(embed=error_embed)
         else:
             await interaction.response.send_message(embed=error_embed, ephemeral=True)
+
+# ============================================================================
+# 📊 ПОДСЧЁТ ПОСТОВ — вставить сразу после:
+# bot = commands.Bot(command_prefix="!", intents=intents)
+# ============================================================================
+
+PC_MOSCOW_TZ = timezone(timedelta(hours=3), name="MSK")
+PC_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "post_count_settings.json")
+PC_CONCURRENCY = max(1, min(safe_int_env("POST_COUNT_CONCURRENCY", 3), 8))
+PC_PROGRESS_SECONDS = 8.0
+
+PC_DATE_RE = re.compile(r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{2}|\d{4})\s*$")
+PC_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
+PC_MARKDOWN_RE = re.compile(r"[*_~|`]")
+PC_SEGMENT_RE = re.compile(r"[^\s,;]+", re.UNICODE)
+PC_OUTER_PAYLOAD = "#*_~|` \\t\\r\\n-–—_=+()[]{}<>:;,.!?/\\"
+PC_VARIANT_LEFT = "*_~|` "
+PC_VARIANT_RIGHT = "*_~|` \t\r\n,;:.!?"
+
+PC_GM = "gm"
+PC_DRP = "drp"
+PC_POLIT = "polit"
+PC_ALL_FAMILIES = (PC_GM, PC_DRP, PC_POLIT)
+PC_LABELS = {
+    PC_GM: "ГМ-пост",
+    PC_DRP: "ДРП-вердикт",
+    PC_POLIT: "Полит-вердикт",
+}
+PC_PREFIXES = {
+    PC_GM: ("гмпост",),
+    PC_DRP: ("дрпвердикт", "дрпверд"),
+    PC_POLIT: ("политвердикт", "политверд"),
+}
+PC_MODE_ALIASES = {
+    "гмпост": (PC_GM,),
+    "дрпверд": (PC_DRP,),
+    "дрпвердикт": (PC_DRP,),
+    "политверд": (PC_POLIT,),
+    "политвердикт": (PC_POLIT,),
+    "тришаблона": PC_ALL_FAMILIES,
+}
+
+
+class PCDateError(ValueError):
+    pass
+
+
+class PCPeriod:
+    def __init__(
+        self,
+        start_local,
+        end_exclusive_local,
+        start_utc,
+        end_exclusive_utc,
+        end_was_clamped,
+        requested_end_day,
+        actual_end_day,
+    ):
+        self.start_local = start_local
+        self.end_exclusive_local = end_exclusive_local
+        self.start_utc = start_utc
+        self.end_exclusive_utc = end_exclusive_utc
+        self.end_was_clamped = end_was_clamped
+        self.requested_end_day = requested_end_day
+        self.actual_end_day = actual_end_day
+
+    @property
+    def start_date(self):
+        return self.start_local.date()
+
+    @property
+    def end_date(self):
+        return (self.end_exclusive_local - timedelta(microseconds=1)).date()
+
+
+class PCTemplateMatch:
+    def __init__(self, family, payload_key, canonical, raw_variant, exact_surface):
+        self.family = family
+        self.payload_key = payload_key
+        self.canonical = canonical
+        self.raw_variant = raw_variant
+        self.exact_surface = exact_surface
+
+
+def pc_parse_date_parts(raw: str):
+    match = PC_DATE_RE.fullmatch(raw or "")
+    if not match:
+        raise PCDateError("нечитаемый формат")
+    day = int(match.group(1))
+    month = int(match.group(2))
+    year_raw = match.group(3)
+    year = 2000 + int(year_raw) if len(year_raw) == 2 else int(year_raw)
+    if not 1 <= month <= 12:
+        raise PCDateError("месяц существует только от 1 до 12")
+    if day < 1:
+        raise PCDateError("нулевой или отрицательный день календарю не предложили")
+    if not 2000 <= year <= 9999:
+        raise PCDateError("год вне поддерживаемого диапазона")
+    return day, month, year
+
+
+def pc_parse_period(start_raw: str, end_raw: str) -> PCPeriod:
+    start_day, start_month, start_year = pc_parse_date_parts(start_raw)
+    start_last = pc_calendar.monthrange(start_year, start_month)[1]
+    if start_day > start_last:
+        raise PCDateError("начальная дата не существует")
+
+    requested_end_day, end_month, end_year = pc_parse_date_parts(end_raw)
+    end_last = pc_calendar.monthrange(end_year, end_month)[1]
+    actual_end_day = min(requested_end_day, end_last)
+
+    start_local = datetime(
+        start_year, start_month, start_day, tzinfo=PC_MOSCOW_TZ
+    )
+    end_exclusive_local = datetime(
+        end_year, end_month, actual_end_day, tzinfo=PC_MOSCOW_TZ
+    ) + timedelta(days=1)
+    if end_exclusive_local <= start_local:
+        raise PCDateError("конечная дата раньше начальной")
+
+    return PCPeriod(
+        start_local=start_local,
+        end_exclusive_local=end_exclusive_local,
+        start_utc=start_local.astimezone(timezone.utc),
+        end_exclusive_utc=end_exclusive_local.astimezone(timezone.utc),
+        end_was_clamped=requested_end_day != actual_end_day,
+        requested_end_day=requested_end_day,
+        actual_end_day=actual_end_day,
+    )
+
+
+def pc_normalize_text(value: str) -> str:
+    text = pc_unicodedata.normalize("NFKC", value or "")
+    text = PC_ZERO_WIDTH_RE.sub("", text)
+    text = PC_MARKDOWN_RE.sub("", text)
+    return text.casefold()
+
+
+def pc_word_pattern(value: str):
+    normalized = pc_normalize_text(value).strip()
+    if not normalized:
+        raise ValueError("пустое значение")
+    return re.compile(rf"(?<!\w){re.escape(normalized)}(?!\w)", re.UNICODE)
+
+
+def pc_compact(value: str) -> str:
+    return "".join(ch for ch in pc_normalize_text(value) if ch.isalnum())
+
+
+def pc_template_mode(value: str):
+    return PC_MODE_ALIASES.get(pc_compact(value))
+
+
+def pc_damerau(left: str, right: str) -> int:
+    if left == right:
+        return 0
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+    matrix = [[0] * (len(right) + 1) for _ in range(len(left) + 1)]
+    for i in range(len(left) + 1):
+        matrix[i][0] = i
+    for j in range(len(right) + 1):
+        matrix[0][j] = j
+    for i in range(1, len(left) + 1):
+        for j in range(1, len(right) + 1):
+            cost = 0 if left[i - 1] == right[j - 1] else 1
+            matrix[i][j] = min(
+                matrix[i - 1][j] + 1,
+                matrix[i][j - 1] + 1,
+                matrix[i - 1][j - 1] + cost,
+            )
+            if (
+                i > 1
+                and j > 1
+                and left[i - 1] == right[j - 2]
+                and left[i - 2] == right[j - 1]
+            ):
+                matrix[i][j] = min(matrix[i][j], matrix[i - 2][j - 2] + 1)
+    return matrix[-1][-1]
+
+
+def pc_alnum_positions(value: str, start: int):
+    chars, positions = [], []
+    for index in range(start, len(value)):
+        if value[index].isalnum():
+            chars.append(value[index].casefold())
+            positions.append(index)
+    return "".join(chars), positions
+
+
+def pc_candidate_starts(segment: str):
+    for index, char in enumerate(segment):
+        if char.isalnum() and (index == 0 or not segment[index - 1].isalnum()):
+            yield index
+
+
+def pc_best_prefix(compact: str, positions, families):
+    best = None
+    for family in families:
+        for canonical in PC_PREFIXES[family]:
+            for consumed in (len(canonical) - 1, len(canonical), len(canonical) + 1):
+                if consumed < 1 or consumed >= len(compact) or consumed > len(positions):
+                    continue
+                distance = pc_damerau(compact[:consumed], canonical)
+                if distance > 1:
+                    continue
+                boundary_penalty = 0 if positions[consumed] - positions[consumed - 1] > 1 else 1
+                key = (
+                    distance,
+                    boundary_penalty,
+                    abs(consumed - len(canonical)),
+                    -len(canonical),
+                    consumed,
+                    family,
+                )
+                if best is None or key < best:
+                    best = key
+    if best is None:
+        return None
+    return best[5], best[4]
+
+
+def pc_clean_payload(raw: str):
+    value = pc_unicodedata.normalize("NFKC", raw or "")
+    value = PC_ZERO_WIDTH_RE.sub("", value)
+    value = PC_MARKDOWN_RE.sub("", value).strip(PC_OUTER_PAYLOAD)
+    key = "".join(ch.casefold() for ch in value if ch.isalnum())
+    if not key:
+        return "", ""
+    display = "".join(
+        ch for ch in value
+        if ch != "_" and not ch.isspace() and ch not in "()[]{}<>"
+    ).strip("-–—_=+.:/\\")
+    return key, (display or key).upper()
+
+
+def pc_variant(segment: str, start: int) -> str:
+    display_start = start
+    while display_start > 0 and segment[display_start - 1] in "#([{" + PC_VARIANT_LEFT:
+        display_start -= 1
+    return segment[display_start:].strip(PC_VARIANT_LEFT).rstrip(PC_VARIANT_RIGHT)
+
+
+def pc_is_exact_surface(raw_variant: str, canonical: str) -> bool:
+    value = pc_unicodedata.normalize("NFKC", raw_variant or "")
+    value = PC_ZERO_WIDTH_RE.sub("", value)
+    value = PC_MARKDOWN_RE.sub("", value).strip()
+    if value.startswith("#"):
+        value = value[1:].strip()
+    return value.casefold() == canonical.casefold()
+
+
+def pc_find_templates(content: str, families):
+    selected = tuple(f for f in families if f in PC_ALL_FAMILIES)
+    if not selected:
+        return []
+    text = pc_unicodedata.normalize("NFKC", content or "")
+    text = PC_ZERO_WIDTH_RE.sub("", text)
+    found, seen = [], set()
+
+    for segment_match in PC_SEGMENT_RE.finditer(text):
+        segment = segment_match.group(0)
+        for start in pc_candidate_starts(segment):
+            compact, positions = pc_alnum_positions(segment, start)
+            if not compact:
+                continue
+            if any(compact == prefix for family in selected for prefix in PC_PREFIXES[family]):
+                continue
+            prefix = pc_best_prefix(compact, positions, selected)
+            if prefix is None:
+                continue
+            family, consumed = prefix
+            payload_key, payload_display = pc_clean_payload(segment[positions[consumed - 1] + 1:])
+            if not payload_key:
+                continue
+            location = (segment_match.start() + start, segment_match.end(), family)
+            if location in seen:
+                continue
+            seen.add(location)
+            canonical = f"{PC_LABELS[family]}-{payload_display}"
+            raw_variant = pc_variant(segment, start)
+            found.append(PCTemplateMatch(
+                family=family,
+                payload_key=payload_key,
+                canonical=canonical,
+                raw_variant=raw_variant,
+                exact_surface=pc_is_exact_surface(raw_variant, canonical),
+            ))
+            break
+    return found
+
+
+def pc_empty_settings():
+    return {"guilds": {}}
+
+
+def pc_normalize_settings(data):
+    if not isinstance(data, dict):
+        return pc_empty_settings()
+
+    guilds = data.get("guilds")
+    if not isinstance(guilds, dict):
+        return pc_empty_settings()
+
+    normalized = {"guilds": {}}
+    for guild_id, raw_guild in guilds.items():
+        if not str(guild_id).isdigit() or not isinstance(raw_guild, dict):
+            continue
+
+        guild_data = {"categories": [], "roles": []}
+        for key in ("categories", "roles"):
+            raw_values = raw_guild.get(key, [])
+            if not isinstance(raw_values, list):
+                continue
+            values = set()
+            for value in raw_values:
+                try:
+                    value_id = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if value_id > 0:
+                    values.add(value_id)
+            guild_data[key] = sorted(values)
+
+        normalized["guilds"][str(guild_id)] = guild_data
+
+    return normalized
+
+
+def pc_load_settings():
+    if not os.path.exists(PC_SETTINGS_FILE):
+        return pc_empty_settings()
+
+    try:
+        with open(PC_SETTINGS_FILE, "r", encoding="utf-8") as file:
+            return pc_normalize_settings(json.load(file))
+    except Exception as exc:
+        logger.error(
+            "Не удалось прочитать настройки подсчёта из %s: %s",
+            PC_SETTINGS_FILE,
+            exc,
+            exc_info=True,
+        )
+        return pc_empty_settings()
+
+
+def pc_write_settings(data):
+    directory = os.path.dirname(PC_SETTINGS_FILE) or "."
+    os.makedirs(directory, exist_ok=True)
+    temp_file = PC_SETTINGS_FILE + ".tmp"
+
+    with open(temp_file, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=2, sort_keys=True)
+        file.flush()
+        os.fsync(file.fileno())
+
+    os.replace(temp_file, PC_SETTINGS_FILE)
+
+
+PC_SETTINGS_CACHE = pc_load_settings()
+PC_SETTINGS_DIRTY = False
+PC_SETTINGS_FLUSH_TASK = None
+
+
+class PCSettingsStore:
+    def __init__(self):
+        self.lock = asyncio.Lock()
+
+    @staticmethod
+    def _guild_data(guild_id):
+        guilds = PC_SETTINGS_CACHE.setdefault("guilds", {})
+        return guilds.setdefault(
+            str(guild_id),
+            {"categories": [], "roles": []},
+        )
+
+    def values(self, guild_id: int, key: str) -> Set[int]:
+        guild_data = self._guild_data(guild_id)
+        return {int(value) for value in guild_data.get(key, [])}
+
+    async def _save_locked(self):
+        global PC_SETTINGS_DIRTY
+        try:
+            await asyncio.to_thread(pc_write_settings, PC_SETTINGS_CACHE)
+            PC_SETTINGS_DIRTY = False
+            return True
+        except Exception as exc:
+            PC_SETTINGS_DIRTY = True
+            logger.error(
+                "Не удалось записать настройки подсчёта в %s: %s",
+                PC_SETTINGS_FILE,
+                exc,
+                exc_info=True,
+            )
+            return False
+
+    async def add(self, guild_id: int, key: str, value_id: int) -> bool:
+        global PC_SETTINGS_DIRTY
+        async with self.lock:
+            guild_data = self._guild_data(guild_id)
+            values = {int(value) for value in guild_data.setdefault(key, [])}
+            if value_id in values:
+                return False
+
+            values.add(value_id)
+            guild_data[key] = sorted(values)
+            PC_SETTINGS_DIRTY = True
+            if not await self._save_locked():
+                raise OSError(f"не удалось записать {PC_SETTINGS_FILE}")
+            return True
+
+    async def remove(self, guild_id: int, key: str, value_id: int) -> bool:
+        global PC_SETTINGS_DIRTY
+        async with self.lock:
+            guild_data = self._guild_data(guild_id)
+            values = {int(value) for value in guild_data.setdefault(key, [])}
+            if value_id not in values:
+                return False
+
+            values.remove(value_id)
+            guild_data[key] = sorted(values)
+            PC_SETTINGS_DIRTY = True
+            if not await self._save_locked():
+                raise OSError(f"не удалось записать {PC_SETTINGS_FILE}")
+            return True
+
+    async def clear(self, guild_id: int, key: str) -> int:
+        global PC_SETTINGS_DIRTY
+        async with self.lock:
+            guild_data = self._guild_data(guild_id)
+            count = len(guild_data.setdefault(key, []))
+            if count == 0:
+                return 0
+
+            guild_data[key] = []
+            PC_SETTINGS_DIRTY = True
+            if not await self._save_locked():
+                raise OSError(f"не удалось записать {PC_SETTINGS_FILE}")
+            return count
+
+    async def flush_if_dirty(self):
+        async with self.lock:
+            if not PC_SETTINGS_DIRTY:
+                return True
+            return await self._save_locked()
+
+
+PC_STORE = PCSettingsStore()
+
+
+async def pc_periodic_settings_flush():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        await asyncio.sleep(300)
+        await PC_STORE.flush_if_dirty()
+
+
+@bot.listen("on_ready")
+async def pc_start_periodic_settings_flush():
+    global PC_SETTINGS_FLUSH_TASK
+    if PC_SETTINGS_FLUSH_TASK is None or PC_SETTINGS_FLUSH_TASK.done():
+        PC_SETTINGS_FLUSH_TASK = asyncio.create_task(pc_periodic_settings_flush())
+
+
+def pc_owner(user_id: int) -> bool:
+    return bool(OWNER_ID and user_id == OWNER_ID)
+
+
+def pc_admin(member) -> bool:
+    return isinstance(member, disnake.Member) and bool(member.guild_permissions.administrator)
+
+
+def pc_can_count(interaction, roles: Set[int]) -> bool:
+    if pc_owner(interaction.author.id) or pc_admin(interaction.author):
+        return True
+    return isinstance(interaction.author, disnake.Member) and any(
+        role.id in roles for role in interaction.author.roles
+    )
+
+
+def pc_channel_label(channel) -> str:
+    name = getattr(channel, "name", None) or str(getattr(channel, "id", "?"))
+    if isinstance(channel, disnake.Thread) and getattr(channel, "parent", None):
+        return f"{channel.parent.name} / {name}"
+    return name
+
+
+def pc_supported_parent(channel) -> bool:
+    types = (disnake.TextChannel, disnake.ForumChannel)
+    media_type = getattr(disnake, "MediaChannel", None)
+    if media_type is not None:
+        types += (media_type,)
+    return isinstance(channel, types)
+
+
+async def pc_collect_targets(guild: disnake.Guild, category_ids: Set[int]):
+    errors = []
+    try:
+        channels = await guild.fetch_channels()
+    except Exception as exc:
+        logger.warning("fetch_channels не сработал, использую кэш: %s", exc)
+        channels = guild.channels
+
+    parents = [
+        channel for channel in channels
+        if getattr(channel, "category_id", None) in category_ids and pc_supported_parent(channel)
+    ]
+    parent_ids = {channel.id for channel in parents}
+    targets = {}
+
+    for parent in parents:
+        if isinstance(parent, disnake.TextChannel):
+            targets[parent.id] = parent
+        for thread in getattr(parent, "threads", ()):
+            targets[thread.id] = thread
+
+    try:
+        for thread in await guild.active_threads():
+            if getattr(thread, "parent_id", None) in parent_ids:
+                targets[thread.id] = thread
+    except Exception as exc:
+        errors.append(f"активные ветки: {exc}")
+        logger.error("Не удалось получить активные ветки: %s", exc, exc_info=True)
+
+    media_type = getattr(disnake, "MediaChannel", None)
+    for parent in parents:
+        try:
+            if isinstance(parent, disnake.TextChannel):
+                for private_flag in (False, True):
+                    async for thread in parent.archived_threads(
+                        private=private_flag,
+                        joined=False,
+                        limit=None,
+                    ):
+                        targets[thread.id] = thread
+            elif isinstance(parent, disnake.ForumChannel) or (
+                media_type is not None and isinstance(parent, media_type)
+            ):
+                async for thread in parent.archived_threads(limit=None):
+                    targets[thread.id] = thread
+        except disnake.Forbidden:
+            errors.append(f"архивы {pc_channel_label(parent)}: нет доступа")
+        except disnake.HTTPException as exc:
+            errors.append(f"архивы {pc_channel_label(parent)}: {exc}")
+        except TypeError as exc:
+            errors.append(f"архивы {pc_channel_label(parent)}: несовместимая сигнатура API")
+            logger.error("archived_threads %s: %s", pc_channel_label(parent), exc, exc_info=True)
+
+    return list(targets.values()), errors
+
+
+async def pc_scan_target(target, user_id, word_pattern, families, period, semaphore):
+    result = {
+        "label": pc_channel_label(target),
+        "matched": 0,
+        "scanned": 0,
+        "error": None,
+        "families": {},
+    }
+    if families:
+        result["families"] = {
+            family: {"messages": 0, "occurrences": 0, "groups": {}}
+            for family in families
+        }
+
+    async with semaphore:
+        try:
+            async for message in target.history(
+                limit=None,
+                after=period.start_utc - timedelta(seconds=1),
+                before=period.end_exclusive_utc,
+                oldest_first=True,
+            ):
+                if not (period.start_utc <= message.created_at < period.end_exclusive_utc):
+                    continue
+                result["scanned"] += 1
+                if getattr(message.author, "id", None) != user_id:
+                    continue
+                content = message.content or ""
+
+                if families:
+                    matches = pc_find_templates(content, families)
+                    if not matches:
+                        continue
+                    result["matched"] += 1
+                    message_families = set()
+                    for match in matches:
+                        message_families.add(match.family)
+                        family_data = result["families"][match.family]
+                        family_data["occurrences"] += 1
+                        group = family_data["groups"].setdefault(match.payload_key, {
+                            "canonical": match.canonical,
+                            "occurrences": 0,
+                            "exact": 0,
+                            "variants": {},
+                        })
+                        group["occurrences"] += 1
+                        if match.exact_surface:
+                            group["exact"] += 1
+                        else:
+                            group["variants"][match.raw_variant] = (
+                                group["variants"].get(match.raw_variant, 0) + 1
+                            )
+                    for family in message_families:
+                        result["families"][family]["messages"] += 1
+                elif word_pattern.search(pc_normalize_text(content)):
+                    result["matched"] += 1
+        except disnake.Forbidden:
+            result["error"] = "нет доступа к истории"
+        except disnake.HTTPException as exc:
+            result["error"] = f"Discord API: {exc}"
+        except Exception as exc:
+            result["error"] = f"{type(exc).__name__}: {exc}"
+    return result
+
+
+def pc_merge_stats(results, families):
+    merged = {
+        family: {"messages": 0, "occurrences": 0, "groups": {}}
+        for family in families
+    }
+    for result in results:
+        for family in families:
+            source = result.get("families", {}).get(family, {})
+            target = merged[family]
+            target["messages"] += source.get("messages", 0)
+            target["occurrences"] += source.get("occurrences", 0)
+            for key, source_group in source.get("groups", {}).items():
+                group = target["groups"].setdefault(key, {
+                    "canonical": source_group["canonical"],
+                    "occurrences": 0,
+                    "exact": 0,
+                    "variants": {},
+                })
+                group["occurrences"] += source_group.get("occurrences", 0)
+                group["exact"] += source_group.get("exact", 0)
+                for variant, count in source_group.get("variants", {}).items():
+                    group["variants"][variant] = group["variants"].get(variant, 0) + count
+    return merged
+
+
+def pc_family_preview(data, limit=7):
+    groups = sorted(
+        data["groups"].values(),
+        key=lambda item: (-item["occurrences"], item["canonical"].casefold()),
+    )
+    if not groups:
+        return "Совпадений нет."
+    lines = []
+    for group in groups[:limit]:
+        variants = sorted(
+            group["variants"].items(),
+            key=lambda item: (-item[1], item[0].casefold()),
+        )
+        if variants:
+            rendered = ", ".join(
+                f"`{variant.replace('`', 'ˋ')}`" + (f" ×{count}" if count > 1 else "")
+                for variant, count in variants[:4]
+            )
+            if len(variants) > 4:
+                rendered += f" и ещё {len(variants) - 4}"
+        else:
+            rendered = "Нет."
+        lines.append(
+            f"• **{group['canonical']}** — `{group['occurrences']}`\n"
+            f"  Вариации: {rendered}"
+        )
+    if len(groups) > limit:
+        lines.append(f"…и ещё `{len(groups) - limit}` групп в полном TXT-отчёте.")
+    return "\n".join(lines)[:1024]
+
+
+def pc_full_report(user, period, stats, families, matched, scanned):
+    lines = [
+        "ПОЛНЫЙ ОТЧЁТ ПО ШАБЛОНАМ",
+        "=" * 72,
+        f"Пользователь: {user} ({user.id})",
+        f"Период МСК: {period.start_date:%d.%m.%Y} — {period.end_date:%d.%m.%Y} включительно",
+        f"Сообщений хотя бы с одним шаблоном: {matched}",
+        f"Проверено сообщений: {scanned}",
+        "",
+    ]
+    for family in families:
+        data = stats[family]
+        lines.extend([
+            PC_LABELS[family],
+            "-" * 72,
+            f"Сообщений: {data['messages']}",
+            f"Меток: {data['occurrences']}",
+            f"Уникальных значений: {len(data['groups'])}",
+        ])
+        groups = sorted(
+            data["groups"].values(),
+            key=lambda item: (-item["occurrences"], item["canonical"].casefold()),
+        )
+        if not groups:
+            lines.extend(["Совпадений нет.", ""])
+            continue
+        for group in groups:
+            lines.append(f"• {group['canonical']} — меток: {group['occurrences']}")
+            if group["exact"]:
+                lines.append(f"  Точное написание: {group['exact']}")
+            variants = sorted(
+                group["variants"].items(),
+                key=lambda item: (-item[1], item[0].casefold()),
+            )
+            if variants:
+                lines.append("  Вариации: " + ", ".join(
+                    variant + (f" ×{count}" if count > 1 else "")
+                    for variant, count in variants
+                ))
+            else:
+                lines.append("  Вариации: Нет.")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def pc_txt_file(text: str, filename: str):
+    return disnake.File(io.BytesIO(text.encode("utf-8-sig")), filename=filename)
+
+
+def pc_faq(title, description, fields):
+    embed = disnake.Embed(title=title, description=description, color=0x5865F2)
+    for name, value in fields:
+        embed.add_field(name=name, value=value, inline=False)
+    embed.set_footer(text="Все даты и границы суток считаются по Москве, UTC+3.")
+    return embed
+
+
+def pc_categories_faq():
+    return pc_faq(
+        "FAQ: /категории_подсчёта",
+        "Настраивает категории, внутри которых бот ищет сообщения. Менять список может только владелец бота из `OWNER_ID`.",
+        [
+            ("действие", "`добавить`, `удалить`, `показать`, `очистить`. Оставь все поля пустыми, чтобы снова увидеть FAQ."),
+            ("категория", "Нужна только для добавления и удаления. Выбирается категория Discord, а не отдельный канал."),
+            ("Что обходится", "Все текстовые и новостные каналы категории, активные и архивные публичные/приватные ветки, форумные и медиапосты. Голосовые каналы не учитываются."),
+        ],
+    )
+
+
+def pc_roles_faq():
+    return pc_faq(
+        "FAQ: /роли_подсчёта",
+        "Настраивает дополнительные роли, которым разрешён `/подсчёт_постов`. Изменять список могут владелец и серверные администраторы.",
+        [
+            ("действие", "`добавить`, `удалить`, `показать`, `очистить`. Пустой вызов показывает FAQ."),
+            ("роль", "Нужна для добавления и удаления."),
+            ("Кто имеет доступ", "Владелец, серверные администраторы и участники хотя бы с одной добавленной ролью."),
+        ],
+    )
+
+
+def pc_posts_faq():
+    return pc_faq(
+        "FAQ: /подсчёт_постов",
+        "Считает сообщения выбранного пользователя во всех доступных каналах и ветках настроенных категорий.",
+        [
+            ("пользователь", "Участник, чьи сообщения нужно считать."),
+            ("слово — обычный режим", "Слово или фраза. Регистр и оформление `||`, `**`, `__`, `~~`, обратные кавычки игнорируются. Сообщение считается один раз независимо от повторений."),
+            ("слово — шаблонный режим", "`ГМ-пост`; `ДРП-верд`/`ДРП-вердикт`; `Полит-верд`/`Полит-вердикт`; `Три-шаблона` для всех трёх сразу."),
+            ("Допуски шаблонов", "Игнорируются регистр, `#`, дефисы, подчёркивания, скобки и Discord-разметка. В служебном префиксе разрешена одна вставка, потеря, замена символа или перестановка соседних букв."),
+            ("с_даты", "Начало включительно: `ДД.ММ.ГГ` или `ДД.ММ.ГГГГ`. Начальная дата обязана существовать."),
+            ("по_дату", "Конец включительно. Завышенный день заменяется последним днём месяца: `99.06.2026` → `30.06.2026`."),
+            ("Результат шаблонов", "Показывает сообщения и метки каждого семейства, группы по хвостам, все найденные опечатки/вариации и прикладывает полный TXT."),
+        ],
+    )
+
+
+@bot.slash_command(
+    name="категории_подсчёта",
+    description="Настроить категории подсчёта или открыть FAQ.",
+    dm_permission=False,
+)
+async def slash_count_categories(
+    interaction: disnake.CommandInteraction,
+    действие: Optional[str] = commands.Param(
+        default=None,
+        choices=["добавить", "удалить", "показать", "очистить"],
+        description="Действие; оставь пустым для FAQ",
+    ),
+    категория: Optional[disnake.abc.GuildChannel] = commands.Param(
+        default=None,
+        channel_types=[disnake.ChannelType.category],
+        description="Категория для добавления или удаления",
+    ),
+):
+    if действие is None and категория is None:
+        await interaction.response.send_message(embed=pc_categories_faq(), ephemeral=True)
+        return
+    if not interaction.guild:
+        await interaction.response.send_message(
+            "❌ Команда серверная. Категории в личке пока не материализуются от уверенного заполнения поля.",
+            ephemeral=True,
+        )
+        return
+    if not pc_owner(interaction.author.id):
+        await interaction.response.send_message(
+            "❌ Эту настройку меняет только владелец бота. Выпадающее меню полномочий не выдаёт, как бы выразительно на него ни смотреть.",
+            ephemeral=True,
+        )
+        return
+    if действие is None:
+        await interaction.response.send_message(
+            "❌ Категория выбрана, действие забыто. Боту всё ещё требуется узнать, добавить её или удалить.",
+            ephemeral=True,
+        )
+        return
+    if действие in {"добавить", "удалить"} and not isinstance(категория, disnake.CategoryChannel):
+        await interaction.response.send_message(
+            "❌ Для этого действия нужна категория. Выбор отсутствующего объекта оставим более творческим программам.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        if действие == "добавить":
+            changed = await PC_STORE.add(interaction.guild.id, "categories", категория.id)
+            text = (
+                f"✅ Категория {категория.mention} добавлена."
+                if changed else f"ℹ️ Категория {категория.mention} уже была в списке; повтор не делает её доступнее."
+            )
+        elif действие == "удалить":
+            changed = await PC_STORE.remove(interaction.guild.id, "categories", категория.id)
+            text = (
+                f"✅ Категория {категория.mention} удалена."
+                if changed else f"ℹ️ Категории {категория.mention} в списке не было. Удалить отсутствие ещё раз не получилось."
+            )
+        elif действие == "очистить":
+            count = await PC_STORE.clear(interaction.guild.id, "categories")
+            text = f"✅ Список очищен. Удалено: `{count}`. Теперь считать негде — пустой список именно так и работает."
+        else:
+            ids = PC_STORE.values(interaction.guild.id, "categories")
+            lines = []
+            for category_id in sorted(ids):
+                category = interaction.guild.get_channel(category_id)
+                lines.append(
+                    category.mention
+                    if isinstance(category, disnake.CategoryChannel)
+                    else f"`{category_id}` — категория удалена или не найдена"
+                )
+            text = "**Категории подсчёта:**\n" + ("\n".join(lines) if lines else "Список пуст.")
+        await interaction.response.send_message(text, ephemeral=True)
+    except Exception as exc:
+        logger.error("Ошибка /категории_подсчёта: %s", exc, exc_info=True)
+        await interaction.response.send_message(
+            f"❌ Настройка не сохранилась. Даже JSON-файл отказался поддерживать этот административный порыв: `{str(exc)[:300]}`",
+            ephemeral=True,
+        )
+
+
+@bot.slash_command(
+    name="роли_подсчёта",
+    description="Настроить роли доступа или открыть FAQ.",
+    dm_permission=False,
+)
+async def slash_count_roles(
+    interaction: disnake.CommandInteraction,
+    действие: Optional[str] = commands.Param(
+        default=None,
+        choices=["добавить", "удалить", "показать", "очистить"],
+        description="Действие; оставь пустым для FAQ",
+    ),
+    роль: Optional[disnake.Role] = commands.Param(
+        default=None,
+        description="Роль для добавления или удаления",
+    ),
+):
+    if действие is None and роль is None:
+        await interaction.response.send_message(embed=pc_roles_faq(), ephemeral=True)
+        return
+    if not interaction.guild:
+        await interaction.response.send_message(
+            "❌ Команда работает на сервере. Серверных ролей в личке по-прежнему нет.",
+            ephemeral=True,
+        )
+        return
+    if not (pc_owner(interaction.author.id) or pc_admin(interaction.author)):
+        await interaction.response.send_message(
+            "❌ Нужны права администратора. Уверенность при заполнении команды Discord в разрешения не конвертирует.",
+            ephemeral=True,
+        )
+        return
+    if действие is None:
+        await interaction.response.send_message(
+            "❌ Роль указана, действие забыто. Бот не обязан угадывать, наградить её доступом или убрать.",
+            ephemeral=True,
+        )
+        return
+    if действие in {"добавить", "удалить"} and роль is None:
+        await interaction.response.send_message(
+            "❌ Для этого действия нужна роль. Управление воображаемой ролью техническое согласование не прошло.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        if действие == "добавить":
+            changed = await PC_STORE.add(interaction.guild.id, "roles", роль.id)
+            text = f"✅ Роль {роль.mention} получила доступ." if changed else f"ℹ️ Роль {роль.mention} уже имела доступ."
+        elif действие == "удалить":
+            changed = await PC_STORE.remove(interaction.guild.id, "roles", роль.id)
+            text = f"✅ У роли {роль.mention} убран доступ." if changed else f"ℹ️ Роли {роль.mention} в списке не было."
+        elif действие == "очистить":
+            count = await PC_STORE.clear(interaction.guild.id, "roles")
+            text = f"✅ Дополнительные роли очищены. Удалено: `{count}`. Владелец и администраторы сохранили доступ."
+        else:
+            ids = PC_STORE.values(interaction.guild.id, "roles")
+            lines = []
+            for role_id in sorted(ids):
+                role = interaction.guild.get_role(role_id)
+                lines.append(role.mention if role else f"`{role_id}` — роль удалена или не найдена")
+            text = "**Роли с доступом:**\n" + ("\n".join(lines) if lines else "Дополнительных ролей нет.")
+        await interaction.response.send_message(text, ephemeral=True)
+    except Exception as exc:
+        logger.error("Ошибка /роли_подсчёта: %s", exc, exc_info=True)
+        await interaction.response.send_message(
+            f"❌ Настройка не сохранилась. JSON-файл выразил мнение технически: `{str(exc)[:300]}`",
+            ephemeral=True,
+        )
+
+
+@bot.slash_command(
+    name="подсчёт_постов",
+    description="Посчитать сообщения пользователя или открыть FAQ.",
+    dm_permission=False,
+)
+async def slash_count_posts(
+    interaction: disnake.CommandInteraction,
+    пользователь: Optional[disnake.Member] = commands.Param(
+        default=None,
+        description="Чьи сообщения считать",
+    ),
+    слово: Optional[str] = commands.Param(
+        default=None,
+        max_length=200,
+        description="Слово, фраза или шаблонный режим",
+    ),
+    с_даты: Optional[str] = commands.Param(
+        default=None,
+        description="Начало: ДД.ММ.ГГ или ДД.ММ.ГГГГ",
+    ),
+    по_дату: Optional[str] = commands.Param(
+        default=None,
+        description="Конец включительно: ДД.ММ.ГГ или ДД.ММ.ГГГГ",
+    ),
+):
+    if пользователь is None and слово is None and с_даты is None and по_дату is None:
+        await interaction.response.send_message(embed=pc_posts_faq(), ephemeral=True)
+        return
+    if not interaction.guild:
+        await interaction.response.send_message(
+            "❌ Команда серверная. Искать все серверные каналы из лички — замысел эффектный, но бесполезный.",
+            ephemeral=True,
+        )
+        return
+
+    allowed_roles = PC_STORE.values(interaction.guild.id, "roles")
+    if not pc_can_count(interaction, allowed_roles):
+        await interaction.response.send_message(
+            "❌ Нужны права администратора или роль из `/роли_подсчёта`. Самоназначение полномочий через поле команды не предусмотрено.",
+            ephemeral=True,
+        )
+        return
+
+    missing = []
+    if пользователь is None:
+        missing.append("пользователь")
+    if not слово or not слово.strip():
+        missing.append("слово")
+    if not с_даты or not с_даты.strip():
+        missing.append("с_даты")
+    if not по_дату or not по_дату.strip():
+        missing.append("по_дату")
+    if missing:
+        await interaction.response.send_message(
+            "❌ Не заполнены поля: " + ", ".join(f"`{name}`" for name in missing) +
+            ". Discord пока не извлекает недостающие данные из силы намерения. Пустой вызов показывает FAQ.",
+            ephemeral=True,
+        )
+        return
+
+    try:
+        period = pc_parse_period(с_даты, по_дату)
+    except PCDateError as exc:
+        await interaction.response.send_message(
+            "❌ Дата оформлена так, будто календарь должен догадаться сам. Используй `ДД.ММ.ГГ` или `ДД.ММ.ГГГГ`. "
+            f"Завышать разрешено только день конечной даты. Причина: `{exc}`.",
+            ephemeral=True,
+        )
+        return
+
+    families = pc_template_mode(слово)
+    word_pattern = None
+    if families is None:
+        try:
+            word_pattern = pc_word_pattern(слово)
+        except ValueError:
+            await interaction.response.send_message(
+                "❌ После удаления Discord-разметки поле «слово» оказалось пустым. Минимализм впечатляет, искать нечего.",
+                ephemeral=True,
+            )
+            return
+
+    category_ids = PC_STORE.values(interaction.guild.id, "categories")
+    if not category_ids:
+        await interaction.response.send_message(
+            "❌ Категории не настроены. Владелец должен заполнить `/категории_подсчёта`; бот не назначает себе пространство поиска самостоятельно.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    started = time.monotonic()
+    try:
+        targets, discovery_errors = await pc_collect_targets(interaction.guild, category_ids)
+    except Exception as exc:
+        logger.error("Ошибка сбора каналов: %s", exc, exc_info=True)
+        await interaction.edit_original_response(
+            content=f"❌ Получить каналы не удалось. Discord API внёс вклад в происходящее: `{str(exc)[:300]}`"
+        )
+        return
+
+    if not targets:
+        await interaction.edit_original_response(
+            content="❌ В выбранных категориях нет доступных текстовых каналов, форумов или веток. Пустоту считать можно, но результат заранее известен."
+        )
+        return
+
+    mode_label = (
+        ", ".join(PC_LABELS[family] for family in families)
+        if families else f"слово/фраза `{слово}`"
+    )
+    await interaction.edit_original_response(content=(
+        f"🔎 Считаю сообщения {пользователь.mention}; режим: {mode_label}.\n"
+        f"Период: `{period.start_date:%d.%m.%Y}` — `{period.end_date:%d.%m.%Y}` включительно, МСК.\n"
+        f"Каналов и веток: `{len(targets)}`."
+    ))
+
+    semaphore = asyncio.Semaphore(PC_CONCURRENCY)
+    tasks = [asyncio.create_task(pc_scan_target(
+        target,
+        пользователь.id,
+        word_pattern,
+        families,
+        period,
+        semaphore,
+    )) for target in targets]
+
+    results = []
+    last_progress = time.monotonic()
+    for completed, task in enumerate(asyncio.as_completed(tasks), start=1):
+        results.append(await task)
+        now = time.monotonic()
+        if now - last_progress >= PC_PROGRESS_SECONDS:
+            try:
+                await interaction.edit_original_response(content=(
+                    f"🔎 Подсчёт идёт: `{completed}/{len(tasks)}` каналов и веток.\n"
+                    f"Подходящих сообщений пока: `{sum(x['matched'] for x in results)}`."
+                ))
+            except Exception:
+                pass
+            last_progress = now
+
+    matched = sum(item["matched"] for item in results)
+    scanned = sum(item["scanned"] for item in results)
+    failed = [item for item in results if item["error"]]
+    elapsed = time.monotonic() - started
+
+    embed = disnake.Embed(
+        title="📊 Подсчёт постов завершён",
+        color=0xFFAA00 if failed else 0x4CAF50,
+    )
+    embed.add_field(name="Пользователь", value=f"{пользователь.mention}\n`{пользователь.id}`", inline=True)
+    embed.add_field(name="Режим", value=f"`{слово[:200]}`", inline=True)
+    embed.add_field(
+        name="Период (МСК)",
+        value=f"`{period.start_date:%d.%m.%Y}` — `{period.end_date:%d.%m.%Y}` включительно",
+        inline=False,
+    )
+    embed.add_field(name="Найдено сообщений", value=f"**{matched}**", inline=True)
+    embed.add_field(name="Проверено сообщений", value=f"`{scanned}`", inline=True)
+    embed.add_field(name="Каналы/ветки", value=f"`{len(results) - len(failed)}/{len(results)}` успешно", inline=True)
+
+    report = None
+    filename = "post-count-report.txt"
+    if families:
+        stats = pc_merge_stats(results, families)
+        for family in families:
+            data = stats[family]
+            embed.add_field(
+                name=f"{PC_LABELS[family]} — сообщений `{data['messages']}`, меток `{data['occurrences']}`",
+                value=pc_family_preview(data),
+                inline=False,
+            )
+        report = pc_full_report(пользователь, period, stats, families, matched, scanned)
+        filename = f"post-templates-{пользователь.id}-{period.start_date:%Y%m%d}-{period.end_date:%Y%m%d}.txt"
+    else:
+        top = sorted(
+            (item for item in results if item["matched"]),
+            key=lambda item: item["matched"],
+            reverse=True,
+        )[:10]
+        top_text = "\n".join(f"• `{item['matched']}` — {item['label']}" for item in top) or "Совпадений нет."
+        embed.add_field(name="Где найдено больше всего", value=top_text[:1024], inline=False)
+
+    notes = []
+    if period.end_was_clamped:
+        notes.append(
+            f"Конечный день `{period.requested_end_day}` не существует; использован `{period.actual_end_day}`. Календарь победил импровизацию."
+        )
+    if discovery_errors:
+        notes.append(f"Ошибок при поиске веток: `{len(discovery_errors)}`.")
+    if failed:
+        preview = "; ".join(f"{item['label']}: {item['error']}" for item in failed[:5])
+        notes.append(f"Не прочитано целей: `{len(failed)}`. {preview}")
+    if families:
+        notes.append("Полный список групп и всех исходных вариаций приложен TXT-файлом.")
+    notes.append(f"Время выполнения: `{elapsed:.1f} сек.`")
+    embed.add_field(name="Примечания", value="\n".join(notes)[:1024], inline=False)
+    embed.set_footer(text=(
+        "Шаблонный режим: сообщение считается один раз; несколько меток внутри него считаются отдельно."
+        if families else "Одно сообщение считается один раз, даже если слово повторено несколько раз."
+    ))
+
+    try:
+        await interaction.edit_original_response(content=None, embed=embed)
+        if report:
+            await interaction.followup.send(
+                content="📎 Полный отчёт по всем найденным вариациям:",
+                file=pc_txt_file(report, filename),
+                ephemeral=True,
+            )
+    except Exception:
+        try:
+            kwargs = {"embed": embed}
+            if report:
+                kwargs["file"] = pc_txt_file(report, filename)
+            await interaction.author.send(**kwargs)
+        except Exception:
+            try:
+                kwargs = {"content": interaction.author.mention, "embed": embed}
+                if report:
+                    kwargs["file"] = pc_txt_file(report, filename)
+                await interaction.channel.send(**kwargs)
+            except Exception:
+                pass
+
+
+logger.info(
+    "Команды подсчёта постов зарегистрированы; JSON-хранилище: %s",
+    PC_SETTINGS_FILE,
+)
+# ============================ КОНЕЦ БЛОКА ============================
+
 
 # ============================================================================
 # СОБЫТИЯ
