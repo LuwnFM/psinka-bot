@@ -8652,12 +8652,51 @@ def pc_split_lines_for_discord(
 
 
 async def pc_send_reply_chain(interaction, chunks, previous_message=None):
+    """
+    Отправляет многочастный публичный отчёт цепочкой embed-сообщений.
+
+    Каждая следующая часть отвечает на предыдущую.
+    Текст уже заранее разбит только между целыми строками.
+    """
     if previous_message is None:
         previous_message = await interaction.original_response()
 
-    for chunk in chunks:
+    total_parts = len(chunks)
+
+    for index, chunk in enumerate(chunks, start=1):
+        # Первая часть уже содержит общий заголовок отчёта.
+        # Для следующих частей явно указываем, что это продолжение.
+        title = (
+            "📍 Полное распределение шаблонов по каналам"
+            if index == 1
+            else f"📍 Распределение шаблонов — продолжение {index}/{total_parts}"
+        )
+
+        description = str(chunk or "").strip()
+
+        # В первой части удаляем текстовый заголовок, поскольку он уже
+        # будет находиться в заголовке embed.
+        if index == 1:
+            first_heading = "📍 **Полное распределение шаблонов по каналам**"
+            if description.startswith(first_heading):
+                description = description[len(first_heading):].lstrip()
+
+        report_embed = disnake.Embed(
+            title=title,
+            description=description or "Продолжение отчёта.",
+            color=0x5865F2,
+            timestamp=datetime.now(),
+        )
+
+        report_embed.set_footer(
+            text=(
+                f"Часть {index}/{total_parts} • "
+                "Числа возле каналов означают количество сообщений"
+            )
+        )
+
         sent = await interaction.channel.send(
-            content=chunk,
+            embed=report_embed,
             reference=previous_message,
             mention_author=False,
         )
