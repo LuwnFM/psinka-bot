@@ -6807,6 +6807,7 @@ async def slash_mercenary(
         else:
             await interaction.response.send_message(embed=error_embed, ephemeral=True)
 
+#мяу
 # ============================================================================
 # 📊 ПОДСЧЁТ ПОСТОВ — вставить сразу после:
 # bot = commands.Bot(command_prefix="!", intents=intents)
@@ -6816,6 +6817,20 @@ PC_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pos
 PC_CONCURRENCY = max(1, min(safe_int_env("POST_COUNT_CONCURRENCY", 3), 8))
 PC_PROGRESS_SECONDS = 8.0
 PC_LONG_POST_MIN_CHARS = 300
+
+# Переключатель статистики длины:
+# False — считать длинные/короткие посты только для ГМ-постов.
+# True — считать длину для ГМ-постов, ДРП-вердиктов и Полит-вердиктов
+# во всех шаблонных режимах.
+PC_COUNT_LENGTH_FOR_ALL_TEMPLATES = False
+
+# Публичная детализация по каналам отправляется цепочкой сообщений,
+# каждое из которых собирается только по целым строкам.
+PC_PUBLIC_REPORT_CHUNK_CHARS = 1850
+
+# Если полный TXT окажется слишком большим для одного вложения,
+# он автоматически делится на несколько файлов по целым строкам.
+PC_TXT_PART_MAX_BYTES = 7_000_000
 
 # Быстрый серверный поиск Discord:
 # https://discord.com/api/v10/guilds/{guild_id}/messages/search
@@ -7193,6 +7208,33 @@ def pc_template_body_length(content: str, matches) -> int:
     return len("".join(parts).strip())
 
 
+def pc_length_enabled_for_family(family: str) -> bool:
+    return bool(
+        PC_COUNT_LENGTH_FOR_ALL_TEMPLATES
+        or family == PC_GM
+    )
+
+
+def pc_any_length_enabled(families) -> bool:
+    return bool(families) and any(
+        pc_length_enabled_for_family(family)
+        for family in families
+    )
+
+
+def pc_length_scope_name(families) -> str:
+    enabled = [
+        PC_LABELS[family]
+        for family in (families or ())
+        if pc_length_enabled_for_family(family)
+    ]
+    if not enabled:
+        return "Статистика длины отключена"
+    if len(enabled) == 1:
+        return f"Длина {enabled[0]} без меток"
+    return "Длина учитываемых шаблонных постов без меток"
+
+
 def pc_empty_settings():
     return {"guilds": {}}
 
@@ -7452,14 +7494,51 @@ async def pc_collect_targets(guild: disnake.Guild, category_ids: Set[int]):
     return list(targets.values()), errors
 
 
-def pc_empty_result(label, families):
+def pc_channel_counter_add(counter, channel_id, label, amount=1):
+    key = str(channel_id) if channel_id is not None else f"label:{label}"
+    item = counter.setdefault(
+        key,
+        {
+            "id": int(channel_id) if channel_id is not None else None,
+            "label": str(label or "неизвестный канал"),
+            "messages": 0,
+        },
+    )
+    item["messages"] += int(amount)
+
+
+def pc_empty_surface_stats():
+    return {
+        "occurrences": 0,
+        "messages": 0,
+        "channels": {},
+    }
+
+
+def pc_empty_group(canonical):
+    return {
+        "canonical": canonical,
+        "occurrences": 0,
+        "messages": 0,
+        "channels": {},
+        "exact": pc_empty_surface_stats(),
+        "variants": {},
+    }
+
+
+def pc_empty_result(label, families, channel_id=None):
     result = {
         "label": label,
+        "channel_id": int(channel_id) if channel_id is not None else None,
         "matched": 0,
         "scanned": 0,
         "error": None,
         "families": {},
+        # Общая длина считается только для семейств, разрешённых
+        # PC_COUNT_LENGTH_FOR_ALL_TEMPLATES.
         "lengths": {"long": 0, "short": 0},
+        # Полные записи нужны только для подробного TXT-отчёта.
+        "template_messages": [],
     }
     if families:
         result["families"] = {
@@ -7468,6 +7547,7 @@ def pc_empty_result(label, families):
                 "occurrences": 0,
                 "long": 0,
                 "short": 0,
+                "channels": {},
                 "groups": {},
             }
             for family in families
@@ -7475,7 +7555,26 @@ def pc_empty_result(label, families):
     return result
 
 
-def pc_apply_content(result, content, word_pattern, families):
+def pc_iso_datetime(value):
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc).isoformat()
+    return str(value or "")
+
+
+def pc_apply_content(
+    result,
+    content,
+    word_pattern,
+    families,
+    *,
+    message_id=None,
+    channel_id=None,
+    guild_id=None,
+    created_at=None,
+    jump_url=None,
+):
     """Проверяет одно сообщение уже выбранного пользователя."""
     result["scanned"] += 1
     content = content or ""
@@ -7486,42 +7585,138 @@ def pc_apply_content(result, content, word_pattern, families):
             return
 
         result["matched"] += 1
-        message_families = set()
-
-        body_length = pc_template_body_length(content, matches)
-        length_kind = (
-            "long"
-            if body_length >= PC_LONG_POST_MIN_CHARS
-            else "short"
+        message_families = {match.family for match in matches}
+        channel_id = (
+            int(channel_id)
+            if channel_id is not None
+            else result.get("channel_id")
         )
-        result["lengths"][length_kind] += 1
+        channel_label = result.get("label") or "неизвестный канал"
+
+        length_families = {
+            family
+            for family in message_families
+            if pc_length_enabled_for_family(family)
+        }
+        body_length = None
+        length_kind = None
+
+        if length_families:
+            body_length = pc_template_body_length(content, matches)
+            length_kind = (
+                "long"
+                if body_length >= PC_LONG_POST_MIN_CHARS
+                else "short"
+            )
+            # Одно сообщение учитывается в общей статистике длины один раз,
+            # даже если содержит несколько учитываемых семейств.
+            result["lengths"][length_kind] += 1
+
+        group_message_keys = set()
+        surface_message_keys = set()
+        record_matches = []
 
         for match in matches:
-            message_families.add(match.family)
             family_data = result["families"][match.family]
             family_data["occurrences"] += 1
 
             group = family_data["groups"].setdefault(
                 match.payload_key,
-                {
-                    "canonical": match.canonical,
-                    "occurrences": 0,
-                    "exact": 0,
-                    "variants": {},
-                },
+                pc_empty_group(match.canonical),
             )
             group["occurrences"] += 1
+            group_message_keys.add((match.family, match.payload_key))
 
             if match.exact_surface:
-                group["exact"] += 1
-            else:
-                group["variants"][match.raw_variant] = (
-                    group["variants"].get(match.raw_variant, 0) + 1
+                surface = group["exact"]
+                surface["occurrences"] += 1
+                surface_message_keys.add(
+                    (match.family, match.payload_key, "exact", "")
                 )
+                surface_name = match.canonical
+            else:
+                surface = group["variants"].setdefault(
+                    match.raw_variant,
+                    pc_empty_surface_stats(),
+                )
+                surface["occurrences"] += 1
+                surface_message_keys.add(
+                    (
+                        match.family,
+                        match.payload_key,
+                        "variant",
+                        match.raw_variant,
+                    )
+                )
+                surface_name = match.raw_variant
 
+            record_matches.append({
+                "family": match.family,
+                "payload_key": match.payload_key,
+                "canonical": match.canonical,
+                "exact": bool(match.exact_surface),
+                "surface": surface_name,
+            })
+
+        # Сообщение в статистике семейства и канала считается один раз.
         for family in message_families:
-            result["families"][family]["messages"] += 1
-            result["families"][family][length_kind] += 1
+            family_data = result["families"][family]
+            family_data["messages"] += 1
+            pc_channel_counter_add(
+                family_data["channels"],
+                channel_id,
+                channel_label,
+            )
+
+            if (
+                length_kind is not None
+                and pc_length_enabled_for_family(family)
+            ):
+                family_data[length_kind] += 1
+
+        # Сообщение в каждой канонической группе считается один раз,
+        # даже если одинаковая метка повторена несколько раз.
+        for family, payload_key in group_message_keys:
+            group = result["families"][family]["groups"][payload_key]
+            group["messages"] += 1
+            pc_channel_counter_add(
+                group["channels"],
+                channel_id,
+                channel_label,
+            )
+
+        # То же правило применяется отдельно к точному написанию
+        # и к каждой фактической вариации.
+        for family, payload_key, surface_kind, surface_name in surface_message_keys:
+            group = result["families"][family]["groups"][payload_key]
+            if surface_kind == "exact":
+                surface = group["exact"]
+            else:
+                surface = group["variants"][surface_name]
+            surface["messages"] += 1
+            pc_channel_counter_add(
+                surface["channels"],
+                channel_id,
+                channel_label,
+            )
+
+        if jump_url is None and guild_id and channel_id and message_id:
+            jump_url = (
+                f"https://discord.com/channels/"
+                f"{guild_id}/{channel_id}/{message_id}"
+            )
+
+        result["template_messages"].append({
+            "id": str(message_id or ""),
+            "channel_id": str(channel_id or ""),
+            "channel": channel_label,
+            "created_at": pc_iso_datetime(created_at),
+            "jump_url": str(jump_url or ""),
+            "content": content,
+            "body_length": body_length,
+            "length_kind": length_kind,
+            "matches": record_matches,
+        })
 
     elif word_pattern.search(pc_normalize_text(content)):
         result["matched"] += 1
@@ -7533,7 +7728,7 @@ async def pc_scan_target(target, user_id, word_pattern, families, period, semaph
     В отличие от старой версии, scanned считает только сообщения нужного автора,
     чтобы итог совпадал с быстрым Search Guild Messages.
     """
-    result = pc_empty_result(pc_channel_label(target), families)
+    result = pc_empty_result(pc_channel_label(target), families, target.id)
 
     async with semaphore:
         try:
@@ -7553,6 +7748,11 @@ async def pc_scan_target(target, user_id, word_pattern, families, period, semaph
                     message.content or "",
                     word_pattern,
                     families,
+                    message_id=message.id,
+                    channel_id=target.id,
+                    guild_id=target.guild.id,
+                    created_at=message.created_at,
+                    jump_url=getattr(message, "jump_url", None),
                 )
 
         except disnake.Forbidden:
@@ -7771,7 +7971,7 @@ async def pc_search_batch(
     """Ищет сообщения автора в одном пакете каналов и полностью пагинирует его."""
     target_map = {int(target.id): target for target in batch_targets}
     local_results = {
-        channel_id: pc_empty_result(pc_channel_label(target), families)
+        channel_id: pc_empty_result(pc_channel_label(target), families, channel_id)
         for channel_id, target in target_map.items()
     }
 
@@ -7839,6 +8039,14 @@ async def pc_search_batch(
                 raw_message.get("content") or "",
                 word_pattern,
                 families,
+                message_id=message_id,
+                channel_id=channel_id,
+                guild_id=guild_id,
+                created_at=created_at,
+                jump_url=(
+                    f"https://discord.com/channels/"
+                    f"{guild_id}/{channel_id}/{message_id}"
+                ),
             )
 
         if on_page is not None:
@@ -8127,6 +8335,28 @@ async def pc_search_or_fallback(
 
     return completed_results, search_info
 
+def pc_merge_channel_counters(target, source):
+    for key, item in (source or {}).items():
+        current = target.setdefault(
+            key,
+            {
+                "id": item.get("id"),
+                "label": item.get("label") or "неизвестный канал",
+                "messages": 0,
+            },
+        )
+        current["messages"] += int(item.get("messages", 0))
+
+
+def pc_merge_surface_stats(target, source):
+    target["occurrences"] += int(source.get("occurrences", 0))
+    target["messages"] += int(source.get("messages", 0))
+    pc_merge_channel_counters(
+        target["channels"],
+        source.get("channels", {}),
+    )
+
+
 def pc_merge_stats(results, families):
     merged = {
         family: {
@@ -8134,29 +8364,57 @@ def pc_merge_stats(results, families):
             "occurrences": 0,
             "long": 0,
             "short": 0,
+            "channels": {},
             "groups": {},
         }
         for family in families
     }
+
     for result in results:
         for family in families:
             source = result.get("families", {}).get(family, {})
             target = merged[family]
-            target["messages"] += source.get("messages", 0)
-            target["occurrences"] += source.get("occurrences", 0)
-            target["long"] += source.get("long", 0)
-            target["short"] += source.get("short", 0)
+            target["messages"] += int(source.get("messages", 0))
+            target["occurrences"] += int(source.get("occurrences", 0))
+            target["long"] += int(source.get("long", 0))
+            target["short"] += int(source.get("short", 0))
+            pc_merge_channel_counters(
+                target["channels"],
+                source.get("channels", {}),
+            )
+
             for key, source_group in source.get("groups", {}).items():
-                group = target["groups"].setdefault(key, {
-                    "canonical": source_group["canonical"],
-                    "occurrences": 0,
-                    "exact": 0,
-                    "variants": {},
-                })
-                group["occurrences"] += source_group.get("occurrences", 0)
-                group["exact"] += source_group.get("exact", 0)
-                for variant, count in source_group.get("variants", {}).items():
-                    group["variants"][variant] = group["variants"].get(variant, 0) + count
+                group = target["groups"].setdefault(
+                    key,
+                    pc_empty_group(source_group["canonical"]),
+                )
+                group["occurrences"] += int(
+                    source_group.get("occurrences", 0)
+                )
+                group["messages"] += int(
+                    source_group.get("messages", 0)
+                )
+                pc_merge_channel_counters(
+                    group["channels"],
+                    source_group.get("channels", {}),
+                )
+                pc_merge_surface_stats(
+                    group["exact"],
+                    source_group.get("exact", {}),
+                )
+
+                for variant, source_variant in (
+                    source_group.get("variants", {}).items()
+                ):
+                    variant_target = group["variants"].setdefault(
+                        variant,
+                        pc_empty_surface_stats(),
+                    )
+                    pc_merge_surface_stats(
+                        variant_target,
+                        source_variant,
+                    )
+
     return merged
 
 
@@ -8173,6 +8431,29 @@ def pc_merge_lengths(results):
     }
 
 
+def pc_collect_template_records(results):
+    records = []
+    seen = set()
+
+    for result in results:
+        for record in result.get("template_messages", []):
+            identity = (
+                record.get("id")
+                or record.get("jump_url")
+                or (
+                    f"{record.get('channel_id')}:"
+                    f"{record.get('created_at')}:"
+                    f"{len(records)}"
+                )
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            records.append(record)
+
+    return records
+
+
 def pc_percent(part: int, total: int) -> float:
     return (part * 100.0 / total) if total else 0.0
 
@@ -8187,42 +8468,391 @@ def pc_length_summary(long_count: int, short_count: int) -> str:
     )
 
 
-def pc_family_preview(data, limit=7):
-    messages = data.get("messages", 0)
-    length_line = (
-        f"Длинных: `{data.get('long', 0)}` "
-        f"(`{pc_percent(data.get('long', 0), messages):.1f}%`), "
-        f"коротких: `{data.get('short', 0)}` "
-        f"(`{pc_percent(data.get('short', 0), messages):.1f}%`)."
-    )
-    groups = sorted(
-        data["groups"].values(),
-        key=lambda item: (-item["occurrences"], item["canonical"].casefold()),
-    )
-    if not groups:
-        return length_line + "\nСовпадений нет."
-    lines = [length_line, ""]
-    for group in groups[:limit]:
-        variants = sorted(
-            group["variants"].items(),
-            key=lambda item: (-item[1], item[0].casefold()),
-        )
-        if variants:
-            rendered = ", ".join(
-                f"`{variant.replace('`', 'ˋ')}`" + (f" ×{count}" if count > 1 else "")
-                for variant, count in variants[:4]
-            )
-            if len(variants) > 4:
-                rendered += f" и ещё {len(variants) - 4}"
-        else:
-            rendered = "Нет."
+def pc_family_summary(data, family):
+    lines = [
+        f"Уникальных шаблонов: `{len(data.get('groups', {}))}`.",
+        f"Каналов с совпадениями: `{len(data.get('channels', {}))}`.",
+    ]
+    if pc_length_enabled_for_family(family):
         lines.append(
-            f"• **{group['canonical']}** — `{group['occurrences']}`\n"
-            f"  Вариации: {rendered}"
+            pc_length_summary(
+                data.get("long", 0),
+                data.get("short", 0),
+            )
         )
-    if len(groups) > limit:
-        lines.append(f"…и ещё `{len(groups) - limit}` групп в полном TXT-отчёте.")
-    return "\n".join(lines)[:1024]
+    else:
+        lines.append(
+            "Подсчёт длины для этого семейства отключён "
+            "переключателем в начале блока."
+        )
+    return "\n".join(lines)
+
+
+def pc_public_clip(value, limit=240):
+    text = str(value or "").replace("\n", " ").replace("\r", " ")
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: max(1, limit - 16)] + "… [полностью в TXT]"
+
+
+def pc_sorted_channels(channels):
+    return sorted(
+        (channels or {}).values(),
+        key=lambda item: (
+            -int(item.get("messages", 0)),
+            str(item.get("label") or "").casefold(),
+            str(item.get("id") or ""),
+        ),
+    )
+
+
+def pc_channel_report_lines(channels, indent="  "):
+    rendered = []
+    for item in pc_sorted_channels(channels):
+        channel_id = item.get("id")
+        label = pc_public_clip(item.get("label"), 220)
+        location = (
+            f"<#{channel_id}> — {label}"
+            if channel_id
+            else label
+        )
+        rendered.append(
+            f"{indent}• `{item.get('messages', 0)}` — {location}"
+        )
+    return rendered or [f"{indent}• Совпадений нет."]
+
+
+def pc_template_channel_report_lines(stats, families):
+    lines = [
+        "📍 **Полное распределение шаблонов по каналам**",
+        (
+            "Числа в списках каналов — количество сообщений. "
+            "В заголовках отдельно указано количество найденных меток."
+        ),
+        "",
+    ]
+
+    for family in families:
+        data = stats[family]
+        lines.extend([
+            f"## {PC_LABELS[family]}",
+            (
+                f"Всего сообщений: `{data['messages']}`; "
+                f"меток: `{data['occurrences']}`; "
+                f"каналов: `{len(data.get('channels', {}))}`."
+            ),
+            "**Все сообщения семейства по каналам:**",
+        ])
+        lines.extend(pc_channel_report_lines(data.get("channels", {})))
+
+        groups = sorted(
+            data.get("groups", {}).values(),
+            key=lambda item: (
+                -int(item.get("messages", 0)),
+                -int(item.get("occurrences", 0)),
+                str(item.get("canonical") or "").casefold(),
+            ),
+        )
+
+        if not groups:
+            lines.extend(["Совпадений нет.", ""])
+            continue
+
+        for group in groups:
+            canonical = pc_public_clip(group.get("canonical"), 300)
+            lines.extend([
+                "",
+                (
+                    f"### {canonical} — сообщений `{group['messages']}`, "
+                    f"меток `{group['occurrences']}`"
+                ),
+                "**Все написания этого шаблона по каналам:**",
+            ])
+            lines.extend(
+                pc_channel_report_lines(group.get("channels", {}))
+            )
+
+            exact = group.get("exact", {})
+            if exact.get("occurrences", 0):
+                lines.extend([
+                    (
+                        f"**Точное написание `{canonical}`** — "
+                        f"сообщений `{exact.get('messages', 0)}`, "
+                        f"меток `{exact.get('occurrences', 0)}`:"
+                    ),
+                ])
+                lines.extend(
+                    pc_channel_report_lines(
+                        exact.get("channels", {}),
+                        indent="  ",
+                    )
+                )
+
+            variants = sorted(
+                group.get("variants", {}).items(),
+                key=lambda item: (
+                    -int(item[1].get("messages", 0)),
+                    -int(item[1].get("occurrences", 0)),
+                    str(item[0]).casefold(),
+                ),
+            )
+
+            for variant, variant_data in variants:
+                variant_display = pc_public_clip(
+                    str(variant).replace("`", "ˋ"),
+                    300,
+                )
+                lines.append(
+                    f"**Вариант `{variant_display}`** — "
+                    f"сообщений `{variant_data.get('messages', 0)}`, "
+                    f"меток `{variant_data.get('occurrences', 0)}`:"
+                )
+                lines.extend(
+                    pc_channel_report_lines(
+                        variant_data.get("channels", {}),
+                        indent="  ",
+                    )
+                )
+
+        lines.append("")
+
+    return lines
+
+
+def pc_split_lines_for_discord(
+    lines,
+    max_chars=PC_PUBLIC_REPORT_CHUNK_CHARS,
+):
+    chunks = []
+    current = []
+    current_size = 0
+
+    for raw_line in lines:
+        line = str(raw_line or "")
+
+        # Динамические названия выше заранее ограничены, поэтому эта ветка —
+        # последняя защита от патологически длинной строки.
+        if len(line) > max_chars:
+            line = pc_public_clip(line, max_chars - 4)
+
+        added = len(line) + (1 if current else 0)
+        if current and current_size + added > max_chars:
+            chunks.append("\n".join(current))
+            current = [line]
+            current_size = len(line)
+        else:
+            current.append(line)
+            current_size += added
+
+    if current:
+        chunks.append("\n".join(current))
+
+    return chunks
+
+
+async def pc_send_reply_chain(interaction, chunks, previous_message=None):
+    if previous_message is None:
+        previous_message = await interaction.original_response()
+
+    for chunk in chunks:
+        sent = await interaction.channel.send(
+            content=chunk,
+            reference=previous_message,
+            mention_author=False,
+        )
+        previous_message = sent
+
+    return previous_message
+
+
+def pc_record_identity(record):
+    return (
+        record.get("id")
+        or record.get("jump_url")
+        or (
+            f"{record.get('channel_id')}:"
+            f"{record.get('created_at')}:"
+            f"{hash(record.get('content', ''))}"
+        )
+    )
+
+
+def pc_records_for_surface(
+    records,
+    family,
+    payload_key,
+    *,
+    exact=False,
+    variant=None,
+):
+    selected = {}
+
+    for record in records:
+        for match in record.get("matches", []):
+            if (
+                match.get("family") != family
+                or match.get("payload_key") != payload_key
+            ):
+                continue
+
+            if exact and match.get("exact"):
+                selected[pc_record_identity(record)] = record
+                break
+
+            if (
+                not exact
+                and variant is not None
+                and not match.get("exact")
+                and match.get("surface") == variant
+            ):
+                selected[pc_record_identity(record)] = record
+                break
+
+    return list(selected.values())
+
+
+def pc_record_datetime_msk(record):
+    value = pc_api_timestamp(record.get("created_at"))
+    if value is None:
+        return record.get("created_at") or "неизвестно"
+    return value.astimezone(PC_MOSCOW_TZ).strftime("%d.%m.%Y %H:%M:%S МСК")
+
+
+def pc_record_sort_key(record):
+    body_length = record.get("body_length")
+    if not isinstance(body_length, int):
+        body_length = -1
+    return (
+        str(record.get("channel") or "").casefold(),
+        -body_length,
+        str(record.get("created_at") or ""),
+        str(record.get("id") or ""),
+    )
+
+
+def pc_append_txt_channels(lines, channels, indent="  "):
+    for item in pc_sorted_channels(channels):
+        channel_id = item.get("id") or "?"
+        lines.append(
+            f"{indent}• {item.get('messages', 0)} — "
+            f"{item.get('label', 'неизвестный канал')} "
+            f"(channel_id: {channel_id})"
+        )
+    if not channels:
+        lines.append(f"{indent}• Совпадений нет.")
+
+
+def pc_append_txt_message(lines, record, number, family):
+    length_enabled = pc_length_enabled_for_family(family)
+    body_length = record.get("body_length")
+
+    if length_enabled and isinstance(body_length, int):
+        length_text = (
+            f"{body_length} символов — "
+            f"{'ДЛИННЫЙ' if body_length >= PC_LONG_POST_MIN_CHARS else 'КОРОТКИЙ'}"
+        )
+    else:
+        length_text = "не классифицируется для этого семейства"
+
+    surfaces = []
+    for match in record.get("matches", []):
+        if match.get("family") != family:
+            continue
+        surfaces.append(
+            match.get("canonical")
+            if match.get("exact")
+            else match.get("surface")
+        )
+
+    unique_surfaces = []
+    seen_surfaces = set()
+    for surface in surfaces:
+        key = str(surface)
+        if key in seen_surfaces:
+            continue
+        seen_surfaces.add(key)
+        unique_surfaces.append(key)
+
+    lines.extend([
+        f"[{number}]",
+        f"Дата: {pc_record_datetime_msk(record)}",
+        (
+            f"Канал: {record.get('channel', 'неизвестный канал')} "
+            f"(channel_id: {record.get('channel_id') or '?'})"
+        ),
+        f"ID сообщения: {record.get('id') or '?'}",
+        f"Ссылка: {record.get('jump_url') or 'нет ссылки'}",
+        f"Длина текста без найденных меток: {length_text}",
+        "Найденные написания этого семейства: "
+        + (", ".join(unique_surfaces) if unique_surfaces else "не указаны"),
+        "Текст сообщения:",
+        "-" * 72,
+        record.get("content") or "[пустой текст]",
+        "-" * 72,
+        "",
+    ])
+
+
+def pc_append_txt_surface_messages(lines, records, family):
+    records = sorted(records, key=pc_record_sort_key)
+
+    if pc_length_enabled_for_family(family):
+        long_records = [
+            record for record in records
+            if record.get("length_kind") == "long"
+        ]
+        short_records = [
+            record for record in records
+            if record.get("length_kind") == "short"
+        ]
+        unclassified = [
+            record for record in records
+            if record.get("length_kind") not in {"long", "short"}
+        ]
+
+        sections = [
+            (
+                f"ДЛИННЫЕ СООБЩЕНИЯ "
+                f"(≥{PC_LONG_POST_MIN_CHARS} символов)",
+                long_records,
+            ),
+            (
+                f"КОРОТКИЕ СООБЩЕНИЯ "
+                f"(<{PC_LONG_POST_MIN_CHARS} символов)",
+                short_records,
+            ),
+        ]
+        if unclassified:
+            sections.append(
+                ("БЕЗ КЛАССИФИКАЦИИ ДЛИНЫ", unclassified)
+            )
+    else:
+        sections = [
+            (
+                "ВСЕ СООБЩЕНИЯ "
+                "(классификация длины для семейства отключена)",
+                records,
+            )
+        ]
+
+    for title, section_records in sections:
+        lines.extend([
+            title,
+            "." * 72,
+            f"Количество сообщений: {len(section_records)}",
+        ])
+        if not section_records:
+            lines.extend(["Сообщений нет.", ""])
+            continue
+
+        for number, record in enumerate(section_records, start=1):
+            pc_append_txt_message(
+                lines,
+                record,
+                number,
+                family,
+            )
 
 
 def pc_full_report(
@@ -8233,71 +8863,230 @@ def pc_full_report(
     matched,
     scanned,
     length_stats,
+    records,
 ):
     long_count = length_stats.get("long", 0)
     short_count = length_stats.get("short", 0)
     total_lengths = long_count + short_count
+    enabled_families = [
+        PC_LABELS[family]
+        for family in families
+        if pc_length_enabled_for_family(family)
+    ]
 
     lines = [
         "ПОЛНЫЙ ОТЧЁТ ПО ШАБЛОНАМ",
         "=" * 72,
         f"Пользователь: {user} ({user.id})",
-        f"Период МСК: {period.start_date:%d.%m.%Y} — {period.end_date:%d.%m.%Y} включительно",
+        (
+            f"Период МСК: {period.start_date:%d.%m.%Y} — "
+            f"{period.end_date:%d.%m.%Y} включительно"
+        ),
         f"Сообщений хотя бы с одним шаблоном: {matched}",
         f"Проверено сообщений пользователя: {scanned}",
-        "",
-        "ДЛИНА ШАБЛОННЫХ ПОСТОВ БЕЗ САМИХ МЕТОК",
-        "-" * 72,
-        f"Порог длинного поста: не менее {PC_LONG_POST_MIN_CHARS} символов",
-        f"Длинных: {long_count} ({pc_percent(long_count, total_lengths):.1f}%)",
-        f"Коротких: {short_count} ({pc_percent(short_count, total_lengths):.1f}%)",
+        f"Полных записей сообщений в отчёте: {len(records)}",
+        (
+            "Подсчёт длины для всех шаблонов: "
+            f"{'ВКЛЮЧЁН' if PC_COUNT_LENGTH_FOR_ALL_TEMPLATES else 'ВЫКЛЮЧЕН'}"
+        ),
+        (
+            "Семейства, для которых считается длина: "
+            + (", ".join(enabled_families) if enabled_families else "нет")
+        ),
         "",
     ]
+
+    if enabled_families:
+        lines.extend([
+            "ОБЩАЯ СТАТИСТИКА ДЛИНЫ УЧИТЫВАЕМЫХ ПОСТОВ БЕЗ МЕТОК",
+            "-" * 72,
+            (
+                f"Порог длинного поста: не менее "
+                f"{PC_LONG_POST_MIN_CHARS} символов"
+            ),
+            (
+                f"Длинных: {long_count} "
+                f"({pc_percent(long_count, total_lengths):.1f}%)"
+            ),
+            (
+                f"Коротких: {short_count} "
+                f"({pc_percent(short_count, total_lengths):.1f}%)"
+            ),
+            "",
+        ])
+
     for family in families:
         data = stats[family]
         lines.extend([
+            "",
+            "#" * 72,
             PC_LABELS[family],
-            "-" * 72,
+            "#" * 72,
             f"Сообщений: {data['messages']}",
             f"Меток: {data['occurrences']}",
-            (
-                f"Длинных: {data.get('long', 0)} "
-                f"({pc_percent(data.get('long', 0), data['messages']):.1f}%)"
-            ),
-            (
-                f"Коротких: {data.get('short', 0)} "
-                f"({pc_percent(data.get('short', 0), data['messages']):.1f}%)"
-            ),
-            f"Уникальных значений: {len(data['groups'])}",
+            f"Уникальных шаблонов: {len(data['groups'])}",
+            f"Каналов с совпадениями: {len(data.get('channels', {}))}",
         ])
+
+        if pc_length_enabled_for_family(family):
+            lines.extend([
+                (
+                    f"Длинных: {data.get('long', 0)} "
+                    f"({pc_percent(data.get('long', 0), data['messages']):.1f}%)"
+                ),
+                (
+                    f"Коротких: {data.get('short', 0)} "
+                    f"({pc_percent(data.get('short', 0), data['messages']):.1f}%)"
+                ),
+            ])
+        else:
+            lines.append(
+                "Классификация длины для этого семейства отключена."
+            )
+
+        lines.extend([
+            "",
+            "РАСПРЕДЕЛЕНИЕ ВСЕГО СЕМЕЙСТВА ПО КАНАЛАМ",
+            "-" * 72,
+        ])
+        pc_append_txt_channels(lines, data.get("channels", {}))
+
         groups = sorted(
-            data["groups"].values(),
-            key=lambda item: (-item["occurrences"], item["canonical"].casefold()),
+            data["groups"].items(),
+            key=lambda item: (
+                -int(item[1].get("messages", 0)),
+                -int(item[1].get("occurrences", 0)),
+                str(item[1].get("canonical") or "").casefold(),
+            ),
         )
+
         if not groups:
             lines.extend(["Совпадений нет.", ""])
             continue
-        for group in groups:
-            lines.append(f"• {group['canonical']} — меток: {group['occurrences']}")
-            if group["exact"]:
-                lines.append(f"  Точное написание: {group['exact']}")
+
+        for payload_key, group in groups:
+            lines.extend([
+                "",
+                "=" * 72,
+                f"ШАБЛОН: {group['canonical']}",
+                "=" * 72,
+                f"Ключ группы: {payload_key}",
+                f"Сообщений: {group['messages']}",
+                f"Меток: {group['occurrences']}",
+                "Распределение всех написаний шаблона по каналам:",
+            ])
+            pc_append_txt_channels(lines, group.get("channels", {}))
+
+            exact = group.get("exact", {})
+            if exact.get("occurrences", 0):
+                exact_records = pc_records_for_surface(
+                    records,
+                    family,
+                    payload_key,
+                    exact=True,
+                )
+                lines.extend([
+                    "",
+                    "~" * 72,
+                    f"ТОЧНОЕ НАПИСАНИЕ: {group['canonical']}",
+                    "~" * 72,
+                    f"Сообщений: {exact.get('messages', 0)}",
+                    f"Меток: {exact.get('occurrences', 0)}",
+                    "Распределение по каналам:",
+                ])
+                pc_append_txt_channels(
+                    lines,
+                    exact.get("channels", {}),
+                )
+                pc_append_txt_surface_messages(
+                    lines,
+                    exact_records,
+                    family,
+                )
+
             variants = sorted(
-                group["variants"].items(),
-                key=lambda item: (-item[1], item[0].casefold()),
+                group.get("variants", {}).items(),
+                key=lambda item: (
+                    -int(item[1].get("messages", 0)),
+                    -int(item[1].get("occurrences", 0)),
+                    str(item[0]).casefold(),
+                ),
             )
-            if variants:
-                lines.append("  Вариации: " + ", ".join(
-                    variant + (f" ×{count}" if count > 1 else "")
-                    for variant, count in variants
-                ))
-            else:
-                lines.append("  Вариации: Нет.")
-        lines.append("")
+
+            for variant, variant_data in variants:
+                variant_records = pc_records_for_surface(
+                    records,
+                    family,
+                    payload_key,
+                    variant=variant,
+                )
+                lines.extend([
+                    "",
+                    "~" * 72,
+                    f"ВАРИАНТ: {variant}",
+                    "~" * 72,
+                    f"Сообщений: {variant_data.get('messages', 0)}",
+                    f"Меток: {variant_data.get('occurrences', 0)}",
+                    "Распределение по каналам:",
+                ])
+                pc_append_txt_channels(
+                    lines,
+                    variant_data.get("channels", {}),
+                )
+                pc_append_txt_surface_messages(
+                    lines,
+                    variant_records,
+                    family,
+                )
+
     return "\n".join(lines).rstrip() + "\n"
 
 
 def pc_txt_file(text: str, filename: str):
-    return disnake.File(io.BytesIO(text.encode("utf-8-sig")), filename=filename)
+    return disnake.File(
+        io.BytesIO(text.encode("utf-8-sig")),
+        filename=filename,
+    )
+
+
+def pc_split_txt_parts(text: str, filename: str):
+    encoded = text.encode("utf-8-sig")
+    if len(encoded) <= PC_TXT_PART_MAX_BYTES:
+        return [(filename, text)]
+
+    lines = text.splitlines(keepends=True)
+    parts = []
+    current = []
+    current_bytes = len("\ufeff".encode("utf-8"))
+
+    for line in lines:
+        line_bytes = len(line.encode("utf-8"))
+
+        if current and current_bytes + line_bytes > PC_TXT_PART_MAX_BYTES:
+            parts.append("".join(current))
+            current = [line]
+            current_bytes = (
+                len("\ufeff".encode("utf-8")) + line_bytes
+            )
+        else:
+            current.append(line)
+            current_bytes += line_bytes
+
+    if current:
+        parts.append("".join(current))
+
+    stem, extension = os.path.splitext(filename)
+    extension = extension or ".txt"
+    width = max(2, len(str(len(parts))))
+
+    return [
+        (
+            f"{stem}-part-{index:0{width}d}-of-"
+            f"{len(parts):0{width}d}{extension}",
+            part,
+        )
+        for index, part in enumerate(parts, start=1)
+    ]
 
 
 def pc_faq(title, description, fields):
@@ -8343,8 +9132,25 @@ def pc_posts_faq():
             ("Допуски шаблонов", "Игнорируются регистр, `#`, дефисы, подчёркивания, скобки и Discord-разметка. В служебном префиксе разрешена одна вставка, потеря, замена символа или перестановка соседних букв."),
             ("с_даты", "Начало включительно: `ДД.ММ.ГГ` или `ДД.ММ.ГГГГ`. Начальная дата обязана существовать."),
             ("по_дату", "Конец включительно. Завышенный день заменяется последним днём месяца: `99.06.2026` → `30.06.2026`."),
-            ("Длина шаблонных постов", f"После удаления всех найденных шаблонных меток бот измеряет оставшийся текст. Длинный пост — не менее `{PC_LONG_POST_MIN_CHARS}` символов, короткий — меньше. В результате показываются количества и проценты."),
-            ("Результат шаблонов", "Показывает сообщения и метки каждого семейства, длину постов без меток, группы по хвостам, все найденные опечатки/вариации и прикладывает полный TXT. Поле «проверено» означает число сообщений именно выбранного пользователя, полученных через быстрый поиск или резервный обход."),
+            (
+                "Длина шаблонных постов",
+                (
+                    f"После удаления найденных меток бот измеряет оставшийся текст. "
+                    f"Длинный пост — не менее `{PC_LONG_POST_MIN_CHARS}` символов. "
+                    "Сейчас длина считается только для `ГМ-пост`. "
+                    "Переключатель `PC_COUNT_LENGTH_FOR_ALL_TEMPLATES = True` "
+                    "в начале блока включает её для всех шаблонов."
+                ),
+            ),
+            (
+                "Результат шаблонов",
+                (
+                    "Показывает сообщения и метки каждого семейства, полное "
+                    "распределение каждого шаблона и варианта по всем каналам. "
+                    "Подробности отправляются цепочкой ответов без обрезания строк. "
+                    "TXT содержит полный текст и ссылку на каждое найденное сообщение."
+                ),
+            ),
         ],
     )
 
@@ -8723,7 +9529,7 @@ async def slash_count_posts(
                 f"Подходящих сообщений пока: `{current_matched}`.\n"
                 + (
                     f"Длинных пока: `{current_long}`, коротких: `{current_short}`.\n"
-                    if families
+                    if pc_any_length_enabled(families)
                     else ""
                 )
                 + f"Ошибок чтения пока: `{current_failed}`.\n"
@@ -8761,7 +9567,7 @@ async def slash_count_posts(
                 f"Подходящих сообщений пока: `{current_matched}`.\n"
                 + (
                     f"Длинных пока: `{current_long}`, коротких: `{current_short}`.\n"
-                    if families
+                    if pc_any_length_enabled(families)
                     else ""
                 )
                 + f"Прошло времени: `{elapsed_now:.1f} сек.`"
@@ -8866,19 +9672,23 @@ async def slash_count_posts(
 
     report = None
     filename = "post-count-report.txt"
+    template_channel_lines = []
+    template_records = []
 
     if families:
         stats = pc_merge_stats(results, families)
         length_stats = pc_merge_lengths(results)
+        template_records = pc_collect_template_records(results)
 
-        embed.add_field(
-            name="Длина шаблонных постов без меток",
-            value=pc_length_summary(
-                length_stats["long"],
-                length_stats["short"],
-            ),
-            inline=False,
-        )
+        if pc_any_length_enabled(families):
+            embed.add_field(
+                name=pc_length_scope_name(families),
+                value=pc_length_summary(
+                    length_stats["long"],
+                    length_stats["short"],
+                ),
+                inline=False,
+            )
 
         for family in families:
             data = stats[family]
@@ -8887,9 +9697,14 @@ async def slash_count_posts(
                     f"{PC_LABELS[family]} — сообщений "
                     f"`{data['messages']}`, меток `{data['occurrences']}`"
                 ),
-                value=pc_family_preview(data),
+                value=pc_family_summary(data, family)[:1024],
                 inline=False,
             )
+
+        template_channel_lines = pc_template_channel_report_lines(
+            stats,
+            families,
+        )
 
         report = pc_full_report(
             пользователь,
@@ -8899,6 +9714,7 @@ async def slash_count_posts(
             matched,
             scanned,
             length_stats,
+            template_records,
         )
         filename = (
             f"post-templates-{пользователь.id}-"
@@ -8994,13 +9810,23 @@ async def slash_count_posts(
         )
 
     if families:
+        enabled_length_labels = [
+            PC_LABELS[family]
+            for family in families
+            if pc_length_enabled_for_family(family)
+        ]
+        if enabled_length_labels:
+            notes.append(
+                f"Длинный пост: не менее `{PC_LONG_POST_MIN_CHARS}` символов "
+                "после удаления найденных шаблонных меток. "
+                "Длина учитывается для: "
+                + ", ".join(enabled_length_labels)
+                + "."
+            )
         notes.append(
-            f"Длинный пост: не менее `{PC_LONG_POST_MIN_CHARS}` символов "
-            "после удаления всех найденных шаблонных меток."
-        )
-        notes.append(
-            "Полный список групп, длины постов и всех исходных вариаций "
-            "приложен TXT-файлом."
+            "Полное распределение каждого шаблона и варианта по каналам "
+            "отправлено цепочкой ответов. TXT содержит полный текст и ссылку "
+            "на каждое найденное сообщение."
         )
 
     notes.append(f"Время выполнения: `{elapsed:.1f} сек.`")
@@ -9024,7 +9850,7 @@ async def slash_count_posts(
 
     # Публичное сообщение прогресса превращается в финальную сводку.
     try:
-        await interaction.edit_original_response(
+        final_message = await interaction.edit_original_response(
             content=None,
             embed=embed,
         )
@@ -9035,38 +9861,64 @@ async def slash_count_posts(
             exc_info=True,
         )
         try:
-            await interaction.channel.send(
+            final_message = await interaction.channel.send(
                 content=interaction.author.mention,
                 embed=embed,
             )
         except Exception:
-            pass
-        return
+            return
 
-    # Полный отчёт отправляется отдельным обычным сообщением.
+    previous_message = final_message
+
+    # Для шаблонных режимов публикуем ВСЮ разбивку по каналам.
+    # Части режутся только между строками и образуют цепочку ответов.
+    if families and template_channel_lines:
+        try:
+            public_chunks = pc_split_lines_for_discord(
+                template_channel_lines,
+            )
+            previous_message = await pc_send_reply_chain(
+                interaction,
+                public_chunks,
+                previous_message=previous_message,
+            )
+        except Exception as exc:
+            logger.error(
+                "Не удалось отправить полную разбивку шаблонов по каналам: %s",
+                exc,
+                exc_info=True,
+            )
+
+    # Полный TXT содержит все сообщения, их полный текст и jump_url.
+    # Очень большой отчёт автоматически делится на несколько TXT-файлов.
     if report:
         try:
-            await interaction.followup.send(
-                content="📎 Полный отчёт по всем найденным вариациям:",
-                file=pc_txt_file(report, filename),
-                ephemeral=False,
-            )
+            txt_parts = pc_split_txt_parts(report, filename)
+            for index, (part_filename, part_text) in enumerate(
+                txt_parts,
+                start=1,
+            ):
+                label = (
+                    "📎 Полный аналитический TXT-отчёт:"
+                    if len(txt_parts) == 1
+                    else (
+                        f"📎 Полный аналитический TXT-отчёт — "
+                        f"часть `{index}/{len(txt_parts)}`:"
+                    )
+                )
+                sent = await interaction.channel.send(
+                    content=label,
+                    file=pc_txt_file(part_text, part_filename),
+                    reference=previous_message,
+                    mention_author=False,
+                )
+                previous_message = sent
         except Exception as exc:
             logger.error(
                 "Не удалось отправить публичный TXT-отчёт: %s",
                 exc,
                 exc_info=True,
             )
-            try:
-                await interaction.channel.send(
-                    content=(
-                        f"{interaction.author.mention}\n"
-                        "📎 Полный отчёт по всем найденным вариациям:"
-                    ),
-                    file=pc_txt_file(report, filename),
-                )
-            except Exception:
-                pass
 
 
 logger.info(
