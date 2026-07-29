@@ -8533,25 +8533,21 @@ def pc_template_channel_report_lines(stats, families):
     - каждый канонический шаблон;
     - распределение канонического шаблона по каналам.
 
-    Точные написания, опечатки и другие фактические варианты выводятся
-    только в завершающем разделе подробного TXT-отчёта.
+    Количество меток, точные написания, опечатки и другие фактические
+    варианты выводятся только в подробном TXT-отчёте.
     """
     lines = [
-        (
-            "Числа возле каналов — количество сообщений; "
-            "количество меток указывается в заголовках."
-        ),
+        "Числа возле каналов — количество сообщений.",
         "",
     ]
 
     for family in families:
         data = stats[family]
         messages = int(data.get("messages", 0))
-        occurrences = int(data.get("occurrences", 0))
         groups_count = len(data.get("groups", {}))
         channels_count = len(data.get("channels", {}))
 
-        if messages == 0 and occurrences == 0:
+        if messages == 0:
             lines.extend([
                 f"## {PC_LABELS[family]} — совпадений нет.",
                 "",
@@ -8560,8 +8556,7 @@ def pc_template_channel_report_lines(stats, families):
 
         lines.append(
             f"## {PC_LABELS[family]} — сообщений `{messages}`, "
-            f"меток `{occurrences}`, шаблонов `{groups_count}`, "
-            f"каналов `{channels_count}`"
+            f"шаблонов `{groups_count}`, каналов `{channels_count}`"
         )
 
         if pc_length_enabled_for_family(family):
@@ -8594,7 +8589,6 @@ def pc_template_channel_report_lines(stats, families):
                 "",
                 (
                     f"### {canonical} — сообщений `{group['messages']}`, "
-                    f"меток `{group['occurrences']}`, "
                     f"каналов `{len(group_channels)}`"
                 ),
                 "**По каналам:**",
@@ -8604,7 +8598,6 @@ def pc_template_channel_report_lines(stats, families):
         lines.append("")
 
     return lines
-
 
 def pc_template_public_report_lines(
     user,
@@ -8637,23 +8630,11 @@ def pc_template_public_report_lines(
 
     lines.extend(pc_template_channel_report_lines(stats, families))
 
-    lines.extend([
-        "",
-        "**Примечания**",
-    ])
-
     for note in extra_notes or ():
         if note:
             lines.append(str(note))
 
-    lines.extend([
-        (
-            "Распределение шаблонов и вариантов приведено в этом отчёте; "
-            "прикреплённый TXT содержит полные тексты и ссылки."
-        ),
-        f"Время выполнения: `{elapsed:.1f} сек.`",
-    ])
-
+    lines.append(f"Время выполнения: `{elapsed:.1f} сек.`")
     return lines
 
 def pc_split_lines_for_discord(
@@ -8971,6 +8952,15 @@ def pc_full_report(
         f"Ошибок поиска веток: {len(discovery_errors or [])}",
         f"Непрочитанных каналов/веток: {len(failed or [])}",
         f"Время выполнения: {elapsed:.1f} сек.",
+        "",
+        "ПОДСЧЁТ МЕТОК",
+        "-" * 72,
+        (
+            "Количество меток — число всех вхождений шаблонных обозначений. "
+            "Одно сообщение может содержать несколько меток, поэтому число "
+            "меток может быть больше числа сообщений."
+        ),
+        "Эта статистика выводится только в TXT-отчёте.",
         "",
         "ПАРАМЕТРЫ ФИЛЬТРА ДЛИНЫ",
         "-" * 72,
@@ -9343,16 +9333,6 @@ def pc_posts_faq():
                     f"После удаления найденных меток бот измеряет оставшийся текст. "
                     f"Длинный пост — не менее `{PC_LONG_POST_MIN_CHARS}` символов. "
                     "Сейчас длина считается только для `ГМ-пост`."
-                ),
-            ),
-            (
-                "Результат шаблонов",
-                (
-                    "Основной embed объединяет сводку и распределение каждого шаблона "
-                    "по каналам. Продолжения отправляются только при переполнении "
-                    "и режутся между целыми строками. Подробный TXT с вариантами "
-                    "написания, полными текстами и ссылками прикрепляется к первому "
-                    "сообщению."
                 ),
             ),
         ],
@@ -9928,10 +9908,7 @@ async def slash_count_posts(
             timestamp=datetime.now(),
         )
         first_embed.set_footer(
-            text=(
-                f"Часть 1/{max(1, len(public_chunks))} • "
-                "сообщение считается один раз, метки — отдельно"
-            )
+            text=f"Часть 1/{max(1, len(public_chunks))}"
         )
 
     else:
