@@ -8525,9 +8525,16 @@ def pc_channel_report_lines(channels, indent="  "):
 
 def pc_template_channel_report_lines(stats, families):
     """
-    Формирует публичную подробную часть отчёта без дублирования основной
-    статистики. Для каждого семейства сразу показывает общие числа, длину
-    (если включена), все каналы, шаблоны, точные написания и вариации.
+    Формирует публичную часть шаблонного отчёта.
+
+    В Discord показываются только:
+    - общая статистика каждого семейства;
+    - распределение семейства по каналам;
+    - каждый канонический шаблон;
+    - распределение канонического шаблона по каналам.
+
+    Точные написания, опечатки и другие фактические варианты выводятся
+    только в завершающем разделе подробного TXT-отчёта.
     """
     lines = [
         (
@@ -8582,57 +8589,17 @@ def pc_template_channel_report_lines(stats, families):
 
         for group in groups:
             canonical = pc_public_clip(group.get("canonical"), 300)
+            group_channels = group.get("channels", {})
             lines.extend([
                 "",
                 (
                     f"### {canonical} — сообщений `{group['messages']}`, "
-                    f"меток `{group['occurrences']}`"
+                    f"меток `{group['occurrences']}`, "
+                    f"каналов `{len(group_channels)}`"
                 ),
-                "**Все написания этого шаблона по каналам:**",
+                "**По каналам:**",
             ])
-            lines.extend(
-                pc_channel_report_lines(group.get("channels", {}))
-            )
-
-            exact = group.get("exact", {})
-            if exact.get("occurrences", 0):
-                lines.append(
-                    f"**Точное написание `{canonical}`** — "
-                    f"сообщений `{exact.get('messages', 0)}`, "
-                    f"меток `{exact.get('occurrences', 0)}`:"
-                )
-                lines.extend(
-                    pc_channel_report_lines(
-                        exact.get("channels", {}),
-                        indent="  ",
-                    )
-                )
-
-            variants = sorted(
-                group.get("variants", {}).items(),
-                key=lambda item: (
-                    -int(item[1].get("messages", 0)),
-                    -int(item[1].get("occurrences", 0)),
-                    str(item[0]).casefold(),
-                ),
-            )
-
-            for variant, variant_data in variants:
-                variant_display = pc_public_clip(
-                    str(variant).replace("`", "ˋ"),
-                    300,
-                )
-                lines.append(
-                    f"**Вариант `{variant_display}`** — "
-                    f"сообщений `{variant_data.get('messages', 0)}`, "
-                    f"меток `{variant_data.get('occurrences', 0)}`:"
-                )
-                lines.extend(
-                    pc_channel_report_lines(
-                        variant_data.get("channels", {}),
-                        indent="  ",
-                    )
-                )
+            lines.extend(pc_channel_report_lines(group_channels))
 
         lines.append("")
 
@@ -9081,6 +9048,9 @@ def pc_full_report(
             "",
         ])
 
+    # Основная часть TXT: только семейства и канонические шаблоны.
+    # Детализация точных написаний и опечаток намеренно откладывается
+    # до отдельного завершающего раздела в самом конце файла.
     for family in families:
         data = stats[family]
         lines.extend([
@@ -9131,6 +9101,12 @@ def pc_full_report(
             lines.extend(["Совпадений нет.", ""])
             continue
 
+        lines.extend([
+            "",
+            "КАНОНИЧЕСКИЕ ШАБЛОНЫ И ИХ КАНАЛЫ",
+            "-" * 72,
+        ])
+
         for payload_key, group in groups:
             lines.extend([
                 "",
@@ -9140,11 +9116,74 @@ def pc_full_report(
                 f"Ключ группы: {payload_key}",
                 f"Сообщений: {group['messages']}",
                 f"Меток: {group['occurrences']}",
-                "Распределение всех написаний шаблона по каналам:",
+                f"Каналов: {len(group.get('channels', {}))}",
+                "Распределение шаблона по каналам:",
             ])
             pc_append_txt_channels(lines, group.get("channels", {}))
 
+    # Самый конец TXT: точные написания, все варианты/опечатки,
+    # распределение каждого написания по каналам и полные сообщения.
+    lines.extend([
+        "",
+        "",
+        "#" * 72,
+        "ДЕТАЛИЗАЦИЯ ВАРИАНТОВ НАПИСАНИЯ И ПОЛНЫХ СООБЩЕНИЙ",
+        "#" * 72,
+        (
+            "Этот раздел намеренно расположен в самом конце отчёта. "
+            "Для каждого канонического шаблона здесь перечислены точное "
+            "написание и все найденные варианты/опечатки, их каналы, "
+            "полные тексты сообщений и прямые ссылки."
+        ),
+    ])
+
+    any_surface_details = False
+
+    for family in families:
+        data = stats[family]
+        groups = sorted(
+            data["groups"].items(),
+            key=lambda item: (
+                -int(item[1].get("messages", 0)),
+                -int(item[1].get("occurrences", 0)),
+                str(item[1].get("canonical") or "").casefold(),
+            ),
+        )
+
+        if not groups:
+            continue
+
+        lines.extend([
+            "",
+            "=" * 72,
+            f"СЕМЕЙСТВО: {PC_LABELS[family]}",
+            "=" * 72,
+        ])
+
+        for payload_key, group in groups:
             exact = group.get("exact", {})
+            variants = sorted(
+                group.get("variants", {}).items(),
+                key=lambda item: (
+                    -int(item[1].get("messages", 0)),
+                    -int(item[1].get("occurrences", 0)),
+                    str(item[0]).casefold(),
+                ),
+            )
+
+            if not exact.get("occurrences", 0) and not variants:
+                continue
+
+            any_surface_details = True
+            lines.extend([
+                "",
+                "*" * 72,
+                f"КАНОНИЧЕСКИЙ ШАБЛОН: {group['canonical']}",
+                "*" * 72,
+                f"Всего сообщений шаблона: {group['messages']}",
+                f"Всего меток шаблона: {group['occurrences']}",
+            ])
+
             if exact.get("occurrences", 0):
                 exact_records = pc_records_for_surface(
                     records,
@@ -9171,15 +9210,6 @@ def pc_full_report(
                     family,
                 )
 
-            variants = sorted(
-                group.get("variants", {}).items(),
-                key=lambda item: (
-                    -int(item[1].get("messages", 0)),
-                    -int(item[1].get("occurrences", 0)),
-                    str(item[0]).casefold(),
-                ),
-            )
-
             for variant, variant_data in variants:
                 variant_records = pc_records_for_surface(
                     records,
@@ -9190,8 +9220,9 @@ def pc_full_report(
                 lines.extend([
                     "",
                     "~" * 72,
-                    f"ВАРИАНТ: {variant}",
+                    f"ВАРИАНТ / ОПЕЧАТКА: {variant}",
                     "~" * 72,
+                    f"Канонический шаблон: {group['canonical']}",
                     f"Сообщений: {variant_data.get('messages', 0)}",
                     f"Меток: {variant_data.get('occurrences', 0)}",
                     "Распределение по каналам:",
@@ -9206,7 +9237,11 @@ def pc_full_report(
                     family,
                 )
 
+    if not any_surface_details:
+        lines.extend(["", "Варианты написания не найдены."])
+
     return "\n".join(lines).rstrip() + "\n"
+
 
 def pc_txt_file(text: str, filename: str):
     return disnake.File(
@@ -9299,7 +9334,7 @@ def pc_posts_faq():
             ("пользователь", "Участник, чьи сообщения нужно считать."),
             ("слово — обычный режим", "Слово или фраза. Регистр и оформление `||`, `**`, `__`, `~~`, обратные кавычки игнорируются. Сообщение считается один раз независимо от повторений."),
             ("слово — шаблонный режим", "`ГМ-пост`; `ДРП-верд`/`ДРП-вердикт`; `Полит-верд`/`Полит-вердикт`; `Три-шаблона` для всех трёх сразу."),
-            ("Допуски шаблонов", "Игнорируются регистр, `#`, дефисы, подчёркивания, скобки и Discord-разметка. В служебном префиксе разрешена одна вставка, потеря, замена символа или перестановка соседних букв."),
+            ("Допуски шаблонов", "Игнорируются регистр, `#`, дефисы, подчёркивания, скобки и Discord-разметка."),
             ("с_даты", "Начало включительно: `ДД.ММ.ГГ` или `ДД.ММ.ГГГГ`. Начальная дата обязана существовать."),
             ("по_дату", "Конец включительно. Завышенный день заменяется последним днём месяца: `99.06.2026` → `30.06.2026`."),
             (
@@ -9307,18 +9342,17 @@ def pc_posts_faq():
                 (
                     f"После удаления найденных меток бот измеряет оставшийся текст. "
                     f"Длинный пост — не менее `{PC_LONG_POST_MIN_CHARS}` символов. "
-                    "Сейчас длина считается только для `ГМ-пост`. "
-                    "Переключатель `PC_COUNT_LENGTH_FOR_ALL_TEMPLATES = True` "
-                    "в начале блока включает её для всех шаблонов."
+                    "Сейчас длина считается только для `ГМ-пост`."
                 ),
             ),
             (
                 "Результат шаблонов",
                 (
                     "Основной embed объединяет сводку и распределение каждого шаблона "
-                    "и варианта по каналам. Продолжения отправляются только при "
-                    "переполнении и режутся между целыми строками. Подробный TXT "
-                    "с полными текстами и ссылками прикрепляется к первому сообщению."
+                    "по каналам. Продолжения отправляются только при переполнении "
+                    "и режутся между целыми строками. Подробный TXT с вариантами "
+                    "написания, полными текстами и ссылками прикрепляется к первому "
+                    "сообщению."
                 ),
             ),
         ],
