@@ -6815,6 +6815,7 @@ async def slash_mercenary(
 PC_MOSCOW_TZ = timezone(timedelta(hours=3), name="MSK")
 PC_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "post_count_settings.json")
 PC_CONCURRENCY = max(1, min(safe_int_env("POST_COUNT_CONCURRENCY", 3), 8))
+PC_ARCHIVE_CONCURRENCY = max(1, min(safe_int_env("POST_COUNT_ARCHIVE_CONCURRENCY", 4), 8))
 PC_PROGRESS_SECONDS = 8.0
 PC_LONG_POST_MIN_CHARS = 300
 
@@ -7222,18 +7223,6 @@ def pc_any_length_enabled(families) -> bool:
     )
 
 
-def pc_length_scope_name(families) -> str:
-    enabled = [
-        PC_LABELS[family]
-        for family in (families or ())
-        if pc_length_enabled_for_family(family)
-    ]
-    if not enabled:
-        return "Статистика длины отключена"
-    if len(enabled) == 1:
-        return f"Длина {enabled[0]} без меток"
-    return "Длина учитываемых шаблонных постов без меток"
-
 
 def pc_empty_settings():
     return {"guilds": {}}
@@ -7438,61 +7427,140 @@ def pc_supported_parent(channel) -> bool:
     return isinstance(channel, types)
 
 
-async def pc_collect_targets(guild: disnake.Guild, category_ids: Set[int]):
+def pc_archive_in_period(thread, period: PCPeriod) -> bool:
+    value = getattr(thread, "archive_timestamp", None)
+    if not isinstance(value, datetime):
+        return True
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc) >= period.start_utc
+
+
+async def pc_collect_archive_stream(
+    parent,
+    iterator,
+    source_name,
+    period,
+    semaphore,
+):
+    found = []
     errors = []
     try:
-        channels = await guild.fetch_channels()
-    except Exception as exc:
-        logger.warning("fetch_channels не сработал, использую кэш: %s", exc)
-        channels = guild.channels
+        async with semaphore:
+            async for thread in iterator:
+                # Перечень архивов читается полностью: это сохраняет охват.
+                # В Search передаются только ветки, которые могли содержать
+                # сообщения после начала выбранного периода.
+                if pc_archive_in_period(thread, period):
+                    found.append(thread)
+    except disnake.Forbidden:
+        errors.append(f"{source_name} {pc_channel_label(parent)}: нет доступа")
+    except disnake.HTTPException as exc:
+        errors.append(f"{source_name} {pc_channel_label(parent)}: {exc}")
+    except TypeError as exc:
+        errors.append(
+            f"{source_name} {pc_channel_label(parent)}: "
+            "несовместимая сигнатура API"
+        )
+        logger.error(
+            "archived_threads %s: %s",
+            pc_channel_label(parent),
+            exc,
+            exc_info=True,
+        )
+    return found, errors
+
+
+async def pc_collect_targets(
+    guild: disnake.Guild,
+    category_ids: Set[int],
+    period: PCPeriod,
+):
+    errors = []
+    channels = list(getattr(guild, "channels", ()) or ())
+    if not channels:
+        try:
+            channels = await guild.fetch_channels()
+        except Exception as exc:
+            logger.warning("fetch_channels не сработал: %s", exc)
+            channels = []
 
     parents = [
-        channel for channel in channels
-        if getattr(channel, "category_id", None) in category_ids and pc_supported_parent(channel)
+        channel
+        for channel in channels
+        if getattr(channel, "category_id", None) in category_ids
+        and pc_supported_parent(channel)
     ]
     parent_ids = {channel.id for channel in parents}
     targets = {}
+    archive_sources = []
+    media_type = getattr(disnake, "MediaChannel", None)
 
     for parent in parents:
         if isinstance(parent, disnake.TextChannel):
             targets[parent.id] = parent
+            archive_sources.extend((
+                (
+                    parent,
+                    parent.archived_threads(
+                        private=False,
+                        joined=False,
+                        limit=None,
+                    ),
+                    "публичные архивы",
+                ),
+                (
+                    parent,
+                    parent.archived_threads(
+                        private=True,
+                        joined=False,
+                        limit=None,
+                    ),
+                    "приватные архивы",
+                ),
+            ))
+        elif isinstance(parent, disnake.ForumChannel) or (
+            media_type is not None and isinstance(parent, media_type)
+        ):
+            archive_sources.append((
+                parent,
+                parent.archived_threads(limit=None),
+                "архивы",
+            ))
+
         for thread in getattr(parent, "threads", ()):
             targets[thread.id] = thread
 
+    semaphore = asyncio.Semaphore(PC_ARCHIVE_CONCURRENCY)
+    archive_tasks = [
+        asyncio.create_task(
+            pc_collect_archive_stream(
+                parent,
+                iterator,
+                source_name,
+                period,
+                semaphore,
+            )
+        )
+        for parent, iterator, source_name in archive_sources
+    ]
+    active_task = asyncio.create_task(guild.active_threads())
+
     try:
-        for thread in await guild.active_threads():
+        for thread in await active_task:
             if getattr(thread, "parent_id", None) in parent_ids:
                 targets[thread.id] = thread
     except Exception as exc:
         errors.append(f"активные ветки: {exc}")
         logger.error("Не удалось получить активные ветки: %s", exc, exc_info=True)
 
-    media_type = getattr(disnake, "MediaChannel", None)
-    for parent in parents:
-        try:
-            if isinstance(parent, disnake.TextChannel):
-                for private_flag in (False, True):
-                    async for thread in parent.archived_threads(
-                        private=private_flag,
-                        joined=False,
-                        limit=None,
-                    ):
-                        targets[thread.id] = thread
-            elif isinstance(parent, disnake.ForumChannel) or (
-                media_type is not None and isinstance(parent, media_type)
-            ):
-                async for thread in parent.archived_threads(limit=None):
-                    targets[thread.id] = thread
-        except disnake.Forbidden:
-            errors.append(f"архивы {pc_channel_label(parent)}: нет доступа")
-        except disnake.HTTPException as exc:
-            errors.append(f"архивы {pc_channel_label(parent)}: {exc}")
-        except TypeError as exc:
-            errors.append(f"архивы {pc_channel_label(parent)}: несовместимая сигнатура API")
-            logger.error("archived_threads %s: %s", pc_channel_label(parent), exc, exc_info=True)
+    for task in asyncio.as_completed(archive_tasks):
+        archived, task_errors = await task
+        errors.extend(task_errors)
+        for thread in archived:
+            targets[thread.id] = thread
 
     return list(targets.values()), errors
-
 
 def pc_channel_counter_add(counter, channel_id, label, amount=1):
     key = str(channel_id) if channel_id is not None else f"label:{label}"
@@ -7765,19 +7833,12 @@ async def pc_scan_target(target, user_id, word_pattern, families, period, semaph
     return result
 
 
-def pc_datetime_to_snowflake(value, high=False):
-    """
-    Создаёт Snowflake-границу из UTC datetime.
-    high=True ставит все младшие 22 бита, то есть конец миллисекунды.
-    """
+def pc_datetime_to_snowflake(value):
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     value = value.astimezone(timezone.utc)
     milliseconds = int(value.timestamp() * 1000)
-    snowflake = max(0, milliseconds - PC_DISCORD_EPOCH_MS) << 22
-    if high:
-        snowflake |= (1 << 22) - 1
-    return snowflake
+    return max(0, milliseconds - PC_DISCORD_EPOCH_MS) << 22
 
 
 def pc_api_timestamp(raw):
@@ -8458,35 +8519,6 @@ def pc_percent(part: int, total: int) -> float:
     return (part * 100.0 / total) if total else 0.0
 
 
-def pc_length_summary(long_count: int, short_count: int) -> str:
-    total = long_count + short_count
-    return (
-        f"**Длинных (≥{PC_LONG_POST_MIN_CHARS} символов):** "
-        f"`{long_count}` — `{pc_percent(long_count, total):.1f}%`\n"
-        f"**Коротких (<{PC_LONG_POST_MIN_CHARS} символов):** "
-        f"`{short_count}` — `{pc_percent(short_count, total):.1f}%`"
-    )
-
-
-def pc_family_summary(data, family):
-    lines = [
-        f"Уникальных шаблонов: `{len(data.get('groups', {}))}`.",
-        f"Каналов с совпадениями: `{len(data.get('channels', {}))}`.",
-    ]
-    if pc_length_enabled_for_family(family):
-        lines.append(
-            pc_length_summary(
-                data.get("long", 0),
-                data.get("short", 0),
-            )
-        )
-    else:
-        lines.append(
-            "Подсчёт длины для этого семейства отключён "
-            "переключателем в начале блока."
-        )
-    return "\n".join(lines)
-
 
 def pc_public_clip(value, limit=240):
     text = str(value or "").replace("\n", " ").replace("\r", " ")
@@ -8918,6 +8950,7 @@ def pc_full_report(
     search_info,
     method_label,
     elapsed,
+    stage_timings,
     discovery_errors,
     failed,
 ):
@@ -8951,7 +8984,19 @@ def pc_full_report(
         f"Целей резервного history()-обхода: {search_info.get('fallback_targets', 0)}",
         f"Ошибок поиска веток: {len(discovery_errors or [])}",
         f"Непрочитанных каналов/веток: {len(failed or [])}",
-        f"Время выполнения: {elapsed:.1f} сек.",
+        (
+            "Сбор каналов и архивных веток: "
+            f"{stage_timings.get('collect', '0.0')} сек."
+        ),
+        (
+            "Discord Search API: "
+            f"{stage_timings.get('search', '0.0')} сек."
+        ),
+        (
+            "Формирование статистики и TXT: "
+            f"{stage_timings.get('report', '0.0')} сек."
+        ),
+        f"Всего: {stage_timings.get('total', f'{elapsed:.1f}')} сек.",
         "",
         "ПОДСЧЁТ МЕТОК",
         "-" * 72,
@@ -9620,11 +9665,14 @@ async def slash_count_posts(
         embed=None,
     )
 
+    collect_started = time.monotonic()
     try:
         targets, discovery_errors = await pc_collect_targets(
             interaction.guild,
             category_ids,
+            period,
         )
+        collect_elapsed = time.monotonic() - collect_started
     except Exception as exc:
         logger.error("Ошибка сбора каналов: %s", exc, exc_info=True)
         await interaction.edit_original_response(
@@ -9769,6 +9817,7 @@ async def slash_count_posts(
                 exc,
             )
 
+    search_started = time.monotonic()
     try:
         results, search_info = await pc_search_or_fallback(
             guild=interaction.guild,
@@ -9794,6 +9843,7 @@ async def slash_count_posts(
         )
         return
 
+    search_elapsed = time.monotonic() - search_started
     matched = sum(item["matched"] for item in results)
     scanned = sum(item["scanned"] for item in results)
     failed = [item for item in results if item["error"]]
@@ -9836,9 +9886,48 @@ async def slash_count_posts(
         )
 
     if families:
+        report_started = time.monotonic()
         stats = pc_merge_stats(results, families)
         length_stats = pc_merge_lengths(results)
         template_records = pc_collect_template_records(results)
+
+        filename = (
+            f"post-templates-{пользователь.id}-"
+            f"{period.start_date:%Y%m%d}-{period.end_date:%Y%m%d}.txt"
+        )
+        stage_timings = {
+            "collect": f"{collect_elapsed:.1f}",
+            "search": f"{search_elapsed:.1f}",
+            "report": "__PC_REPORT_SECONDS__",
+            "total": "__PC_TOTAL_SECONDS__",
+        }
+        report = pc_full_report(
+            пользователь,
+            period,
+            stats,
+            families,
+            matched,
+            scanned,
+            length_stats,
+            template_records,
+            search_info=search_info,
+            method_label=method_label,
+            elapsed=elapsed,
+            stage_timings=stage_timings,
+            discovery_errors=discovery_errors,
+            failed=failed,
+        )
+        # Включаем в замер построение текста и его UTF-8-кодирование.
+        report.encode("utf-8-sig")
+        report_elapsed = time.monotonic() - report_started
+        elapsed = time.monotonic() - started
+        report = report.replace(
+            "__PC_REPORT_SECONDS__",
+            f"{report_elapsed:.1f}",
+        ).replace(
+            "__PC_TOTAL_SECONDS__",
+            f"{elapsed:.1f}",
+        )
 
         public_lines = pc_template_public_report_lines(
             user=пользователь,
@@ -9854,27 +9943,6 @@ async def slash_count_posts(
             extra_notes=public_notes,
         )
         public_chunks = pc_split_lines_for_discord(public_lines)
-
-        report = pc_full_report(
-            пользователь,
-            period,
-            stats,
-            families,
-            matched,
-            scanned,
-            length_stats,
-            template_records,
-            search_info=search_info,
-            method_label=method_label,
-            elapsed=elapsed,
-            discovery_errors=discovery_errors,
-            failed=failed,
-        )
-        filename = (
-            f"post-templates-{пользователь.id}-"
-            f"{period.start_date:%Y%m%d}-{period.end_date:%Y%m%d}.txt"
-        )
-
         txt_parts = pc_split_txt_parts(report, filename)
 
         # Discord допускает максимум 10 вложений в одном сообщении.
