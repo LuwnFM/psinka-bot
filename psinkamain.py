@@ -6826,7 +6826,7 @@ PC_COUNT_LENGTH_FOR_ALL_TEMPLATES = False
 
 # Публичная детализация по каналам отправляется цепочкой сообщений,
 # каждое из которых собирается только по целым строкам.
-PC_PUBLIC_REPORT_CHUNK_CHARS = 1850
+PC_PUBLIC_REPORT_CHUNK_CHARS = 3900
 
 # Если полный TXT окажется слишком большим для одного вложения,
 # он автоматически делится на несколько файлов по целым строкам.
@@ -8524,26 +8524,51 @@ def pc_channel_report_lines(channels, indent="  "):
 
 
 def pc_template_channel_report_lines(stats, families):
+    """
+    Формирует публичную подробную часть отчёта без дублирования основной
+    статистики. Для каждого семейства сразу показывает общие числа, длину
+    (если включена), все каналы, шаблоны, точные написания и вариации.
+    """
     lines = [
-        "📍 **Полное распределение шаблонов по каналам**",
         (
-            "Числа в списках каналов — количество сообщений. "
-            "В заголовках отдельно указано количество найденных меток."
+            "Числа возле каналов — количество сообщений; "
+            "количество меток указывается в заголовках."
         ),
         "",
     ]
 
     for family in families:
         data = stats[family]
-        lines.extend([
-            f"## {PC_LABELS[family]}",
-            (
-                f"Всего сообщений: `{data['messages']}`; "
-                f"меток: `{data['occurrences']}`; "
-                f"каналов: `{len(data.get('channels', {}))}`."
-            ),
-            "**Все сообщения семейства по каналам:**",
-        ])
+        messages = int(data.get("messages", 0))
+        occurrences = int(data.get("occurrences", 0))
+        groups_count = len(data.get("groups", {}))
+        channels_count = len(data.get("channels", {}))
+
+        if messages == 0 and occurrences == 0:
+            lines.extend([
+                f"## {PC_LABELS[family]} — совпадений нет.",
+                "",
+            ])
+            continue
+
+        lines.append(
+            f"## {PC_LABELS[family]} — сообщений `{messages}`, "
+            f"меток `{occurrences}`, шаблонов `{groups_count}`, "
+            f"каналов `{channels_count}`"
+        )
+
+        if pc_length_enabled_for_family(family):
+            long_count = int(data.get("long", 0))
+            short_count = int(data.get("short", 0))
+            total_length = long_count + short_count
+            lines.append(
+                f"**Длина без меток:** длинных "
+                f"`{long_count}` (`{pc_percent(long_count, total_length):.1f}%`), "
+                f"коротких `{short_count}` "
+                f"(`{pc_percent(short_count, total_length):.1f}%`)."
+            )
+
+        lines.append("**Все сообщения семейства по каналам:**")
         lines.extend(pc_channel_report_lines(data.get("channels", {})))
 
         groups = sorted(
@@ -8554,10 +8579,6 @@ def pc_template_channel_report_lines(stats, families):
                 str(item.get("canonical") or "").casefold(),
             ),
         )
-
-        if not groups:
-            lines.extend(["Совпадений нет.", ""])
-            continue
 
         for group in groups:
             canonical = pc_public_clip(group.get("canonical"), 300)
@@ -8575,13 +8596,11 @@ def pc_template_channel_report_lines(stats, families):
 
             exact = group.get("exact", {})
             if exact.get("occurrences", 0):
-                lines.extend([
-                    (
-                        f"**Точное написание `{canonical}`** — "
-                        f"сообщений `{exact.get('messages', 0)}`, "
-                        f"меток `{exact.get('occurrences', 0)}`:"
-                    ),
-                ])
+                lines.append(
+                    f"**Точное написание `{canonical}`** — "
+                    f"сообщений `{exact.get('messages', 0)}`, "
+                    f"меток `{exact.get('occurrences', 0)}`:"
+                )
                 lines.extend(
                     pc_channel_report_lines(
                         exact.get("channels", {}),
@@ -8620,6 +8639,56 @@ def pc_template_channel_report_lines(stats, families):
     return lines
 
 
+def pc_template_public_report_lines(
+    user,
+    mode_value,
+    period,
+    matched,
+    scanned,
+    successful_targets,
+    total_targets,
+    stats,
+    families,
+    elapsed,
+    extra_notes=None,
+):
+    """Объединяет итоговую сводку и распределение по каналам."""
+    lines = [
+        f"**Пользователь:** {user.mention} (`{user.id}`)",
+        f"**Режим:** `{str(mode_value)[:200]}`",
+        (
+            f"**Период (МСК):** `{period.start_date:%d.%m.%Y}` — "
+            f"`{period.end_date:%d.%m.%Y}` включительно"
+        ),
+        (
+            f"**Итог:** найдено сообщений `"
+            f"{matched}` • проверено сообщений пользователя `{scanned}` • "
+            f"каналов/веток успешно `{successful_targets}/{total_targets}`"
+        ),
+        "",
+    ]
+
+    lines.extend(pc_template_channel_report_lines(stats, families))
+
+    lines.extend([
+        "",
+        "**Примечания**",
+    ])
+
+    for note in extra_notes or ():
+        if note:
+            lines.append(str(note))
+
+    lines.extend([
+        (
+            "Распределение шаблонов и вариантов приведено в этом отчёте; "
+            "прикреплённый TXT содержит полные тексты и ссылки."
+        ),
+        f"Время выполнения: `{elapsed:.1f} сек.`",
+    ])
+
+    return lines
+
 def pc_split_lines_for_discord(
     lines,
     max_chars=PC_PUBLIC_REPORT_CHUNK_CHARS,
@@ -8651,47 +8720,42 @@ def pc_split_lines_for_discord(
     return chunks
 
 
-async def pc_send_reply_chain(interaction, chunks, previous_message=None):
+async def pc_send_reply_chain(
+    interaction,
+    chunks,
+    previous_message=None,
+    *,
+    start_part=2,
+    total_parts=None,
+):
     """
-    Отправляет многочастный публичный отчёт цепочкой embed-сообщений.
+    Отправляет только продолжения отчёта цепочкой embed-сообщений.
+    Первая часть уже находится в исходном сообщении команды.
+    """
+    if not chunks:
+        return previous_message
 
-    Каждая следующая часть отвечает на предыдущую.
-    Текст уже заранее разбит только между целыми строками.
-    """
     if previous_message is None:
         previous_message = await interaction.original_response()
 
-    total_parts = len(chunks)
+    if total_parts is None:
+        total_parts = len(chunks) + start_part - 1
 
-    for index, chunk in enumerate(chunks, start=1):
-        # Первая часть уже содержит общий заголовок отчёта.
-        # Для следующих частей явно указываем, что это продолжение.
-        title = (
-            "📍 Полное распределение шаблонов по каналам"
-            if index == 1
-            else f"📍 Распределение шаблонов — продолжение {index}/{total_parts}"
-        )
-
-        description = str(chunk or "").strip()
-
-        # В первой части удаляем текстовый заголовок, поскольку он уже
-        # будет находиться в заголовке embed.
-        if index == 1:
-            first_heading = "📍 **Полное распределение шаблонов по каналам**"
-            if description.startswith(first_heading):
-                description = description[len(first_heading):].lstrip()
-
+    for offset, chunk in enumerate(chunks):
+        part_number = start_part + offset
         report_embed = disnake.Embed(
-            title=title,
-            description=description or "Продолжение отчёта.",
+            title=(
+                f"📊 Подсчёт постов — продолжение "
+                f"{part_number}/{total_parts}"
+            ),
+            description=str(chunk or "").strip() or "Продолжение отчёта.",
             color=0x5865F2,
             timestamp=datetime.now(),
         )
-
         report_embed.set_footer(
             text=(
-                f"Часть {index}/{total_parts} • "
-                "Числа возле каналов означают количество сообщений"
+                f"Часть {part_number}/{total_parts} • "
+                "строки не обрезаются посередине"
             )
         )
 
@@ -8703,7 +8767,6 @@ async def pc_send_reply_chain(interaction, chunks, previous_message=None):
         previous_message = sent
 
     return previous_message
-
 
 def pc_record_identity(record):
     return (
@@ -8903,6 +8966,12 @@ def pc_full_report(
     scanned,
     length_stats,
     records,
+    *,
+    search_info,
+    method_label,
+    elapsed,
+    discovery_errors,
+    failed,
 ):
     long_count = length_stats.get("long", 0)
     short_count = length_stats.get("short", 0)
@@ -8916,14 +8985,29 @@ def pc_full_report(
     lines = [
         "ПОЛНЫЙ ОТЧЁТ ПО ШАБЛОНАМ",
         "=" * 72,
-        f"Пользователь: {user} ({user.id})",
+        "",
+        "ТЕХНИЧЕСКИЕ ПАРАМЕТРЫ ПОИСКА",
+        "-" * 72,
+        f"Метод поиска: {method_label}",
+        f"Запросов Discord Search API: {search_info.get('api_requests', 0)}",
+        f"Страниц Search API: {search_info.get('search_pages', 0)}",
+        f"Ожиданий поискового индекса: {search_info.get('index_waits', 0)}",
+        f"Ожиданий rate limit: {search_info.get('rate_limit_waits', 0)}",
+        f"Повторных попыток Search API: {search_info.get('retry_attempts', 0)}",
+        f"Делений крупных пакетов: {search_info.get('batch_splits', 0)}",
         (
-            f"Период МСК: {period.start_date:%d.%m.%Y} — "
-            f"{period.end_date:%d.%m.%Y} включительно"
+            f"Пакетов поиска завершено: "
+            f"{search_info.get('completed_search_batches', 0)}/"
+            f"{search_info.get('search_batches', 0)}"
         ),
-        f"Сообщений хотя бы с одним шаблоном: {matched}",
-        f"Проверено сообщений пользователя: {scanned}",
-        f"Полных записей сообщений в отчёте: {len(records)}",
+        f"Целей резервного history()-обхода: {search_info.get('fallback_targets', 0)}",
+        f"Ошибок поиска веток: {len(discovery_errors or [])}",
+        f"Непрочитанных каналов/веток: {len(failed or [])}",
+        f"Время выполнения: {elapsed:.1f} сек.",
+        "",
+        "ПАРАМЕТРЫ ФИЛЬТРА ДЛИНЫ",
+        "-" * 72,
+        f"Текущий порог длинного поста: {PC_LONG_POST_MIN_CHARS} символов",
         (
             "Подсчёт длины для всех шаблонов: "
             f"{'ВКЛЮЧЁН' if PC_COUNT_LENGTH_FOR_ALL_TEMPLATES else 'ВЫКЛЮЧЕН'}"
@@ -8932,17 +9016,60 @@ def pc_full_report(
             "Семейства, для которых считается длина: "
             + (", ".join(enabled_families) if enabled_families else "нет")
         ),
-        "",
+        (
+            "Длина считается после удаления всех найденных шаблонных меток; "
+            "ровно пороговое значение уже считается длинным постом."
+        ),
     ]
+
+    if search_info.get("last_error"):
+        lines.append(
+            "Последняя ошибка быстрого поиска: "
+            + str(search_info.get("last_error"))
+        )
+
+    search_errors = search_info.get("search_errors") or []
+    if search_errors:
+        lines.extend([
+            f"Ошибок Search API, потребовавших отката: {len(search_errors)}",
+            "Причины отката:",
+        ])
+        lines.extend(f"  • {error}" for error in search_errors)
+
+    if discovery_errors:
+        lines.extend([
+            "Ошибки обнаружения каналов/веток:",
+            *(f"  • {error}" for error in discovery_errors),
+        ])
+
+    if failed:
+        lines.extend([
+            "Ошибки чтения каналов/веток:",
+            *(
+                f"  • {item.get('label')}: {item.get('error')}"
+                for item in failed
+            ),
+        ])
+
+    lines.extend([
+        "",
+        "ОБЩАЯ СВОДКА",
+        "-" * 72,
+        f"Пользователь: {user} ({user.id})",
+        (
+            f"Период МСК: {period.start_date:%d.%m.%Y} — "
+            f"{period.end_date:%d.%m.%Y} включительно"
+        ),
+        f"Сообщений хотя бы с одним шаблоном: {matched}",
+        f"Проверено сообщений пользователя: {scanned}",
+        f"Полных записей сообщений в отчёте: {len(records)}",
+        "",
+    ])
 
     if enabled_families:
         lines.extend([
             "ОБЩАЯ СТАТИСТИКА ДЛИНЫ УЧИТЫВАЕМЫХ ПОСТОВ БЕЗ МЕТОК",
             "-" * 72,
-            (
-                f"Порог длинного поста: не менее "
-                f"{PC_LONG_POST_MIN_CHARS} символов"
-            ),
             (
                 f"Длинных: {long_count} "
                 f"({pc_percent(long_count, total_lengths):.1f}%)"
@@ -8968,14 +9095,15 @@ def pc_full_report(
         ])
 
         if pc_length_enabled_for_family(family):
+            family_total = data.get("long", 0) + data.get("short", 0)
             lines.extend([
                 (
                     f"Длинных: {data.get('long', 0)} "
-                    f"({pc_percent(data.get('long', 0), data['messages']):.1f}%)"
+                    f"({pc_percent(data.get('long', 0), family_total):.1f}%)"
                 ),
                 (
                     f"Коротких: {data.get('short', 0)} "
-                    f"({pc_percent(data.get('short', 0), data['messages']):.1f}%)"
+                    f"({pc_percent(data.get('short', 0), family_total):.1f}%)"
                 ),
             ])
         else:
@@ -9080,7 +9208,6 @@ def pc_full_report(
 
     return "\n".join(lines).rstrip() + "\n"
 
-
 def pc_txt_file(text: str, filename: str):
     return disnake.File(
         io.BytesIO(text.encode("utf-8-sig")),
@@ -9088,9 +9215,13 @@ def pc_txt_file(text: str, filename: str):
     )
 
 
-def pc_split_txt_parts(text: str, filename: str):
+def pc_split_txt_parts(
+    text: str,
+    filename: str,
+    max_bytes=PC_TXT_PART_MAX_BYTES,
+):
     encoded = text.encode("utf-8-sig")
-    if len(encoded) <= PC_TXT_PART_MAX_BYTES:
+    if len(encoded) <= max_bytes:
         return [(filename, text)]
 
     lines = text.splitlines(keepends=True)
@@ -9101,7 +9232,7 @@ def pc_split_txt_parts(text: str, filename: str):
     for line in lines:
         line_bytes = len(line.encode("utf-8"))
 
-        if current and current_bytes + line_bytes > PC_TXT_PART_MAX_BYTES:
+        if current and current_bytes + line_bytes > max_bytes:
             parts.append("".join(current))
             current = [line]
             current_bytes = (
@@ -9184,10 +9315,10 @@ def pc_posts_faq():
             (
                 "Результат шаблонов",
                 (
-                    "Показывает сообщения и метки каждого семейства, полное "
-                    "распределение каждого шаблона и варианта по всем каналам. "
-                    "Подробности отправляются цепочкой ответов без обрезания строк. "
-                    "TXT содержит полный текст и ссылку на каждое найденное сообщение."
+                    "Основной embed объединяет сводку и распределение каждого шаблона "
+                    "и варианта по каналам. Продолжения отправляются только при "
+                    "переполнении и режутся между целыми строками. Подробный TXT "
+                    "с полными текстами и ссылками прикрепляется к первому сообщению."
                 ),
             ),
         ],
@@ -9666,84 +9797,49 @@ async def slash_count_posts(
         str(search_info.get("method") or "неизвестно"),
     )
 
-    embed = disnake.Embed(
-        title="📊 Подсчёт постов завершён",
-        color=0xFFAA00 if failed else 0x4CAF50,
-    )
-    embed.add_field(
-        name="Пользователь",
-        value=f"{пользователь.mention}\n`{пользователь.id}`",
-        inline=True,
-    )
-    embed.add_field(
-        name="Режим",
-        value=f"`{слово[:200]}`",
-        inline=True,
-    )
-    embed.add_field(
-        name="Метод поиска",
-        value=method_label,
-        inline=False,
-    )
-    embed.add_field(
-        name="Период (МСК)",
-        value=(
-            f"`{period.start_date:%d.%m.%Y}` — "
-            f"`{period.end_date:%d.%m.%Y}` включительно"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Найдено сообщений",
-        value=f"**{matched}**",
-        inline=True,
-    )
-    embed.add_field(
-        name="Проверено сообщений пользователя",
-        value=f"`{scanned}`",
-        inline=True,
-    )
-    embed.add_field(
-        name="Каналы/ветки",
-        value=f"`{len(results) - len(failed)}/{len(results)}` успешно",
-        inline=True,
-    )
-
     report = None
     filename = "post-count-report.txt"
-    template_channel_lines = []
-    template_records = []
+    public_chunks = []
+    txt_files = []
+
+    # Публичные примечания содержат только то, что полезно читателю.
+    public_notes = []
+
+    if period.end_was_clamped:
+        public_notes.append(
+            f"Конечный день `{period.requested_end_day}` не существует; "
+            f"использован `{period.actual_end_day}`."
+        )
+
+    if discovery_errors:
+        public_notes.append(
+            f"Ошибок при поиске веток: `{len(discovery_errors)}`."
+        )
+
+    if failed:
+        public_notes.append(
+            f"Не прочитано каналов/веток: `{len(failed)}`."
+        )
 
     if families:
         stats = pc_merge_stats(results, families)
         length_stats = pc_merge_lengths(results)
         template_records = pc_collect_template_records(results)
 
-        if pc_any_length_enabled(families):
-            embed.add_field(
-                name=pc_length_scope_name(families),
-                value=pc_length_summary(
-                    length_stats["long"],
-                    length_stats["short"],
-                ),
-                inline=False,
-            )
-
-        for family in families:
-            data = stats[family]
-            embed.add_field(
-                name=(
-                    f"{PC_LABELS[family]} — сообщений "
-                    f"`{data['messages']}`, меток `{data['occurrences']}`"
-                ),
-                value=pc_family_summary(data, family)[:1024],
-                inline=False,
-            )
-
-        template_channel_lines = pc_template_channel_report_lines(
-            stats,
-            families,
+        public_lines = pc_template_public_report_lines(
+            user=пользователь,
+            mode_value=слово,
+            period=period,
+            matched=matched,
+            scanned=scanned,
+            successful_targets=len(results) - len(failed),
+            total_targets=len(results),
+            stats=stats,
+            families=families,
+            elapsed=elapsed,
+            extra_notes=public_notes,
         )
+        public_chunks = pc_split_lines_for_discord(public_lines)
 
         report = pc_full_report(
             пользователь,
@@ -9754,12 +9850,96 @@ async def slash_count_posts(
             scanned,
             length_stats,
             template_records,
+            search_info=search_info,
+            method_label=method_label,
+            elapsed=elapsed,
+            discovery_errors=discovery_errors,
+            failed=failed,
         )
         filename = (
             f"post-templates-{пользователь.id}-"
             f"{period.start_date:%Y%m%d}-{period.end_date:%Y%m%d}.txt"
         )
+
+        txt_parts = pc_split_txt_parts(report, filename)
+
+        # Discord допускает максимум 10 вложений в одном сообщении.
+        # Если отчёт неожиданно разбился на большее число частей,
+        # переразбиваем его максимум на 10 более крупных TXT.
+        if len(txt_parts) > 10:
+            encoded_size = len(report.encode("utf-8-sig"))
+            adjusted_part_size = max(
+                PC_TXT_PART_MAX_BYTES,
+                math.ceil(encoded_size / 10) + 4096,
+            )
+            txt_parts = pc_split_txt_parts(
+                report,
+                filename,
+                max_bytes=adjusted_part_size,
+            )
+
+        txt_files = [
+            pc_txt_file(part_text, part_filename)
+            for part_filename, part_text in txt_parts[:10]
+        ]
+
+        first_embed = disnake.Embed(
+            title="📊 Подсчёт постов завершён",
+            description=(
+                public_chunks[0]
+                if public_chunks
+                else "Совпадений не найдено."
+            ),
+            color=0xFFAA00 if failed else 0x4CAF50,
+            timestamp=datetime.now(),
+        )
+        first_embed.set_footer(
+            text=(
+                f"Часть 1/{max(1, len(public_chunks))} • "
+                "сообщение считается один раз, метки — отдельно"
+            )
+        )
+
     else:
+        embed = disnake.Embed(
+            title="📊 Подсчёт постов завершён",
+            color=0xFFAA00 if failed else 0x4CAF50,
+            timestamp=datetime.now(),
+        )
+        embed.add_field(
+            name="Пользователь",
+            value=f"{пользователь.mention}\n`{пользователь.id}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Режим",
+            value=f"`{слово[:200]}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Период (МСК)",
+            value=(
+                f"`{period.start_date:%d.%m.%Y}` — "
+                f"`{period.end_date:%d.%m.%Y}` включительно"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Найдено сообщений",
+            value=f"**{matched}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="Проверено сообщений пользователя",
+            value=f"`{scanned}`",
+            inline=True,
+        )
+        embed.add_field(
+            name="Каналы/ветки",
+            value=f"`{len(results) - len(failed)}/{len(results)}` успешно",
+            inline=True,
+        )
+
         top = sorted(
             (item for item in results if item["matched"]),
             key=lambda item: item["matched"],
@@ -9775,123 +9955,33 @@ async def slash_count_posts(
             inline=False,
         )
 
-    notes = []
-
-    if period.end_was_clamped:
-        notes.append(
-            f"Конечный день `{period.requested_end_day}` не существует; "
-            f"использован `{period.actual_end_day}`. "
-            "Календарь победил импровизацию."
+        word_notes = list(public_notes)
+        word_notes.append(f"Время выполнения: `{elapsed:.1f} сек.`")
+        embed.add_field(
+            name="Примечания",
+            value="\n".join(word_notes)[:1024],
+            inline=False,
         )
-
-    if discovery_errors:
-        notes.append(
-            f"Ошибок при поиске веток: `{len(discovery_errors)}`."
-        )
-
-    search_errors = search_info.get("search_errors") or []
-    if search_errors:
-        notes.append(
-            f"Быстрый поиск потребовал резервный путь: "
-            f"`{len(search_errors)}` пакет(а)."
-        )
-
-    if search_info.get("api_requests"):
-        notes.append(
-            f"Запросов Discord Search API: "
-            f"`{search_info['api_requests']}`; "
-            f"страниц: `{search_info.get('search_pages', 0)}`."
-        )
-
-    if search_info.get("index_waits"):
-        notes.append(
-            f"Ожиданий поискового индекса Discord: "
-            f"`{search_info['index_waits']}`."
-        )
-
-    if search_info.get("rate_limit_waits"):
-        notes.append(
-            "Ожиданий rate limit: "
-            f"`{search_info['rate_limit_waits']}`."
-        )
-
-    if search_info.get("retry_attempts"):
-        notes.append(
-            "Повторных попыток Search API: "
-            f"`{search_info['retry_attempts']}`."
-        )
-
-    if search_info.get("batch_splits"):
-        notes.append(
-            "Слишком крупные запросы автоматически делились: "
-            f"`{search_info['batch_splits']}` раз."
-        )
-
-    if search_info.get("last_error"):
-        notes.append(
-            "Последняя ошибка быстрого поиска: "
-            f"`{str(search_info['last_error'])[:500]}`."
-        )
-
-    if search_info.get("fallback_targets"):
-        notes.append(
-            f"Через резервный history()-обход прочитано целей: "
-            f"`{search_info['fallback_targets']}`."
-        )
-
-    if failed:
-        preview = "; ".join(
-            f"{item['label']}: {item['error']}"
-            for item in failed[:5]
-        )
-        notes.append(
-            f"Не прочитано целей: `{len(failed)}`. {preview}"
-        )
-
-    if families:
-        enabled_length_labels = [
-            PC_LABELS[family]
-            for family in families
-            if pc_length_enabled_for_family(family)
-        ]
-        if enabled_length_labels:
-            notes.append(
-                f"Длинный пост: не менее `{PC_LONG_POST_MIN_CHARS}` символов "
-                "после удаления найденных шаблонных меток. "
-                "Длина учитывается для: "
-                + ", ".join(enabled_length_labels)
-                + "."
-            )
-        notes.append(
-            "Полное распределение каждого шаблона и варианта по каналам "
-            "отправлено цепочкой ответов. TXT содержит полный текст и ссылку "
-            "на каждое найденное сообщение."
-        )
-
-    notes.append(f"Время выполнения: `{elapsed:.1f} сек.`")
-
-    embed.add_field(
-        name="Примечания",
-        value="\n".join(notes)[:1024],
-        inline=False,
-    )
-    embed.set_footer(
-        text=(
-            "Шаблонный режим: сообщение считается один раз; "
-            "несколько меток внутри него считаются отдельно."
-            if families
-            else (
+        embed.set_footer(
+            text=(
                 "Одно сообщение считается один раз, даже если слово "
                 "повторено несколько раз."
             )
         )
-    )
+        first_embed = embed
 
-    # Публичное сообщение прогресса превращается в финальную сводку.
+    # Исходное публичное сообщение становится первым и обычно единственным
+    # embed-отчётом. Подробный TXT прикрепляется к нему без отдельной подписи.
+    edit_kwargs = {
+        "content": None,
+        "embed": first_embed,
+    }
+    if txt_files:
+        edit_kwargs["files"] = txt_files
+
     try:
         final_message = await interaction.edit_original_response(
-            content=None,
-            embed=embed,
+            **edit_kwargs,
         )
     except Exception as exc:
         logger.error(
@@ -9900,61 +9990,30 @@ async def slash_count_posts(
             exc_info=True,
         )
         try:
-            final_message = await interaction.channel.send(
-                content=interaction.author.mention,
-                embed=embed,
-            )
+            send_kwargs = {
+                "content": interaction.author.mention,
+                "embed": first_embed,
+            }
+            if txt_files:
+                send_kwargs["files"] = txt_files
+            final_message = await interaction.channel.send(**send_kwargs)
         except Exception:
             return
 
-    previous_message = final_message
-
-    # Для шаблонных режимов публикуем ВСЮ разбивку по каналам.
-    # Части режутся только между строками и образуют цепочку ответов.
-    if families and template_channel_lines:
+    # Дополнительные embed-ответы появляются только тогда, когда объединённый
+    # отчёт действительно не помещается в описание первого embed.
+    if families and len(public_chunks) > 1:
         try:
-            public_chunks = pc_split_lines_for_discord(
-                template_channel_lines,
-            )
-            previous_message = await pc_send_reply_chain(
+            await pc_send_reply_chain(
                 interaction,
-                public_chunks,
-                previous_message=previous_message,
+                public_chunks[1:],
+                previous_message=final_message,
+                start_part=2,
+                total_parts=len(public_chunks),
             )
         except Exception as exc:
             logger.error(
-                "Не удалось отправить полную разбивку шаблонов по каналам: %s",
-                exc,
-                exc_info=True,
-            )
-
-    # Полный TXT содержит все сообщения, их полный текст и jump_url.
-    # Очень большой отчёт автоматически делится на несколько TXT-файлов.
-    if report:
-        try:
-            txt_parts = pc_split_txt_parts(report, filename)
-            for index, (part_filename, part_text) in enumerate(
-                txt_parts,
-                start=1,
-            ):
-                label = (
-                    "📎 Полный аналитический TXT-отчёт:"
-                    if len(txt_parts) == 1
-                    else (
-                        f"📎 Полный аналитический TXT-отчёт — "
-                        f"часть `{index}/{len(txt_parts)}`:"
-                    )
-                )
-                sent = await interaction.channel.send(
-                    content=label,
-                    file=pc_txt_file(part_text, part_filename),
-                    reference=previous_message,
-                    mention_author=False,
-                )
-                previous_message = sent
-        except Exception as exc:
-            logger.error(
-                "Не удалось отправить публичный TXT-отчёт: %s",
+                "Не удалось отправить продолжение шаблонного отчёта: %s",
                 exc,
                 exc_info=True,
             )
