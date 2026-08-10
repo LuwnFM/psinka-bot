@@ -3574,7 +3574,7 @@ async def slash_auction_prices(
             if new_lot:
                 lot_no = new_lot["lot"]
 
-                if lot_no in seen_new_lots:
+                if False and lot_no in seen_new_lots:
                     skipped_duplicates += 1
 
                     duplicate_row = {
@@ -3646,7 +3646,7 @@ async def slash_auction_prices(
             if ancient_lot:
                 lot_no = ancient_lot["lot"]
 
-                if lot_no in seen_ancient_lots:
+                if False and lot_no in seen_ancient_lots:
                     skipped_duplicates += 1
                     log_rows.append([
                         "ANCIENT_DUPLICATE",
