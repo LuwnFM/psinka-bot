@@ -948,10 +948,8 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
 
 async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.0,
                                  system_prompt: str = None, proxy_url: str = None) -> Tuple[bool, str, float]:
-    """
-    Запрос к OpenRouter с ВАШИМ именем переменной OPENR_TOKEN
-    """
-    openrouter_token = os.getenv('OPENR_TOKEN')  # ✅ ВАША переменная
+    """Запрос к OpenRouter с одним контролируемым retry для временных ошибок."""
+    openrouter_token = os.getenv('OPENR_TOKEN')
     if not openrouter_token:
         return False, "No OPENR_TOKEN", 0.0
 
@@ -971,61 +969,100 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
+    # OpenAI SDK сам по умолчанию повторяет 429/5xx. Отключаем скрытые
+    # повторы, чтобы количество запросов контролировал только роутер бота.
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=openrouter_token,
-        timeout=timeout
+        timeout=timeout,
+        max_retries=0,
     )
 
     for model in models:
-        try:
-            def sync_call():
-                return client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    extra_headers={
-                        "HTTP-Referer": "https://github.com/psiiinka-bot",
-                        "X-Title": "PsIInka Bot",
-                    }
+        for attempt in range(2):
+            try:
+                def sync_call():
+                    return client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        extra_headers={
+                            "HTTP-Referer": "https://github.com/psiiinka-bot",
+                            "X-Title": "PsIInka Bot",
+                        },
+                    )
+
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(sync_call),
+                    timeout=timeout + 5,
                 )
 
-            response = await asyncio.wait_for(
-                asyncio.to_thread(sync_call),
-                timeout=timeout + 5
-            )
+                if response.choices and len(response.choices) > 0:
+                    answer = response.choices[0].message.content
+                    if answer and answer.strip():
+                        elapsed = time.time() - start
+                        logger.debug(f"✅ OpenRouter/{model} — {elapsed:.2f}s")
+                        return True, answer.strip(), elapsed
 
-            if response.choices and len(response.choices) > 0:
-                answer = response.choices[0].message.content
-                if answer and answer.strip():
-                    elapsed = time.time() - start
-                    logger.debug(f"✅ OpenRouter/{model} — {elapsed:.2f}s")
-                    return True, answer.strip(), elapsed
+                raise Exception("Пустой ответ от OpenRouter")
 
-            raise Exception("Пустой ответ от OpenRouter")
+            except Exception as e:
+                err_str = str(e).lower()
+                status_code = getattr(e, "status_code", None)
+                if status_code is None:
+                    response_obj = getattr(e, "response", None)
+                    status_code = getattr(response_obj, "status_code", None)
 
-        except Exception as e:
-            err_str = str(e).lower()
+                try:
+                    status_num = int(status_code) if status_code is not None else None
+                except (TypeError, ValueError):
+                    status_num = None
 
-            if "400" in err_str or "invalid model" in err_str or "not found" in err_str:
-                logger.debug(f"⚠️ OR/{model} не подошла")
-                continue
+                detail = " ".join(str(e).split())[:160]
+                status_label = status_num if status_num is not None else "?"
+                logger.info(f"⚠️ OpenRouter/{model}: HTTP {status_label} — {detail}")
 
-            if "timeout" in err_str:
-                logger.debug(f"⏰ OR/{model} таймаут")
-                continue
+                is_timeout = (
+                    isinstance(e, asyncio.TimeoutError)
+                    or "timeout" in err_str
+                    or "timed out" in err_str
+                )
+                is_not_found = (
+                    status_num == 404
+                    or "404" in err_str
+                    or "invalid model" in err_str
+                    or "not found" in err_str
+                )
+                is_rate_limit = (
+                    status_num == 429
+                    or "429" in err_str
+                    or "rate limit" in err_str
+                )
+                is_server_error = (
+                    status_num is not None and 500 <= status_num <= 599
+                )
 
-            if "429" in err_str or "rate limit" in err_str:
-                logger.debug(f"🚫 OR/{model} rate limit")
-                await asyncio.sleep(2)
-                continue
+                # 404/невалидная модель — сразу следующая модель, без ожидания.
+                if is_not_found:
+                    break
 
-            if model == models[-1]:
-                elapsed = time.time() - start
-                return False, f"OR Error: {str(e)[:80]}", elapsed
+                # Только один наш retry для временного rate limit или 5xx.
+                if (is_rate_limit or is_server_error) and attempt == 0:
+                    delay = 2.0 if is_rate_limit else 1.0
+                    reason = "429" if is_rate_limit else f"HTTP {status_label}"
+                    logger.info(
+                        f"↻ OpenRouter/{model}: один повтор после {reason}, ожидание {delay:.0f}с"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                # Таймаут, auth/permission и прочие постоянные ошибки
+                # не ретраим здесь: внешний роутер перейдёт дальше.
+                if is_timeout:
+                    logger.info(f"⏰ OpenRouter/{model}: таймаут, переход к следующей модели")
+                break
 
     elapsed = time.time() - start
     return False, "Все модели OpenRouter недоступны", elapsed
-
 
 async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
                            system_prompt: str = None, return_model_name: bool = False) -> Tuple[bool, str, float]:
