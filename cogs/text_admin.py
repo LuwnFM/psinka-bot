@@ -22,7 +22,6 @@ MAX_TIMEOUT_MINUTES = 28 * 24 * 60
 DEFAULT_REASON = "Причина не указана"
 
 USER_MENTION_RE = re.compile(r"<@!?(\d{15,25})>")
-ROLE_MENTION_RE = re.compile(r"<@&(\d{15,25})>")
 
 GUARD_ROLE_NAMES = {
     "гвардеец",
@@ -80,7 +79,7 @@ ROLE_GRANT_RE = re.compile(
     r"^\s*"
     r"(?:(?P<mention><@!?\d{15,25}>)\s*[,—–-]?\s*)?"
     r"на\s+тебя\s+возлагается\s+знак\s+"
-    r"(?P<role><@&\d{15,25}>)"
+    r"(?P<role>.+?)"
     r"\s+за\s+(?P<reason>.+?)"
     r"\s*[.!]?\s*$",
     flags=re.IGNORECASE,
@@ -90,7 +89,7 @@ ROLE_REMOVE_RE = re.compile(
     r"^\s*"
     r"(?:(?P<mention><@!?\d{15,25}>)\s*[,—–-]?\s*)?"
     r"с\s+тебя\s+снимается\s+знак\s+"
-    r"(?P<role><@&\d{15,25}>)"
+    r"(?P<role>.+?)"
     r"\s+за\s+(?P<reason>.+?)"
     r"\s*[.!]?\s*$",
     flags=re.IGNORECASE,
@@ -146,6 +145,24 @@ def _member_by_mention(guild: disnake.Guild, mention: Optional[str]) -> Optional
     if not match:
         return None
     return guild.get_member(int(match.group(1)))
+
+
+def _role_by_name(
+    guild: disnake.Guild,
+    role_name: Optional[str],
+) -> Tuple[Optional[disnake.Role], Optional[str]]:
+    """Ищет роль по точному названию без Discord-упоминания."""
+    raw_name = (role_name or "").strip()
+    if not raw_name:
+        return None, "название роли пустое"
+
+    wanted = raw_name.casefold()
+    matches = [role for role in guild.roles if role.name.strip().casefold() == wanted]
+    if not matches:
+        return None, f"роль «{raw_name}» не найдена"
+    if len(matches) > 1:
+        return None, f"на сервере несколько ролей с названием «{raw_name}»"
+    return matches[0], None
 
 
 async def _reply_target(message: disnake.Message) -> Optional[disnake.Member]:
@@ -372,8 +389,9 @@ class TextAdminCog(commands.Cog):
             "Доступ: **Администратор / Глава Гвардии Фаервелла**.\n"
             "Отдельной команды для выдачи бана **нет**.\n\n"
             "**🎖️ Служебные знаки — роли**\n"
-            "`На тебя возлагается знак @Роль за назначение`\n"
-            "`С тебя снимается знак @Роль за снятие полномочий`\n"
+            "`На тебя возлагается знак Посетитель Аукциона за назначение`\n"
+            "`С тебя снимается знак Посетитель Аукциона за снятие полномочий`\n"
+            "Роль указывается **обычным названием без @упоминания**. Ответ бота роль не пингует.\n"
             "Доступ: **только Администратор**.\n\n"
             "Команд очистки сообщений в служебном наборе **нет**.",
             mention_author=False,
@@ -538,11 +556,17 @@ class TextAdminCog(commands.Cog):
         if target is None:
             return
 
-        role_match = ROLE_MENTION_RE.fullmatch(match.group("role"))
-        role = message.guild.get_role(int(role_match.group(1))) if role_match else None
+        role_name = match.group("role").strip()
+        role, role_error = _role_by_name(message.guild, role_name)
         if role is None:
-            await message.reply("❌ Не удалось распознать служебный знак — укажи настоящее упоминание роли.", mention_author=False)
+            await message.reply(
+                f"❌ Не удалось распознать служебный знак: {role_error}. "
+                "Укажи точное название роли без @упоминания.",
+                mention_author=False,
+                allowed_mentions=disnake.AllowedMentions.none(),
+            )
             return
+        role_label = disnake.utils.escape_markdown(role.name)
 
         bot_member = _bot_member(message.guild, self.bot)
         problem = _role_problem(message.author, target, role, bot_member)  # type: ignore[arg-type]
@@ -560,23 +584,23 @@ class TextAdminCog(commands.Cog):
             if grant:
                 if role in target.roles:
                     await message.reply(
-                        f"ℹ️ На {target.mention} уже возложен знак {role.mention}.",
+                        f"ℹ️ На {target.mention} уже возложен знак **{role_label}**.",
                         mention_author=False,
                         allowed_mentions=disnake.AllowedMentions.none(),
                     )
                     return
                 await target.add_roles(role, reason=audit_reason)
-                text = f"🎖️ На {target.mention} возложен знак {role.mention}.\n**Причина:** {reason}"
+                text = f"🎖️ На {target.mention} возложен знак **{role_label}**.\n**Причина:** {reason}"
             else:
                 if role not in target.roles:
                     await message.reply(
-                        f"ℹ️ На {target.mention} нет знака {role.mention}.",
+                        f"ℹ️ На {target.mention} нет знака **{role_label}**.",
                         mention_author=False,
                         allowed_mentions=disnake.AllowedMentions.none(),
                     )
                     return
                 await target.remove_roles(role, reason=audit_reason)
-                text = f"🎖️ С {target.mention} снят знак {role.mention}.\n**Причина:** {reason}"
+                text = f"🎖️ С {target.mention} снят знак **{role_label}**.\n**Причина:** {reason}"
 
             await message.reply(
                 text,
