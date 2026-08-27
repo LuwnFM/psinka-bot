@@ -5,7 +5,7 @@ on:
     branches:
       - release-v0.4.3
     paths:
-      - '.release_payload/**'
+      - '.release_payload/ready'
 
 permissions:
   contents: write
