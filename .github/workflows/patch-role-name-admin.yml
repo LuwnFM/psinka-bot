@@ -30,28 +30,21 @@ jobs:
           path = Path('cogs/text_admin.py')
           text = path.read_text(encoding='utf-8')
 
-          def replace_once(old: str, new: str, label: str) -> None:
+          def replace_count(old: str, new: str, expected: int, label: str) -> None:
               global text
               count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f'{label}: expected 1 match, got {count}')
-              text = text.replace(old, new, 1)
+              if count != expected:
+                  raise SystemExit(f'{label}: expected {expected} matches, got {count}')
+              text = text.replace(old, new)
 
-          replace_once(
+          replace_count(
               'ROLE_MENTION_RE = re.compile(r"<@&(\\d{15,25})>")\n',
-              '',
-              'remove ROLE_MENTION_RE',
+              '', 1, 'remove ROLE_MENTION_RE',
           )
-
-          replace_once(
+          replace_count(
               '    r"(?P<role><@&\\d{15,25}>)"\n',
               '    r"(?P<role>.+?)"\n',
-              'ROLE_GRANT_RE role name',
-          )
-          replace_once(
-              '    r"(?P<role><@&\\d{15,25}>)"\n',
-              '    r"(?P<role>.+?)"\n',
-              'ROLE_REMOVE_RE role name',
+              2, 'role regexes',
           )
 
           marker = '''def _member_by_mention(guild: disnake.Guild, mention: Optional[str]) -> Optional[disnake.Member]:
@@ -81,9 +74,9 @@ jobs:
                   return None, f"на сервере несколько ролей с названием «{raw_name}»"
               return matches[0], None
           '''
-          replace_once(marker, helper, 'insert _role_by_name')
+          replace_count(marker, helper, 1, 'insert _role_by_name')
 
-          replace_once(
+          replace_count(
               '            "`На тебя возлагается знак @Роль за назначение`\\n"\n'
               '            "`С тебя снимается знак @Роль за снятие полномочий`\\n"\n'
               '            "Доступ: **только Администратор**.\\n\\n"\n',
@@ -91,10 +84,10 @@ jobs:
               '            "`С тебя снимается знак Посетитель Аукциона за снятие полномочий`\\n"\n'
               '            "Роль указывается **обычным названием без @упоминания**. Ответ бота роль не пингует.\\n"\n'
               '            "Доступ: **только Администратор**.\\n\\n"\n',
-              'help role examples',
+              1, 'help role examples',
           )
 
-          replace_once(
+          replace_count(
               '''        role_match = ROLE_MENTION_RE.fullmatch(match.group("role"))
                   role = message.guild.get_role(int(role_match.group(1))) if role_match else None
                   if role is None:
@@ -113,31 +106,34 @@ jobs:
                       return
                   role_label = disnake.utils.escape_markdown(role.name)
           ''',
-              '_handle_role lookup',
+              1, '_handle_role lookup',
           )
 
-          replacements = {
-              'f"ℹ️ На {target.mention} уже возложен знак {role.mention}."':
-                  'f"ℹ️ На {target.mention} уже возложен знак **{role_label}**."',
-              'f"🎖️ На {target.mention} возложен знак {role.mention}.\\n**Причина:** {reason}"':
-                  'f"🎖️ На {target.mention} возложен знак **{role_label}**.\\n**Причина:** {reason}"',
-              'f"ℹ️ На {target.mention} нет знака {role.mention}."':
-                  'f"ℹ️ На {target.mention} нет знака **{role_label}**."',
-              'f"🎖️ С {target.mention} снят знак {role.mention}.\\n**Причина:** {reason}"':
-                  'f"🎖️ С {target.mention} снят знак **{role_label}**.\\n**Причина:** {reason}"',
-          }
-          for old, new in replacements.items():
-              replace_once(old, new, old)
+          replacements = [
+              ('f"ℹ️ На {target.mention} уже возложен знак {role.mention}."',
+               'f"ℹ️ На {target.mention} уже возложен знак **{role_label}**."'),
+              ('f"🎖️ На {target.mention} возложен знак {role.mention}.\\n**Причина:** {reason}"',
+               'f"🎖️ На {target.mention} возложен знак **{role_label}**.\\n**Причина:** {reason}"'),
+              ('f"ℹ️ На {target.mention} нет знака {role.mention}."',
+               'f"ℹ️ На {target.mention} нет знака **{role_label}**."'),
+              ('f"🎖️ С {target.mention} снят знак {role.mention}.\\n**Причина:** {reason}"',
+               'f"🎖️ С {target.mention} снят знак **{role_label}**.\\n**Причина:** {reason}"'),
+          ]
+          for old, new in replacements:
+              replace_count(old, new, 1, old)
 
+          if 'ROLE_MENTION_RE' in text:
+              raise SystemExit('ROLE_MENTION_RE still present')
           if 'role.mention' in text:
-              raise SystemExit('Unexpected role.mention left in text_admin.py')
-              
+              raise SystemExit('role.mention still present')
+          if 'Посетитель Аукциона' not in text:
+              raise SystemExit('help example not updated')
+
           path.write_text(text, encoding='utf-8')
           PY
 
           python -m py_compile cogs/text_admin.py
           git diff --check
-
           changed="$(git diff --name-only)"
           test "$changed" = "cogs/text_admin.py"
 
