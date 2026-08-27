@@ -466,7 +466,7 @@ PRIORITY_TIER_2 = [("OpenRouter", "openrouter/free"), ("PollinationsAI", "gpt-4.
 # их к соответствующим провайдерам вместо глобального отбрасывания модели.
 EXCLUDED_OR_MODELS = ["liquid/lfm-2.5-1.2b-instruct:free", "llama-3.1-8b-instant"]
 COMMON_EXCLUDED_MODELS = {"flux-pro", "liquid/lfm-2.5-1.2b-instruct:free"}
-GROQ_EXCLUDED_MODELS = {"llama-3.1-8b-instant"}
+GROQ_EXCLUDED_MODELS = {"llama-3.1-8b-instant", "allam-2-7b"}
 OPENROUTER_PRIORITY = "openrouter/free"
 
 GROQ_PRIORITY_MODELS = [
