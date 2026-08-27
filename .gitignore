@@ -1,4 +1,3 @@
-```
 # Python
 __pycache__/
 *.pyc
@@ -15,8 +14,10 @@ venv/
 .coverage
 coverage/
 
-# Logs
+# Logs and runtime state
 *.log
+logs/
+state/
 
 # OS generated files
 .DS_Store
@@ -72,4 +73,3 @@ build/
 *.tar.bz2
 *.tar.xz
 *.tar.zst
-```

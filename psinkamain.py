@@ -1,8 +1,94 @@
+import os
+import subprocess
+import sys
+from importlib.metadata import PackageNotFoundError, version as package_version
+
+
+def _installed_g4f_version() -> str | None:
+    try:
+        return package_version("g4f")
+    except PackageNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def _upgrade_g4f_before_import() -> None:
+    """
+    На каждом старте проверяет PyPI и обновляет g4f до последнего релиза.
+
+    Обновление выполняется до первого ``import g4f``, поэтому новая версия
+    используется уже в текущем процессе. Ошибка сети/PyPI не блокирует
+    запуск: бот продолжит работу с уже установленной версией, если она есть.
+    """
+    before = _installed_g4f_version()
+    label = before or "не установлен"
+    print(f"[g4f] Проверка обновлений на PyPI (сейчас: {label})...", flush=True)
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "--disable-pip-version-check",
+        "--no-input",
+        "--retries",
+        "1",
+        "--timeout",
+        "15",
+        "g4f",
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=90,
+            check=False,
+        )
+    except Exception as exc:
+        if before is None:
+            raise RuntimeError(
+                f"g4f не установлен и автоматическая установка не удалась: {exc}"
+            ) from exc
+        print(
+            f"[g4f] Не удалось проверить/обновить пакет: {exc}. "
+            "Продолжаю запуск с установленной версией.",
+            flush=True,
+        )
+        return
+
+    after = _installed_g4f_version()
+    if result.returncode == 0:
+        if before != after:
+            print(f"[g4f] Обновлено: {before or 'нет'} -> {after or 'неизвестно'}", flush=True)
+        else:
+            print(f"[g4f] Уже актуальная версия: {after or 'неизвестно'}", flush=True)
+        return
+
+    tail = (result.stdout or "").strip().splitlines()[-5:]
+    details = " | ".join(line.strip() for line in tail if line.strip())
+    if before is None and after is None:
+        raise RuntimeError(
+            f"g4f не установлен, а pip завершился с кодом {result.returncode}: {details}"
+        )
+    print(
+        f"[g4f] pip завершился с кодом {result.returncode}. "
+        f"Продолжаю запуск с версией {before or after or 'неизвестно'}. "
+        f"{details}",
+        flush=True,
+    )
+
+
+_upgrade_g4f_before_import()
+
 import g4f
 import disnake
 import random
 import re
-import os
 import logging
 import time
 import math
@@ -26,6 +112,20 @@ import json
 import xml.etree.ElementTree as ET
 import calendar as pc_calendar
 import unicodedata as pc_unicodedata
+from core.paths import (
+    ANALYSIS_LOG_FILE as CORE_ANALYSIS_LOG_FILE,
+    BOT_ERROR_LOG,
+    ENV_FILE,
+    MERCENARY_DB_FILE as CORE_MERCENARY_DB_FILE,
+    PENDING_TEST_LOG as CORE_PENDING_TEST_LOG,
+    POST_COUNT_SETTINGS_FILE,
+    ROOT_DIR,
+)
+
+try:
+    from g4f.client import AsyncClient as G4FAsyncClient
+except ImportError:
+    G4FAsyncClient = None
 
 
 # ============================================================================
@@ -41,12 +141,12 @@ except ImportError:
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(), logging.FileHandler('bot_errors.log', encoding='utf-8', delay=True)],
+    handlers=[logging.StreamHandler(), logging.FileHandler(BOT_ERROR_LOG, encoding='utf-8', delay=True)],
     force=True
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+load_dotenv(ENV_FILE)
 
 
 def safe_int_env(name: str, default: int = 0) -> int:
@@ -229,7 +329,7 @@ db_manager = DBManager(SessionLocal)
 # 📂 МЕНЕДЖЕР ВРЕМЕННЫХ ЛОГОВ ТЕСТОВ
 # ============================================================================
 
-PENDING_TEST_LOG = "test_pending.csv"
+PENDING_TEST_LOG = str(CORE_PENDING_TEST_LOG)
 
 
 class PendingTestManager:
@@ -300,13 +400,15 @@ class PendingTestManager:
 pending_test_manager = PendingTestManager(PENDING_TEST_LOG)
 
 G4F_DEEP_SCAN_MODELS = {
-    "PollinationsAI": ["deepseek-r1", "deepseek-v3", "llama-3.3-70b", "qwen-2.5-72b", "mistral-large"],
-    "Vercel": ["deepseek-r1", "llama-3.3-70b", "qwen-2.5-72b"],
-    "FreeGPT": ["deepseek-r1", "llama-3.3-70b", "gpt-3.5-turbo"],
-    "MyShell": ["llama-3.3-70b", "mistral-large"],
-    "Perplexity": ["llama-3.3-70b", "mixtral-8x7b"],
-    "Default": ["gpt-3.5-turbo", "llama-3.3-70b", "deepseek-r1", "deepseek-v3"]
+    # Провайдеры разрешаются через текущую установленную версию g4f. Ошибка конкретного
+    # провайдера не роняет команду: сохраняется каскадный fallback.
+    "PollinationsAI": ["gpt-4.1-nano", "deepseek-r1", "openai-fast"],
+    "Qwen": ["qwen3.6-27b", "qwen3.5-flash"],
+    "Perplexity": ["auto", "r1-1776", "gpt5"],
+    "Default": ["gpt-4.1-nano", "deepseek-r1", "deepseek-v3", "gpt-oss-120b"],
 }
+
+G4F_FALLBACK_PROVIDERS = ["PollinationsAI", "Qwen", "Perplexity"]
 
 
 # ============================================================================
@@ -318,13 +420,13 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('bot_errors.log', encoding='utf-8', delay=True)
+        logging.FileHandler(BOT_ERROR_LOG, encoding='utf-8', delay=True)
     ],
     force=True
 )
 logger = logging.getLogger(__name__)
 
-ANALYSIS_LOG_FILE = "analysis_debug.log"
+ANALYSIS_LOG_FILE = str(CORE_ANALYSIS_LOG_FILE)
 analysis_logger = logging.getLogger("analysis_debug")
 analysis_logger.setLevel(logging.INFO)
 if not analysis_logger.handlers:
@@ -342,23 +444,39 @@ intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Дополнительные текстовые админ-команды вынесены в отдельный модуль.
+# Ролевые механики (кубики, недвижка, качество, наёмники и связанные роллы)
+# этим модулем не изменяются. Темница — существующая админ-команда.
+try:
+    bot.load_extension("cogs.text_admin")
+    logger.info("✅ Модуль текстовых админ-команд загружен.")
+except Exception as e:
+    logger.error(f"❌ Не удалось загрузить cogs.text_admin: {e}", exc_info=True)
+
 # ============================================================================
 # 🤖 КОНФИГУРАЦИЯ МОДЕЛЕЙ
 # ============================================================================
 
-PRIORITY_TIER_1 = [("Default", "deepseek-r1"), ("Default", "deepseek-v3")]
-PRIORITY_TIER_2 = [("PollinationsAI", "deepseek-r1"), ("Vercel", "deepseek-r1")]
+# Приоритеты маршрутизации. Старые исключения сохранены ниже, но сами
+# рабочие приоритеты обновлены под актуальные модели 2026 года.
+PRIORITY_TIER_1 = [("Groq", "openai/gpt-oss-120b"), ("Groq", "openai/gpt-oss-20b")]
+PRIORITY_TIER_2 = [("OpenRouter", "openrouter/free"), ("PollinationsAI", "gpt-4.1-nano")]
+
+# Не удалять: это исторические исключения проекта. Маршрутизатор применяет
+# их к соответствующим провайдерам вместо глобального отбрасывания модели.
 EXCLUDED_OR_MODELS = ["liquid/lfm-2.5-1.2b-instruct:free", "llama-3.1-8b-instant"]
-OPENROUTER_PRIORITY = "nvidia/nemotron-3-super-120b-a12b:free"
+COMMON_EXCLUDED_MODELS = {"flux-pro", "liquid/lfm-2.5-1.2b-instruct:free"}
+GROQ_EXCLUDED_MODELS = {"llama-3.1-8b-instant"}
+OPENROUTER_PRIORITY = "openrouter/free"
 
 GROQ_PRIORITY_MODELS = [
-    "llama-3.3-70b-versatile",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
-    "moonshotai/kimi-k2-instruct-0905",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
 ]
 
 OR_PRIORITY_MODELS = [
     OPENROUTER_PRIORITY,
+    "nvidia/nemotron-3-super-120b-a12b:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "google/gemma-3-27b-it:free",
     "qwen/qwen3-32b:free",
@@ -375,17 +493,19 @@ ANALYSIS_SYSTEM_PROMPT = """
 Ты — аналитик-модератор RP сервера Discord. Твоя задача — найти ТОЛЬКО явный оффтоп, спам.
 
 📋 ЧТО ИГНОРИРОВАТЬ (НЕ отмечать):
-- Любые ролевые действия, описания в **звёздочках**, __подчёркиваниях__ или `код`е, когда они не аномально короткие (тогда проверяй их контекст).
+- Любые ролевые действия, описания в **звёздочках**, __подчёркиваниях__ или `код`е, если по контексту это часть игровой сцены. Короткость сама по себе не делает RP оффтопом.
 - Диалоги персонажей, сюжетные повороты (даже жестокие, романтические или драматичные).
 - Ролевые пинги (@персонаж, @должность) внутри контекста игры.
 - Системные сообщения о переходе между локациями (если это часть сюжета).
-- Эмоции и реакции персонажей (страх, боль, слезы).
+- Эмоции и реакции персонажей (страх, боль, слезы), если это именно реакция персонажа.
 - ВАЖНО: Не оценивай содержание роли (мораль, жестокость, этику), если это не реальный спам/оффтоп.
 
 🚨 ЧТО ФИКСИРОВАТЬ (отмечать ID):
 Оффтоп/Спам:
    - Флуд (короткие бессмысленные сообщения подряд: "а", "лол", смайлы без текста).
    - OOC обсуждения ((вне роли), //комментарии, обсуждение механик вне игры).
+   - Короткие неигровые реплики игроков, даже если они НЕ оформлены скобками или `//`: бытовые/технические фразы, реакции и разговор вне текущей RP-сцены (например «ща», «пон», «ахах», «го в войс»), когда по соседним сообщениям видно, что это не речь/действие персонажа.
+   - Не требуй специальных OOC-маркеров: оффтоп определяется по смыслу и контексту, а не только по скобкам.
    - Попрошайничество (просьбы дать ресурсы/деньги вне игрового контекста).
    - Спам пингами (@everyone, @here, массовые упоминания не по делу).
    - Личные оскорбления игроков (не персонажей).
@@ -403,17 +523,12 @@ ANALYSIS_SYSTEM_PROMPT = """
 # 📚 ПОЛНЫЕ СПИСКИ МОДЕЛЕЙ ДЛЯ ТЕСТИРОВАНИЯ
 # ============================================================================
 
-# Все известные модели Groq (приоритетные + дополнительные)
+# Актуальный статический fallback Groq. При наличии токена /models остаётся
+# источником истины, а этот список нужен только если discovery недоступен.
 GROQ_ALL_MODELS = GROQ_PRIORITY_MODELS + [
-    "mixtral-8x7b-32768",
-    "gemma2-9b-it",
-    "llama-3.2-1b-preview",
-    "llama-3.2-3b-preview",
-    "llama-3.2-11b-vision-preview",
-    "llama-3.2-90b-vision-preview",
-    "llama-guard-3-8b",
-    "llama3-70b-8192",
-    "llama3-8b-8192",
+    "groq/compound",
+    "groq/compound-mini",
+    "qwen/qwen3.6-27b",
 ]
 
 # Все известные бесплатные/доступные модели OpenRouter
@@ -433,53 +548,80 @@ OR_ALL_MODELS = OR_PRIORITY_MODELS + [
 
 def get_all_g4f_combinations() -> List[Tuple[str, str]]:
     """
-    Возвращает ВСЕ комбинации провайдер/модель для G4F:
-    - Из конфигурации G4F_DEEP_SCAN_MODELS
-    - Из БД (успешные истории)
-    - Уникальные, без дубликатов
+    Возвращает комбинации провайдер/модель для G4F из конфигурации и БД.
+    Устаревшие записи не ломают очередь: имя провайдера нормализуется, а
+    сохранённые исключения проекта применяются централизованно.
     """
     combos = []
     seen = set()
-    EXCLUDED = ["flux-pro", "liquid/lfm-2.5-1.2b-instruct:free"]
 
-    # 1. Из конфигурации бота
     for prov, models in G4F_DEEP_SCAN_MODELS.items():
+        normalized_provider = normalize_provider_name(prov)
         for mod in models:
-            key = (prov, mod)
-            if key not in seen and mod not in EXCLUDED:
+            key = (normalized_provider, mod)
+            if key not in seen and not is_model_excluded(normalized_provider, mod):
                 combos.append(key)
                 seen.add(key)
 
-    # 2. Из БД (если подключена) — добавляем успешные модели
     if SessionLocal:
         db_models = db_manager.get_all_models()
         for prov, mod in db_models:
-            # Пропускаем не-G4F провайдеры и исключённые модели
-            if prov in ["Groq", "OpenRouter"] or mod in EXCLUDED:
+            normalized_provider = normalize_provider_name(prov)
+            if normalized_provider in {"Groq", "OpenRouter"}:
                 continue
-            key = (prov, mod)
-            if key not in seen:
+            key = (normalized_provider, mod)
+            if key not in seen and not is_model_excluded(normalized_provider, mod):
                 combos.append(key)
                 seen.add(key)
 
     return combos
 
 
+def normalize_provider_name(provider: Optional[str]) -> str:
+    """Приводит имена маршрутов из БД/старых файлов к одному виду."""
+    raw = str(provider or "").strip()
+    folded = raw.casefold()
+    if folded in {"openrouter", "open_router", "or"}:
+        return "OpenRouter"
+    if folded == "groq":
+        return "Groq"
+    if folded in {"default", "g4f", "g4f-default", "g4f_default"}:
+        return "g4f-default"
+    return raw
+
+
+def is_model_excluded(provider: Optional[str], model: Optional[str]) -> bool:
+    """Сохраняет все прежние исключения, но применяет их по назначению."""
+    provider = normalize_provider_name(provider)
+    model = str(model or "").strip()
+    if not model:
+        return True
+    if model in COMMON_EXCLUDED_MODELS:
+        return True
+    if provider == "OpenRouter" and model in EXCLUDED_OR_MODELS:
+        return True
+    if provider == "Groq" and model in GROQ_EXCLUDED_MODELS:
+        return True
+    return False
+
+
 def get_all_groq_combinations() -> List[Tuple[str, str]]:
-    """Возвращает все известные модели Groq"""
-    return [("Groq", mod) for mod in GROQ_ALL_MODELS if mod not in EXCLUDED_OR_MODELS]
+    """Возвращает все известные модели Groq, сохраняя исключения проекта."""
+    return [("Groq", mod) for mod in GROQ_ALL_MODELS if not is_model_excluded("Groq", mod)]
 
 
 def get_all_openrouter_combinations() -> List[Tuple[str, str]]:
-    """Возвращает все известные модели OpenRouter"""
-    return [("OpenRouter", mod) for mod in OR_ALL_MODELS if mod not in EXCLUDED_OR_MODELS]
+    """Возвращает все известные модели OpenRouter, сохраняя исключения проекта."""
+    return [("OpenRouter", mod) for mod in OR_ALL_MODELS if not is_model_excluded("OpenRouter", mod)]
 
 
 def dedupe_combinations(combinations: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
     result = []
     seen = set()
     for provider, model in combinations:
-        if not provider or not model or model in EXCLUDED_OR_MODELS:
+        provider = normalize_provider_name(provider)
+        model = str(model or "").strip()
+        if not provider or is_model_excluded(provider, model):
             continue
         key = (provider, model)
         if key not in seen:
@@ -491,10 +633,11 @@ def dedupe_combinations(combinations: List[Tuple[str, str]]) -> List[Tuple[str, 
 def get_db_combinations(provider: Optional[str] = None) -> List[Tuple[str, str]]:
     if not SessionLocal:
         return []
-    combos = db_manager.get_all_models()
+    combos = [(normalize_provider_name(p), m) for p, m in db_manager.get_all_models()]
     if provider:
-        combos = [(p, m) for p, m in combos if p == provider]
-    return combos
+        normalized = normalize_provider_name(provider)
+        combos = [(p, m) for p, m in combos if p == normalized]
+    return dedupe_combinations(combos)
 
 
 async def fetch_groq_model_ids() -> List[str]:
@@ -686,9 +829,7 @@ def strip_think_content(text: str) -> str:
 async def make_g4f_request(provider_name: str, model: str, prompt: str,
                            timeout: float = 45.0, system_prompt: str = None,
                            proxy_url: str = None) -> Tuple[bool, str, float]:
-    """
-    Запрос к g4f с корректной обработкой провайдеров
-    """
+    """Запрос к актуальному g4f через AsyncClient с сохранением каскадного fallback."""
     start = time.time()
 
     messages = []
@@ -696,42 +837,70 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
-    # Список провайдеров для перебора
+    requested_provider = normalize_provider_name(provider_name)
     providers_to_try = []
-    if provider_name and provider_name != "g4f-default":
-        providers_to_try.append(provider_name)
-    providers_to_try.extend(["PollinationsAI", "MyShell", "Perplexity", "Vercel"])
 
-    for prov_name in providers_to_try:
+    # None означает штатный автоматический роутинг g4f.
+    if requested_provider == "g4f-default" or not requested_provider:
+        providers_to_try.append(None)
+    else:
+        providers_to_try.append(requested_provider)
+
+    # Сохраняем fallback, но используем только имена из актуального реестра.
+    providers_to_try.extend(G4F_FALLBACK_PROVIDERS)
+    providers_to_try.append(None)
+
+    deduped_providers = []
+    seen_providers = set()
+    for item in providers_to_try:
+        key = item or "__default__"
+        if key not in seen_providers:
+            deduped_providers.append(item)
+            seen_providers.add(key)
+
+    for prov_name in deduped_providers:
+        display_name = prov_name or "g4f-default"
         try:
-            def sync_call():
-                from g4f.client import Client as G4FClient
-                client = G4FClient()
-
-                kwargs = {
-                    "model": model,
-                    "messages": messages,
-                    "stream": False,
-                }
-
-                # Прокси передаётся в клиент
-                if proxy_url and validate_proxy_format(proxy_url):
-                    kwargs["proxy"] = proxy_url
-
-                # Провайдер указываем только если он существует
+            provider_class = None
+            if prov_name:
                 try:
-                    provider_class = getattr(g4f.Provider, prov_name, None)
-                    if provider_class:
-                        kwargs["provider"] = provider_class
-                except:
-                    pass
+                    provider_class = getattr(g4f.Provider, prov_name)
+                except (AttributeError, ImportError) as exc:
+                    logger.debug(f"⚠️ G4F провайдер {prov_name} отсутствует в текущей версии: {exc}")
+                    continue
 
-                return client.chat.completions.create(**kwargs)
+                # Не тратим попытку на явно нерабочий провайдер, если g4f сам
+                # пометил его working=False. Отсутствие атрибута не считается ошибкой.
+                if getattr(provider_class, "working", True) is False:
+                    logger.debug(f"⚠️ G4F {prov_name} помечен working=False")
+                    continue
 
-            response = await asyncio.wait_for(
-                asyncio.to_thread(sync_call),
-                timeout=timeout + 10
-            )
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "stream": False,
+            }
+            if proxy_url and validate_proxy_format(proxy_url):
+                kwargs["proxy"] = proxy_url
+
+            if G4FAsyncClient is not None:
+                client = G4FAsyncClient(provider=provider_class) if provider_class else G4FAsyncClient()
+                response = await asyncio.wait_for(
+                    client.chat.completions.create(**kwargs),
+                    timeout=timeout + 10,
+                )
+            else:
+                # Совместимость со старой установкой: requirements уже фиксирует
+                # Синхронный Client оставлен намеренно как резервный путь совместимости.
+                def sync_call():
+                    from g4f.client import Client as G4FClient
+                    client = G4FClient(provider=provider_class) if provider_class else G4FClient()
+                    return client.chat.completions.create(**kwargs)
+
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(sync_call),
+                    timeout=timeout + 10,
+                )
 
             if response is None:
                 raise Exception("Пустой ответ (None)")
@@ -740,33 +909,37 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
                 choice = response.choices[0]
                 if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
                     answer = choice.message.content
-                    if answer and answer.strip():
-                        answer = strip_think_content(answer.strip())
+                    if answer and str(answer).strip():
+                        answer = strip_think_content(str(answer).strip())
                         elapsed = time.time() - start
-                        logger.debug(f"✅ G4F {prov_name}/{model} — {elapsed:.2f}s")
+                        logger.debug(f"✅ G4F {display_name}/{model} — {elapsed:.2f}s")
                         return True, answer, elapsed
-                    else:
-                        raise Exception("Пустой content")
-                else:
-                    raise Exception("Нет message.content")
-            else:
-                raise Exception(f"Некорректный ответ: {type(response)}")
+                    raise Exception("Пустой content")
+                raise Exception("Нет message.content")
+            raise Exception(f"Некорректный ответ: {type(response)}")
 
         except asyncio.TimeoutError:
-            logger.debug(f"⏰ G4F {prov_name} таймаут")
+            logger.debug(f"⏰ G4F {display_name} таймаут")
+            continue
+        except (AuthenticationError, RequestLimitError, ModelNotFoundError, ProviderError) as e:
+            logger.debug(f"⚠️ G4F {display_name}/{model}: {str(e)[:80]}")
             continue
         except Exception as e:
             err_str = str(e).lower()
 
-            if any(kw in err_str for kw in ["api_key", "unauthorized", "authentication", "401"]):
-                logger.debug(f"⚠️ G4F {prov_name} требует авторизацию")
+            if any(kw in err_str for kw in ["api_key", "unauthorized", "authentication", "401", "missingauth"]):
+                logger.debug(f"⚠️ G4F {display_name} требует авторизацию")
                 continue
 
-            if any(kw in err_str for kw in ["not found", "does not exist", "404"]):
-                logger.debug(f"⚠️ G4F {prov_name}/{model} не найдена")
+            if any(kw in err_str for kw in ["not found", "does not exist", "404", "modelnotfound"]):
+                logger.debug(f"⚠️ G4F {display_name}/{model} не найдена")
                 continue
 
-            logger.debug(f"⚠️ G4F {prov_name} ошибка: {str(e)[:60]}")
+            if "rate limit" in err_str or "429" in err_str:
+                logger.debug(f"🚫 G4F {display_name}/{model} rate limit")
+                continue
+
+            logger.debug(f"⚠️ G4F {display_name} ошибка: {str(e)[:80]}")
             continue
 
     elapsed = time.time() - start
@@ -784,6 +957,13 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
 
     if isinstance(models, str):
         models = [models]
+    models = [
+        str(model).strip()
+        for model in models
+        if str(model).strip() and not is_model_excluded("OpenRouter", model)
+    ]
+    if not models:
+        return False, "Все модели OpenRouter исключены из маршрута", 0.0
 
     start = time.time()
     messages = []
@@ -858,6 +1038,13 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
 
     if isinstance(models, str):
         models = [models]
+    models = [
+        str(model).strip()
+        for model in models
+        if str(model).strip() and not is_model_excluded("Groq", model)
+    ]
+    if not models:
+        return False, "Все модели Groq исключены из маршрута", 0.0
 
     client = Groq(api_key=groq_token, timeout=timeout)
     start = time.time()
@@ -919,6 +1106,34 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
     return False, "Все модели Groq недоступны", elapsed
 
 
+async def route_model_request(provider: str, model: str, prompt: str, *,
+                              timeout: float = 45.0, system_prompt: str = None,
+                              proxy_url: str = None,
+                              return_model_name: bool = False) -> Tuple[bool, str, float]:
+    """Единая точка маршрутизации команд к Groq, OpenRouter и G4F."""
+    provider = normalize_provider_name(provider)
+    model = str(model or "").strip()
+
+    if is_model_excluded(provider, model):
+        return False, f"Модель {model or '?'} исключена из маршрута {provider or '?'}", 0.0
+
+    if provider == "OpenRouter":
+        return await test_openrouter_single(
+            [model], prompt, timeout=timeout,
+            system_prompt=system_prompt, proxy_url=proxy_url,
+        )
+    if provider == "Groq":
+        return await test_groq_single(
+            [model], prompt, timeout=timeout,
+            system_prompt=system_prompt,
+            return_model_name=return_model_name,
+        )
+    return await make_g4f_request(
+        provider, model, prompt, timeout=timeout,
+        system_prompt=system_prompt, proxy_url=proxy_url,
+    )
+
+
 async def heartbeat_keeper():
     while True:
         await asyncio.sleep(60)
@@ -928,6 +1143,30 @@ async def heartbeat_keeper():
 # ============================================================================
 # 🎲 ДВИЖОК КУБИКОВ
 # ============================================================================
+
+class DiceTermResult:
+    def __init__(self, source: str, sign: int = 1):
+        self.source = source.strip()
+        self.sign = 1 if sign >= 0 else -1
+        self.kind = "dice"
+        self.num_dice = 0
+        self.num_sides = 0
+        self.base_rolls: List[int] = []
+        self.final_rolls: List[int] = []
+        self.all_rolls: List[int] = []
+        self.exploded_rolls: List[int] = []
+        self.kept_dice: List[int] = []
+        self.dropped_dice: List[int] = []
+        self.reroll_sequences: List[Tuple[int, List[int]]] = []
+        self.details: List[str] = []
+        self.warnings: List[str] = []
+        self.successes = 0
+        self.failures = 0
+        self.botches = 0
+        self.target: Optional[int] = None
+        self.subtotal = 0.0
+        self.number_value: Optional[float] = None
+
 
 class DiceResult:
     def __init__(self):
@@ -943,9 +1182,27 @@ class DiceResult:
         self.successes: int = 0
         self.failures: int = 0
         self.botches: int = 0
+        self.terms: List[DiceTermResult] = []
+        self.warnings: List[str] = []
+        self.expression = ""
+        self.formula_raw = ""
+        self.formula_expanded = ""
+        self.formula_index = 0
+        self.formula_count = 1
+        self.set_index = 0
+        self.set_count = 1
+        self.global_modifier: Optional[Tuple[str, float, float]] = None
 
 
 class DiceParser:
+    MAX_SIDES = 100
+    MAX_DICE_PER_SET = 100
+    MAX_SETS = 20
+    MAX_FORMULAS = 4
+    MAX_EXTRA_ROLLS = 100
+    MAX_INPUT_LENGTH = 2000
+    MAX_COMMENT_LENGTH = 500
+
     def __init__(self):
         self.aliases = {
             "dndstats": "6 4d6 k3",
@@ -953,29 +1210,42 @@ class DiceParser:
             "+d20": "2d20 d1",
             "-d20": "2d20 kl1",
             "stat": "4d6 k3",
-            "save": "1d20 + 5"
+            "save": "1d20 + 5",
         }
 
     def parse(self, command_str: str) -> List[DiceResult]:
-        results: List[DiceResult] = []
         if not command_str or not command_str.strip():
-            return results
+            return []
+        if len(command_str) > self.MAX_INPUT_LENGTH:
+            raise ValueError(f"Формула слишком длинная: максимум {self.MAX_INPUT_LENGTH} символов.")
 
-        command_str = command_str.strip()
-        parts = command_str.split(maxsplit=1)
-        alias = parts[0].lower() if parts else ""
-        if alias in self.aliases:
-            tail = parts[1] if len(parts) > 1 else ""
-            command_str = (self.aliases[alias] + " " + tail).strip()
+        formulas = [part.strip() for part in command_str.split(';') if part.strip()]
+        if not formulas:
+            return []
+        if len(formulas) > self.MAX_FORMULAS:
+            raise ValueError(f"Можно указать максимум {self.MAX_FORMULAS} отдельные формулы через `;`.")
 
-        for expression in command_str.split(';')[:4]:
-            expression = expression.strip()
-            if not expression:
-                continue
-            parsed = self._parse_expression(expression)
+        results: List[DiceResult] = []
+        formula_count = len(formulas)
+        for formula_index, raw_formula in enumerate(formulas):
+            parsed = self._parse_expression(raw_formula)
+            for result in parsed:
+                result.formula_raw = raw_formula
+                result.formula_index = formula_index
+                result.formula_count = formula_count
             results.extend(parsed)
 
-        return results[:80]
+        return results
+
+    def _expand_alias(self, expression: str) -> str:
+        parts = expression.strip().split(maxsplit=1)
+        if not parts:
+            return expression.strip()
+        alias = parts[0].lower()
+        if alias not in self.aliases:
+            return expression.strip()
+        tail = parts[1] if len(parts) > 1 else ""
+        return (self.aliases[alias] + (" " + tail if tail else "")).strip()
 
     def _parse_expression(self, expression: str) -> List[DiceResult]:
         comment = ""
@@ -983,202 +1253,339 @@ class DiceParser:
             expression, comment = expression.split('!', 1)
             expression = expression.strip()
             comment = comment.strip()
+            if len(comment) > self.MAX_COMMENT_LENGTH:
+                raise ValueError(f"Комментарий после `!` должен быть не длиннее {self.MAX_COMMENT_LENGTH} символов.")
+        if not expression:
+            raise ValueError("Перед комментарием `!` должна быть формула броска.")
+
+        expanded = self._expand_alias(expression)
 
         num_sets = 1
-        set_match = re.match(r'^(\d+)\s+(.+)$', expression.strip())
-        if set_match and 'd' in set_match.group(2).lower():
-            num_sets = max(1, min(int(set_match.group(1)), 20))
-            expression = set_match.group(2).strip()
+        set_match = re.match(r'^(\d+)\s+(.+)$', expanded)
+        if set_match:
+            possible_sets = int(set_match.group(1))
+            remainder = set_match.group(2).strip()
+            first_token = remainder.split(maxsplit=1)[0].lower() if remainder else ""
+            if 'd' in remainder.lower() or first_token in self.aliases:
+                if not 1 <= possible_sets <= self.MAX_SETS:
+                    raise ValueError(f"Количество наборов должно быть от 1 до {self.MAX_SETS}.")
+                num_sets = possible_sets
+                expanded = self._expand_alias(remainder)
 
-        results = []
-        for _ in range(num_sets):
-            result = self._roll_once(expression)
-            if result:
-                result.comment = comment
-                results.append(result)
+        results: List[DiceResult] = []
+        for set_index in range(num_sets):
+            result = self._roll_once(expanded)
+            result.comment = comment
+            result.formula_expanded = expanded
+            result.set_index = set_index
+            result.set_count = num_sets
+            results.append(result)
         return results
 
-    def _extract_modifier(self, expression: str) -> Tuple[str, Optional[Tuple[str, float]]]:
-        modifier_match = re.search(r'(?<![a-zA-Z])([+\-*/])\s*(-?\d+(?:\.\d+)?)\s*$', expression)
-        if not modifier_match:
-            return expression, None
-        op = modifier_match.group(1)
-        value = float(modifier_match.group(2))
-        return expression[:modifier_match.start()].strip(), (op, value)
+    def _extract_global_modifier(self, expression: str) -> Tuple[str, Optional[Tuple[str, float]]]:
+        match = re.search(r'\s*([*/])\s*(-?\d+(?:\.\d+)?)\s*$', expression)
+        if not match:
+            return expression.strip(), None
+        core = expression[:match.start()].strip()
+        if not core:
+            raise ValueError("Перед `*` или `/` должна быть формула.")
+        return core, (match.group(1), float(match.group(2)))
 
-    def _roll_once(self, expression: str) -> Optional[DiceResult]:
-        res = DiceResult()
-        expr_without_modifier, modifier = self._extract_modifier(expression.strip())
+    def _split_additive_terms(self, expression: str) -> List[Tuple[int, str]]:
+        if not expression.strip():
+            raise ValueError("Пустая формула броска.")
 
-        dice_match = re.search(r'(\d*)d(\d+)', expr_without_modifier, re.IGNORECASE)
+        terms: List[Tuple[int, str]] = []
+        current: List[str] = []
+        sign = 1
+        saw_content = False
+
+        for ch in expression:
+            if ch in '+-':
+                text = ''.join(current).strip()
+                if text:
+                    terms.append((sign, text))
+                    current = []
+                    sign = 1 if ch == '+' else -1
+                    saw_content = True
+                elif not saw_content and not terms:
+                    sign = 1 if ch == '+' else -1
+                    saw_content = True
+                else:
+                    raise ValueError("Некорректная последовательность `+`/`-` в формуле.")
+            else:
+                current.append(ch)
+                if not ch.isspace():
+                    saw_content = True
+
+        text = ''.join(current).strip()
+        if not text:
+            raise ValueError("Формула не может заканчиваться оператором `+` или `-`.")
+        terms.append((sign, text))
+        return terms
+
+    def _parse_flags(self, tail: str, num_sides: int) -> Dict[str, Tuple[str, int]]:
+        flags: Dict[str, Tuple[str, int]] = {}
+        pos = 0
+        pattern = re.compile(r'(ie|ir|kh|kl|dh|dl|e|r|k|d|t)\s*(\d+)?', re.IGNORECASE)
+        category_for = {
+            'r': 'reroll', 'ir': 'reroll',
+            'e': 'explode', 'ie': 'explode',
+            'k': 'keepdrop', 'kh': 'keepdrop', 'kl': 'keepdrop',
+            'd': 'keepdrop', 'dl': 'keepdrop', 'dh': 'keepdrop',
+            't': 'target',
+        }
+
+        while pos < len(tail):
+            while pos < len(tail) and tail[pos].isspace():
+                pos += 1
+            if pos >= len(tail):
+                break
+            match = pattern.match(tail, pos)
+            if not match:
+                fragment = tail[pos:].strip()
+                raise ValueError(f"Не понял часть формулы: `{fragment}`.")
+            end = match.end()
+            if end < len(tail) and not tail[end].isspace():
+                fragment = tail[pos:].strip()
+                raise ValueError(f"Не понял часть формулы: `{fragment}`.")
+
+            flag = match.group(1).lower()
+            category = category_for[flag]
+            if category in flags:
+                raise ValueError(f"Нельзя указывать два модификатора одного типа в одном кубике: `{tail.strip()}`.")
+
+            default_value = num_sides if category in {'explode', 'target'} else 1
+            value = int(match.group(2)) if match.group(2) is not None else default_value
+            if category in {'reroll', 'explode', 'target'} and not 1 <= value <= num_sides:
+                raise ValueError(f"Значение `{flag}{value}` должно быть от 1 до {num_sides} для d{num_sides}.")
+            if flag == 'ir' and value >= num_sides:
+                raise ValueError(f"`ir{value}` для d{num_sides} никогда не сможет завершиться: порог должен быть ниже {num_sides}.")
+
+            flags[category] = (flag, value)
+            pos = end
+
+        return flags
+
+    def _parse_term(self, text: str, sign: int) -> DiceTermResult:
+        term = DiceTermResult(text, sign)
+        number_match = re.fullmatch(r'\d+(?:\.\d+)?', text.strip())
+        if number_match:
+            term.kind = "number"
+            term.number_value = float(number_match.group(0))
+            term.subtotal = term.number_value
+            return term
+
+        dice_match = re.fullmatch(r'(\d*)d(\d+)(.*)', text.strip(), re.IGNORECASE)
         if not dice_match:
-            num_match = re.fullmatch(r'\s*(-?\d+(?:\.\d+)?)\s*', expression)
-            if num_match:
-                res.total = float(num_match.group(1))
-                res.details = [f"Статическое значение: {res.total:g}"]
-                return res
-            return None
+            raise ValueError(f"Не удалось разобрать часть `{text}`. Используйте вид `XdY`, число или их сумму.")
 
         num_dice = int(dice_match.group(1) or 1)
         num_sides = int(dice_match.group(2))
-        num_dice = max(1, min(num_dice, 100))
-        num_sides = max(2, min(num_sides, 100))
+        if not 1 <= num_dice <= self.MAX_DICE_PER_SET:
+            raise ValueError(f"В одном кубиковом терме можно бросить от 1 до {self.MAX_DICE_PER_SET} кубиков.")
+        if not 2 <= num_sides <= self.MAX_SIDES:
+            raise ValueError(f"Количество граней должно быть от 2 до {self.MAX_SIDES}.")
 
-        tail = expr_without_modifier[dice_match.end():]
-
-        def find_flag(names: List[str]) -> Optional[re.Match]:
-            names_sorted = sorted(names, key=len, reverse=True)
-            pattern = r'(?<![a-zA-Z])(' + '|'.join(map(re.escape, names_sorted)) + r')\s*(\d+)?\b'
-            return re.search(pattern, tail, re.IGNORECASE)
+        term.num_dice = num_dice
+        term.num_sides = num_sides
+        flags = self._parse_flags(dice_match.group(3), num_sides)
 
         rolls = [random.randint(1, num_sides) for _ in range(num_dice)]
-        res.all_rolls = rolls.copy()
+        term.base_rolls = rolls.copy()
+        term.all_rolls = rolls.copy()
         working_rolls = rolls.copy()
 
-        reroll_match = find_flag(['ir', 'r'])
-        if reroll_match:
-            threshold = int(reroll_match.group(2) or 1)
-            infinite = reroll_match.group(1).lower() == 'ir'
-            threshold = max(1, min(threshold, num_sides))
-            rerolled_count = 0
-            for i, value in enumerate(working_rolls):
-                safety = 0
-                if value <= threshold:
+        reroll = flags.get('reroll')
+        if reroll:
+            flag, threshold = reroll
+            infinite = flag == 'ir'
+            budget = self.MAX_EXTRA_ROLLS
+            for index, original in enumerate(list(working_rolls)):
+                if original > threshold or budget <= 0:
+                    continue
+                sequence: List[int] = []
+                while working_rolls[index] <= threshold and budget > 0:
                     new_value = random.randint(1, num_sides)
-                    rerolled_count += 1
-                    working_rolls[i] = new_value
-                    res.all_rolls.append(new_value)
-                    if infinite:
-                        while working_rolls[i] <= threshold and safety < 100:
-                            working_rolls[i] = random.randint(1, num_sides)
-                            res.all_rolls.append(working_rolls[i])
-                            rerolled_count += 1
-                            safety += 1
-            if rerolled_count:
-                res.rerolled = True
-                res.details.append(f"🔄 Перебросы ≤{threshold}: {rerolled_count}")
+                    working_rolls[index] = new_value
+                    term.all_rolls.append(new_value)
+                    sequence.append(new_value)
+                    budget -= 1
+                    if not infinite:
+                        break
+                if sequence:
+                    term.reroll_sequences.append((index, sequence))
+            if budget == 0 and infinite and any(value <= threshold for value in working_rolls):
+                term.warnings.append(f"Достигнут защитный лимит {self.MAX_EXTRA_ROLLS} дополнительных перебросов.")
+            if term.reroll_sequences:
+                count = sum(len(seq) for _, seq in term.reroll_sequences)
+                term.details.append(f"переброс ≤{threshold}: {count}")
 
-        explode_match = find_flag(['ie', 'e'])
-        if explode_match:
-            explode_val = int(explode_match.group(2) or num_sides)
-            infinite = explode_match.group(1).lower() == 'ie'
-            explode_val = max(1, min(explode_val, num_sides))
+        explode = flags.get('explode')
+        if explode:
+            flag, threshold = explode
+            infinite = flag == 'ie'
             to_check = list(working_rolls)
-            exploded_count = 0
-            max_explodes = 100 if infinite else len(to_check)
-            while to_check and exploded_count < max_explodes:
+            budget = self.MAX_EXTRA_ROLLS
+            while to_check and budget > 0:
                 current = to_check.pop(0)
-                if current >= explode_val:
+                if current >= threshold:
                     new_roll = random.randint(1, num_sides)
                     working_rolls.append(new_roll)
-                    res.all_rolls.append(new_roll)
-                    res.exploded_rolls.append(new_roll)
-                    exploded_count += 1
-                    if infinite and new_roll >= explode_val:
+                    term.all_rolls.append(new_roll)
+                    term.exploded_rolls.append(new_roll)
+                    budget -= 1
+                    if infinite and new_roll >= threshold:
                         to_check.append(new_roll)
-            if res.exploded_rolls:
-                res.details.append(f"💥 Взрывы ≥{explode_val}: +{len(res.exploded_rolls)}")
+            if budget == 0 and infinite and to_check:
+                term.warnings.append(f"Достигнут защитный лимит {self.MAX_EXTRA_ROLLS} дополнительных взрывов.")
+            if term.exploded_rolls:
+                term.details.append(f"взрыв ≥{threshold}: +{len(term.exploded_rolls)}")
 
         selected_rolls = working_rolls.copy()
-        keep_drop_match = find_flag(['kh', 'kl', 'k', 'dh', 'dl', 'd'])
-        if keep_drop_match:
-            flag = keep_drop_match.group(1).lower()
-            amount = int(keep_drop_match.group(2) or 1)
-            amount = max(0, min(amount, len(selected_rolls)))
+        keepdrop = flags.get('keepdrop')
+        if keepdrop:
+            flag, amount = keepdrop
+            if amount > len(selected_rolls):
+                raise ValueError(
+                    f"`{flag}{amount}` нельзя применить: после перебросов/взрывов доступно только {len(selected_rolls)} кубиков."
+                )
             indexed = list(enumerate(selected_rolls))
-            if amount > 0 and amount < len(selected_rolls):
-                if flag in ('k', 'kh'):
-                    keep_indexes = {idx for idx, _ in sorted(indexed, key=lambda x: x[1], reverse=True)[:amount]}
-                    label = f"📌 Оставлено лучших: {amount}"
-                elif flag == 'kl':
-                    keep_indexes = {idx for idx, _ in sorted(indexed, key=lambda x: x[1])[:amount]}
-                    label = f"📌 Оставлено худших: {amount}"
-                elif flag in ('d', 'dl'):
-                    drop_indexes = {idx for idx, _ in sorted(indexed, key=lambda x: x[1])[:amount]}
-                    keep_indexes = {idx for idx, _ in indexed if idx not in drop_indexes}
-                    label = f"🗑 Сброшено худших: {amount}"
-                else:  # dh
-                    drop_indexes = {idx for idx, _ in sorted(indexed, key=lambda x: x[1], reverse=True)[:amount]}
-                    keep_indexes = {idx for idx, _ in indexed if idx not in drop_indexes}
-                    label = f"🗑 Сброшено лучших: {amount}"
+            if flag in ('k', 'kh'):
+                keep_indexes = {
+                    idx for idx, _ in sorted(indexed, key=lambda x: x[1], reverse=True)[:amount]
+                } if amount else set()
+                term.details.append(f"оставлено лучших: {amount}")
+            elif flag == 'kl':
+                keep_indexes = {
+                    idx for idx, _ in sorted(indexed, key=lambda x: x[1])[:amount]
+                } if amount else set()
+                term.details.append(f"оставлено худших: {amount}")
+            elif flag in ('d', 'dl'):
+                drop_indexes = {
+                    idx for idx, _ in sorted(indexed, key=lambda x: x[1])[:amount]
+                } if amount else set()
+                keep_indexes = {idx for idx, _ in indexed if idx not in drop_indexes}
+                term.details.append(f"сброшено худших: {amount}")
+            else:  # dh
+                drop_indexes = {
+                    idx for idx, _ in sorted(indexed, key=lambda x: x[1], reverse=True)[:amount]
+                } if amount else set()
+                keep_indexes = {idx for idx, _ in indexed if idx not in drop_indexes}
+                term.details.append(f"сброшено лучших: {amount}")
 
-                res.kept_dice = [val for idx, val in indexed if idx in keep_indexes]
-                res.dropped_dice = [val for idx, val in indexed if idx not in keep_indexes]
-                selected_rolls = res.kept_dice.copy()
-                res.details.append(label)
-            elif amount >= len(selected_rolls) and flag.startswith('d'):
-                res.dropped_dice = selected_rolls.copy()
-                selected_rolls = []
-                res.details.append(f"🗑 Сброшены все кубики: {amount}")
+            term.kept_dice = [value for idx, value in indexed if idx in keep_indexes]
+            term.dropped_dice = [value for idx, value in indexed if idx not in keep_indexes]
+            selected_rolls = term.kept_dice.copy()
 
-        target_match = find_flag(['t'])
-        if target_match:
-            target = int(target_match.group(2) or num_sides)
-            target = max(1, min(target, num_sides))
-            res.successes = sum(1 for value in selected_rolls if value >= target)
-            res.failures = len(selected_rolls) - res.successes
-            res.botches = sum(1 for value in selected_rolls if value == 1)
-            res.total = float(res.successes)
-            res.details.append(f"✅ Цель ≥{target}: успехов {res.successes}, провалов {res.failures}")
+        term.final_rolls = selected_rolls.copy()
+
+        target = flags.get('target')
+        if target:
+            _, target_value = target
+            term.target = target_value
+            term.successes = sum(1 for value in selected_rolls if value >= target_value)
+            term.failures = len(selected_rolls) - term.successes
+            term.botches = sum(1 for value in selected_rolls if value == 1)
+            term.subtotal = float(term.successes)
+            term.details.append(
+                f"цель ≥{target_value}: {term.successes} успех., {term.failures} провал."
+            )
         else:
-            res.total = float(sum(selected_rolls))
+            term.subtotal = float(sum(selected_rolls))
 
-        if modifier:
-            op, val = modifier
-            old_total = res.total
-            if op == '+':
-                res.total += val
-            elif op == '-':
-                res.total -= val
-            elif op == '*':
-                res.total *= val
-            elif op == '/' and val != 0:
-                res.total /= val
-            elif op == '/' and val == 0:
-                res.details.append("⚠️ Деление на ноль пропущено")
-            if not (op == '/' and val == 0):
-                display_val = int(val) if val == int(val) else val
-                res.details.append(f"🧮 Модификатор: {old_total:g} {op} {display_val} = {res.total:g}")
+        return term
 
-        res.dice_rolls = selected_rolls.copy()
-        if res.dropped_dice:
-            res.details.append(f"🗑 Сброшено: {res.dropped_dice}")
-        if not res.details:
-            res.details = [f"🎲 Бросок: {res.dice_rolls}"]
-        else:
-            res.details.insert(0, f"🎲 Бросок: {res.dice_rolls}")
+    def _roll_once(self, expression: str) -> DiceResult:
+        res = DiceResult()
+        res.expression = expression.strip()
+        core_expression, global_modifier = self._extract_global_modifier(res.expression)
+        additive_terms = self._split_additive_terms(core_expression)
+
+        parsed_terms: List[DiceTermResult] = []
+        total_base_dice = 0
+        for sign, text in additive_terms:
+            term = self._parse_term(text, sign)
+            if term.kind == 'dice':
+                total_base_dice += term.num_dice
+            parsed_terms.append(term)
+
+        if total_base_dice > self.MAX_DICE_PER_SET:
+            raise ValueError(
+                f"В одном наборе можно бросить максимум {self.MAX_DICE_PER_SET} базовых кубиков суммарно."
+            )
+
+        res.terms = parsed_terms
+        res.total = sum(term.sign * term.subtotal for term in parsed_terms)
+
+        if global_modifier:
+            op, value = global_modifier
+            before = res.total
+            if op == '*':
+                res.total *= value
+                res.global_modifier = (op, value, before)
+            elif value == 0:
+                res.warnings.append("Деление на ноль пропущено; итог оставлен без изменения.")
+            else:
+                res.total /= value
+                res.global_modifier = (op, value, before)
+
+        for term in parsed_terms:
+            if term.kind != 'dice':
+                continue
+            res.dice_rolls.extend(term.final_rolls)
+            res.all_rolls.extend(term.all_rolls)
+            res.exploded_rolls.extend(term.exploded_rolls)
+            res.kept_dice.extend(term.kept_dice)
+            res.dropped_dice.extend(term.dropped_dice)
+            res.rerolled = res.rerolled or bool(term.reroll_sequences)
+            res.successes += term.successes
+            res.failures += term.failures
+            res.botches += term.botches
+            res.warnings.extend(term.warnings)
+
         return res
 
     def get_help_text(self) -> str:
         return """
-🎲 **Команда `/кубик` — Продвинутая система бросков**
+🎲 **Команда `/кубик` — продвинутая система бросков**
 
-**Базовые команды:**
-• `XdY` — Бросить X кубиков с Y гранями (пример: `2d6`)
-• `XdY + Z` — С модификатором (пример: `1d20 + 5`)
-• `N XdY` — N наборов по XdY (пример: `6 4d6`)
-• `A; B; C` — несколько разных бросков одной командой
+**Базовые формулы:**
+• `XdY` — X кубиков с Y гранями: `2d6`
+• `1d6 + 1d4` — складывать разные типы кубиков в одном результате
+• `2d6 + 1d8 + 5` — кубики и обычные числовые модификаторы
+• `1d20 * 2` / `1d20 / 2` — умножить или разделить итог всей формулы
+• `N XdY` — N независимых наборов: `6 4d6 k3`
+• `A; B; C` — отдельные формулы; каждая выводится отдельно и не суммируется с соседними
+• `! текст` — комментарий к конкретной формуле
 
-**Модификаторы:**
-• `eZ` — Взрывающиеся кубики на Z один раз (пример: `3d6 e6`)
-• `ieZ` — Взрывающиеся кубики с цепной реакцией
-• `kZ` / `khZ` — Оставить Z лучших (пример: `4d6 k3`)
-• `klZ` — Оставить Z худших
-• `dZ` / `dlZ` — Сбросить Z худших
-• `dhZ` — Сбросить Z лучших
-• `rZ` — Один раз перебросить кубики ≤ Z
-• `irZ` — Перебрасывать ≤ Z до успеха или лимита защиты
-• `tZ` — Считать успехи при ≥ Z вместо суммы
+**Модификаторы кубиков** *(относятся к кубику непосредственно перед ними)*:
+• `eZ` — один взрыв при результате ≥ Z: `3d6 e6`
+• `ieZ` — цепные взрывы
+• `kZ` / `khZ` — оставить Z лучших: `4d6 k3`
+• `klZ` — оставить Z худших
+• `dZ` / `dlZ` — сбросить Z худших
+• `dhZ` — сбросить Z лучших
+• `rZ` — один раз перебросить кубики ≤ Z
+• `irZ` — повторять переброс ≤ Z до выхода выше порога или защитного лимита
+• `tZ` — считать успехи при ≥ Z вместо суммы данного кубикового терма
+
+**Примеры:**
+• `1d6 + 1d4`
+• `4d6 k3 + 1d8`
+• `2d10 r2 + 1d6 e6 + 3`
+• `1d20 + 5; 2d6 + 1d4 ! урон`
 
 **Алиасы:**
-• `dndstats` — 6 наборов 4d6 k3 (статы D&D)
-• `attack` — 1d20 (атака)
+• `dndstats` — 6 наборов 4d6 k3
+• `attack` — 1d20
 • `+d20` — преимущество, 2d20 d1
 • `-d20` — помеха, 2d20 kl1
-• `stat` — 4d6 k3 (один стат)
+• `stat` — 4d6 k3
 • `save` — 1d20 + 5
 
-**Ограничения:** макс. 100 граней, 100 кубиков, 20 наборов, 4 формулы через `;`
+**Ограничения:** до 100 базовых кубиков суммарно на набор, до 100 граней, до 20 наборов и до 4 формул через `;`.
+Неверные или неоднозначные части формулы теперь отклоняются с понятной причиной вместо молчаливого исправления.
 """
 
 
@@ -1189,113 +1596,62 @@ dice_engine = DiceParser()
 # 💬 КОМАНДЫ (СОБАЧИЙ СТИЛЬ)
 # ============================================================================
 
-async def get_priority_queue():
-    """
-    Очередь для /скажи:
-    1. Временный файл тестов
-    2. Groq модели
-    3. OpenRouter модели
-    4. БД
-    5. G4F модели (в конце)
-    """
+def _queue_add(queue, seen, provider, model):
+    provider = normalize_provider_name(provider)
+    model = str(model or "").strip()
+    if not provider or is_model_excluded(provider, model):
+        return
+    key = (provider, model)
+    if key not in seen:
+        queue.append(key)
+        seen.add(key)
+
+
+def _queue_extend(queue, seen, combinations):
+    for provider, model in combinations:
+        _queue_add(queue, seen, provider, model)
+
+
+def _pending_route_keys():
+    return {
+        (normalize_provider_name(provider), str(model or "").strip())
+        for provider, model in pending_test_manager.get_pending_models()
+    }
+
+
+async def _build_model_queue(*, db_first: bool) -> List[Tuple[str, str]]:
+    """Общий конструктор очереди для /скажи и /анализ."""
     queue = []
     seen = set()
-
-    EXCLUDED_MODELS = ["flux-pro", "liquid/lfm-2.5-1.2b-instruct:free"]
-
-    # 1. Временный файл тестов
     pending = pending_test_manager.get_pending_models()
-    for prov, mod in pending:
-        if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
-            queue.append((prov, mod))
-            seen.add((prov, mod))
+    db_models = db_manager.get_all_models() if SessionLocal else []
 
-    # 2. Groq модели
-    for groq_model in GROQ_PRIORITY_MODELS:
-        if ("Groq", groq_model) not in seen and groq_model not in EXCLUDED_MODELS:
-            queue.append(("Groq", groq_model))
-            seen.add(("Groq", groq_model))
+    if db_first:
+        _queue_extend(queue, seen, db_models)
+        _queue_extend(queue, seen, pending)
+    else:
+        _queue_extend(queue, seen, pending)
 
-    # 3. OpenRouter модели
-    for or_model in OR_PRIORITY_MODELS:
-        if ("OpenRouter", or_model) not in seen and or_model not in EXCLUDED_MODELS:
-            queue.append(("OpenRouter", or_model))
-            seen.add(("OpenRouter", or_model))
+    _queue_extend(queue, seen, (("Groq", model) for model in GROQ_PRIORITY_MODELS))
+    _queue_extend(queue, seen, (("OpenRouter", model) for model in OR_PRIORITY_MODELS))
 
-    # 4. Модели из БД
-    if SessionLocal:
-        db_models = db_manager.get_all_models()
-        for prov, mod in db_models:
-            if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
-                queue.append((prov, mod))
-                seen.add((prov, mod))
+    if not db_first:
+        _queue_extend(queue, seen, db_models)
 
-    # 5. G4F модели (в конце)
-    if ("g4f-default", "deepseek-r1") not in seen:
-        queue.append(("g4f-default", "deepseek-r1"))
-        seen.add(("g4f-default", "deepseek-r1"))
-
-    for prov, models in G4F_DEEP_SCAN_MODELS.items():
-        for mod in models:
-            if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
-                queue.append((prov, mod))
-                seen.add((prov, mod))
-
+    # G4F остаётся последним резервным слоем, как и раньше.
+    _queue_add(queue, seen, "g4f-default", "gpt-4.1-nano")
+    _queue_extend(queue, seen, get_all_g4f_combinations())
     return queue
+
+
+async def get_priority_queue():
+    """Очередь /скажи: временные успехи → актуальные API → БД → G4F."""
+    return await _build_model_queue(db_first=False)
 
 
 async def get_analysis_priority_queue():
-    """
-    Очередь для /анализ:
-    1. БД (самый высокий приоритет)
-    2. Временный файл тестов
-    3. Groq модели
-    4. OpenRouter модели
-    5. G4F модели (в конце)
-    """
-    queue = []
-    seen = set()
-    EXCLUDED_MODELS = ["flux-pro", "liquid/lfm-2.5-1.2b-instruct:free"]
-
-    # 1. БД — самый высокий приоритет
-    if SessionLocal:
-        db_models = db_manager.get_all_models()
-        for prov, mod in db_models:
-            if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
-                queue.append((prov, mod))
-                seen.add((prov, mod))
-
-    # 2. Временный файл тестов
-    pending = pending_test_manager.get_pending_models()
-    for prov, mod in pending:
-        if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
-            queue.append((prov, mod))
-            seen.add((prov, mod))
-
-    # 3. Groq модели
-    for groq_model in GROQ_PRIORITY_MODELS:
-        if ("Groq", groq_model) not in seen and groq_model not in EXCLUDED_MODELS:
-            queue.append(("Groq", groq_model))
-            seen.add(("Groq", groq_model))
-
-    # 4. OpenRouter модели
-    for or_model in OR_PRIORITY_MODELS:
-        if ("OpenRouter", or_model) not in seen and or_model not in EXCLUDED_MODELS:
-            queue.append(("OpenRouter", or_model))
-            seen.add(("OpenRouter", or_model))
-
-    # 5. G4F модели (в конце)
-    if ("g4f-default", "deepseek-r1") not in seen:
-        queue.append(("g4f-default", "deepseek-r1"))
-        seen.add(("g4f-default", "deepseek-r1"))
-
-    for prov, models in G4F_DEEP_SCAN_MODELS.items():
-        for mod in models:
-            if (prov, mod) not in seen and mod not in EXCLUDED_MODELS:
-                queue.append((prov, mod))
-                seen.add((prov, mod))
-
-    return queue
+    """Очередь /анализ: БД → временные успехи → актуальные API → G4F."""
+    return await _build_model_queue(db_first=True)
 
 
 @bot.slash_command(name="скажи", description="Запрос к ИИ")
@@ -1341,22 +1697,16 @@ async def slash_say(interaction: disnake.CommandInteraction,
                 status_embed.set_field_at(0, name="📡 Статус", value=f"ПсИИнка лает на **{prov}**... 🐕", inline=False)
                 await msg.edit(embed=status_embed)
 
-                if prov == "OpenRouter":
-                    ok, ans, lat = await test_openrouter_single([mod], вопрос, timeout=45.0,
-                                                                system_prompt=system_prompt, proxy_url=proxy_url)
-                elif prov == "Groq":
-                    ok, ans, lat = await test_groq_single([mod], вопрос, timeout=45.0, system_prompt=system_prompt,
-                                                          return_model_name=False)
-                else:
-                    ok, ans, lat = await make_g4f_request(prov, mod, вопрос, timeout=45.0, system_prompt=system_prompt,
-                                                          proxy_url=proxy_url)
+                ok, ans, lat = await route_model_request(
+                    prov, mod, вопрос, timeout=45.0,
+                    system_prompt=system_prompt, proxy_url=proxy_url,
+                )
 
                 if ok and ans and len(ans.strip()) > 0:  # ✅ Проверка на пустой ответ
                     final_response = strip_think_content(ans)
                     final_prov, final_mod = prov, mod
                     final_lat = lat
-                    pending_models = pending_test_manager.get_pending_models()
-                    if (prov, mod) in pending_models:
+                    if (normalize_provider_name(prov), mod) in _pending_route_keys():
                         used_temp_file = True
                     if not used_temp_file and SessionLocal:
                         db_manager.log_success(prov, mod, int(lat * 1000))
@@ -1419,89 +1769,185 @@ async def slash_say(interaction: disnake.CommandInteraction,
             await interaction.response.send_message(err_msg, ephemeral=True)
 
 
+def _dice_number(value: float) -> str:
+    if value == int(value):
+        return str(int(value))
+    return str(round(value, 2))
+
+
+def _dice_roll_list(values: List[int]) -> str:
+    return "[" + ", ".join(map(str, values)) + "]"
+
+
+def _dice_term_lines(term: DiceTermResult, is_first: bool = False) -> List[str]:
+    sign_text = "" if is_first and term.sign > 0 else ("+" if term.sign > 0 else "−")
+    label_prefix = f"{sign_text} " if sign_text else ""
+    if term.kind == "number":
+        value = _dice_number(term.number_value or 0.0)
+        contribution = _dice_number(term.sign * (term.number_value or 0.0))
+        return [f"🧮 `{label_prefix}{value}` → вклад **{contribution}**"]
+
+    lines = [f"🎲 `{label_prefix}{term.source}`: исходно `{_dice_roll_list(term.base_rolls)}`"]
+
+    if term.reroll_sequences:
+        rerolls = []
+        for die_index, sequence in term.reroll_sequences:
+            chain = [term.base_rolls[die_index], *sequence]
+            rerolls.append(f"#{die_index + 1} " + "→".join(map(str, chain)))
+        lines.append("↪️ перебросы: " + "; ".join(rerolls))
+
+    if term.exploded_rolls:
+        lines.append(f"💥 добавочные броски: `{_dice_roll_list(term.exploded_rolls)}`")
+
+    if term.kept_dice or term.dropped_dice:
+        lines.append(f"📌 засчитано: `{_dice_roll_list(term.final_rolls)}`")
+        if term.dropped_dice:
+            lines.append(f"🗑 отброшено: `{_dice_roll_list(term.dropped_dice)}`")
+    elif term.reroll_sequences or term.exploded_rolls:
+        lines.append(f"📌 после эффектов: `{_dice_roll_list(term.final_rolls)}`")
+
+    if term.target is not None:
+        lines.append(
+            f"🎯 цель ≥{term.target}: **{term.successes}** успех., {term.failures} провал., {term.botches} единиц"
+        )
+
+    if term.details:
+        lines.append("⚙️ " + "; ".join(term.details))
+
+    contribution = term.sign * term.subtotal
+    lines.append(f"➡️ вклад в формулу: **{_dice_number(contribution)}**")
+
+    for warning in term.warnings:
+        lines.append(f"⚠️ {warning}")
+    return lines
+
+
+def _dice_result_block(result: DiceResult) -> str:
+    lines = []
+    if result.set_count > 1:
+        lines.append(f"**Набор {result.set_index + 1}/{result.set_count}**")
+    else:
+        lines.append("**Результат**")
+
+    for term_index, term in enumerate(result.terms):
+        lines.extend(_dice_term_lines(term, is_first=(term_index == 0)))
+
+    if result.global_modifier:
+        op, value, before = result.global_modifier
+        lines.append(
+            f"🧮 итог до `{op}`: {_dice_number(before)} {op} {_dice_number(value)} = **{_dice_number(result.total)}**"
+        )
+
+    for warning in result.warnings:
+        if warning not in {warning for term in result.terms for warning in term.warnings}:
+            lines.append(f"⚠️ {warning}")
+
+    if result.comment:
+        lines.append(f"💬 _{result.comment}_")
+
+    lines.append(f"🏁 **Итог: {_dice_number(result.total)}**")
+    return "\n".join(lines)
+
+
+def _dice_paginate(header: str, blocks: List[str], max_chars: int = 3900) -> List[str]:
+    pages: List[str] = []
+    current = header.strip()
+    for block in blocks:
+        candidate = f"{current}\n\n{block}" if current else block
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        if current:
+            pages.append(current)
+        if len(block) <= max_chars:
+            current = block
+        else:
+            # Защитный fallback для крайне длинной цепочки перебросов/взрывов.
+            chunks = [block[i:i + max_chars] for i in range(0, len(block), max_chars)]
+            pages.extend(chunks[:-1])
+            current = chunks[-1]
+    if current:
+        pages.append(current)
+    return pages
+
+
 @bot.slash_command(name="кубик", description="Бросок кубиков")
 async def slash_cube(interaction: disnake.CommandInteraction,
                      формула: Optional[str] = commands.Param(
-                         description="Формула броска (например: 2d6+5 или dndstats)", default=None)):
-    try:
-        if not формула:
-            help_embed = disnake.Embed(
-                title="🎲 ПсИИнка: Справка по кубикам",
-                description=dice_engine.get_help_text(),
-                color=0xFF8844,
-                timestamp=datetime.now()
-            )
-            help_embed.set_footer(text="ПсИИнка бот | Dice Roller 🐾")
-            await interaction.response.send_message(embed=help_embed)
-            return
-
-        await interaction.response.defer()
-        results = dice_engine.parse(формула)
-
-        if not results:
-            raise ValueError("Не удалось разобрать формулу. Используйте `/кубик` для справки.")
-
-        output_embed = disnake.Embed(
-            title="🎲 ПсИИнка бросил кубики!",
-            description=f"*подбрасывает лапой* Формула: `{формула}` 🐾",
-            color=0x00AAFF,
+                         description="Формула броска (например: 1d6+1d4 или dndstats)", default=None)):
+    if not формула:
+        help_embed = disnake.Embed(
+            title="🎲 ПсИИнка: Справка по кубикам",
+            description=dice_engine.get_help_text(),
+            color=0xFF8844,
             timestamp=datetime.now()
         )
+        help_embed.set_footer(text="ПсИИнка бот | Dice Roller 🐾")
+        await interaction.response.send_message(embed=help_embed)
+        return
 
-        total_all = 0
-        for i, r in enumerate(results):
-            total_display = int(r.total) if r.total == int(r.total) else round(r.total, 2)
-            total_all += r.total
+    await interaction.response.defer()
 
-            field_value = f"🎲 Выпало: `[{', '.join(map(str, r.dice_rolls))}]`\n"
-            field_value += f"📊 **Сумма: {total_display}** *гав!*"
+    try:
+        results = dice_engine.parse(формула)
+        if not results:
+            raise ValueError("Не удалось разобрать формулу.")
 
-            if r.comment:
-                field_value += f"\n💬 _{r.comment}_"
+        grouped: Dict[int, List[DiceResult]] = {}
+        for result in results:
+            grouped.setdefault(result.formula_index, []).append(result)
 
-            details_extra = []
-            if r.exploded_rolls:
-                details_extra.append(f"💥 Взрывы: +{len(r.exploded_rolls)}")
-            if r.rerolled:
-                details_extra.append("🔄 Был переброс")
-            if r.successes > 0 or r.failures > 0:
-                details_extra.append(f"✅ Успехи: {r.successes}, ❌ Провалы: {r.failures}")
-            if r.botches > 0:
-                details_extra.append(f"⚠️ Ботчи: {r.botches}")
+        for formula_index in sorted(grouped):
+            formula_results = grouped[formula_index]
+            first = formula_results[0]
+            header_lines = [f"*подбрасывает лапой* Формула: `{first.formula_raw}` 🐾"]
+            if first.formula_expanded and first.formula_expanded.strip() != first.formula_raw.split('!', 1)[0].strip():
+                header_lines.append(f"Разобрано как: `{first.formula_expanded}`")
+            header = "\n".join(header_lines)
+            blocks = [_dice_result_block(result) for result in formula_results]
+            pages = _dice_paginate(header, blocks)
 
-            detail_lines = []
-            for detail in r.details:
-                if detail.startswith("🎲 Бросок:"):
-                    continue
-                if detail not in detail_lines:
-                    detail_lines.append(detail)
-            if details_extra:
-                for detail in details_extra:
-                    if detail not in detail_lines:
-                        detail_lines.append(detail)
-            if detail_lines:
-                field_value += "\n" + "\n".join(f"• {d}" for d in detail_lines[:8])
+            for page_index, page in enumerate(pages):
+                title = f"🎲 Кубик — формула {formula_index + 1}/{first.formula_count}"
+                if len(pages) > 1:
+                    title += f" · стр. {page_index + 1}/{len(pages)}"
+                embed = disnake.Embed(
+                    title=title,
+                    description=page,
+                    color=0x00AAFF,
+                    timestamp=datetime.now(),
+                )
+                embed.set_footer(text="ПсИИнка бот | Dice Roller 🐾")
+                embed.check_limits()
+                # Каждая формула через `;` уходит отдельным сообщением и не суммируется с соседними.
+                await interaction.followup.send(embed=embed)
 
-            output_embed.add_field(name=f"Бросок #{i + 1}", value=field_value[:1024], inline=False)
-
-        if len(results) > 1:
-            output_embed.add_field(name="📈 Общая сумма", value=f"**{total_all}** *тяв!*", inline=False)
-
-        output_embed.set_footer(text="ПсИИнка бот | Dice Roller 🐾")
-        await interaction.followup.send(embed=output_embed)
-
+    except ValueError as e:
+        shown_formula = формула if len(формула) <= 1200 else формула[:1197] + "..."
+        error_embed = disnake.Embed(
+            title="❌ ПсИИнка не понял формулу",
+            description=(
+                f"*склонил голову набок* Не могу разобрать: `{shown_formula}` 🐕\n\n"
+                f"**Причина:** {e}"
+            ),
+            color=0xFF4444,
+            timestamp=datetime.now(),
+        )
+        error_embed.add_field(
+            name="💡 Помощь",
+            value="Используй `/кубик` без параметров — я покажу синтаксис и примеры.",
+            inline=False,
+        )
+        await interaction.followup.send(embed=error_embed, ephemeral=True)
     except Exception as e:
         logger.error(f"Error in /cube: {e}", exc_info=True)
         error_embed = disnake.Embed(
-            title="❌ ПсИИнка не понял...",
-            description=f"*склонил голову набок* Не могу разобрать: `{формула}` 🐕",
+            title="❌ Ошибка броска",
+            description="*ПсИИнка растерянно посмотрел на кубики.* Произошла внутренняя ошибка; она записана в лог.",
             color=0xFF4444,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
-        error_embed.add_field(name="💡 Помощь", value="*Гавкни* `/кубик` без параметров — я покажу справку!",
-                              inline=False)
         await interaction.followup.send(embed=error_embed, ephemeral=True)
-
 
 @bot.slash_command(name="погавкай", description="Проверка пинга бота")
 async def slash_bark(interaction: disnake.CommandInteraction):
@@ -1577,15 +2023,10 @@ async def test_provider_models(provider: str, models: list, prompt: str = TEST_P
         try:
             proxy_url = get_random_proxy(use_proxy) if use_proxy else None
 
-            if provider == "OpenRouter":
-                ok, ans, lat = await test_openrouter_single([model], prompt, timeout=timeout,
-                                                            system_prompt=system_prompt, proxy_url=proxy_url)
-            elif provider == "Groq":
-                ok, ans, lat = await test_groq_single([model], prompt, timeout=timeout,
-                                                      system_prompt=system_prompt, return_model_name=False)
-            else:  # G4F провайдеры
-                ok, ans, lat = await make_g4f_request(provider, model, prompt, timeout=timeout,
-                                                      system_prompt=system_prompt, proxy_url=proxy_url)
+            ok, ans, lat = await route_model_request(
+                provider, model, prompt, timeout=timeout,
+                system_prompt=system_prompt, proxy_url=proxy_url,
+            )
 
             result = {
                 'model': model,
@@ -2010,7 +2451,7 @@ async def slash_test(interaction: disnake.CommandInteraction):
         embed.add_field(
             name="💾 Сохранение результатов",
             value=(
-                "✅ Успешные тесты → `test_pending.csv`\n"
+                "✅ Успешные тесты → `state/test_pending.csv`\n"
                 "🔧 Команда `/записать_тест` → БД Neon\n"
                 "📈 Команда `/статус` → топ моделей"
             ),
@@ -2057,12 +2498,9 @@ async def run_mass_test(channel):
         async with semaphore:
             start = time.time()
             try:
-                if provider == "OpenRouter":
-                    ok, ans, lat = await test_openrouter_single([model], TEST_PROMPT, timeout=45.0)
-                elif provider == "Groq":
-                    ok, ans, lat = await test_groq_single([model], TEST_PROMPT, timeout=45.0, return_model_name=False)
-                else:
-                    ok, ans, lat = await make_g4f_request(provider, model, TEST_PROMPT, timeout=45.0)
+                ok, ans, lat = await route_model_request(
+                    provider, model, TEST_PROMPT, timeout=45.0,
+                )
 
                 if ok:
                     pending_test_manager.log_success(provider, model, int(lat * 1000))
@@ -2426,15 +2864,10 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
 
             async def try_request(prov, mod, use_proxy=False):
                 proxy_str = get_random_proxy(True) if use_proxy else None
-                if prov == "OpenRouter":
-                    return await test_openrouter_single(mod, user_prompt, timeout=50.0,
-                                                        system_prompt=ANALYSIS_SYSTEM_PROMPT)
-                elif prov == "Groq":
-                    return await test_groq_single(mod, user_prompt, timeout=50.0, system_prompt=ANALYSIS_SYSTEM_PROMPT,
-                                                  return_model_name=False)
-                else:
-                    return await make_g4f_request(prov, mod, user_prompt, timeout=50.0,
-                                                  system_prompt=ANALYSIS_SYSTEM_PROMPT, proxy_url=proxy_str)
+                return await route_model_request(
+                    prov, mod, user_prompt, timeout=50.0,
+                    system_prompt=ANALYSIS_SYSTEM_PROMPT, proxy_url=proxy_str,
+                )
 
             for prov, mod in main_queue:
                 try:
@@ -2450,8 +2883,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                         final_answer = ans
                         used_provider = f"{prov} ({mod})"
                         success = True
-                        pending_models = pending_test_manager.get_pending_models()
-                        if (prov, mod) in pending_models:
+                        if (normalize_provider_name(prov), mod) in _pending_route_keys():
                             used_temp_file = True
                         if not used_temp_file:
                             db_manager.log_success(prov, mod, int(lat * 1000))
@@ -3333,7 +3765,8 @@ def build_auction_prices_xlsx(
     skipped_returned: int,
     skipped_no_bid: int,
     skipped_bad_price: int,
-    skipped_duplicates: int,
+    repeated_lot_numbers_counted: int,
+    duplicate_message_ids_skipped: int,
     raw_embed_rows_truncated: int,
 ) -> io.BytesIO:
     people_total = sum(row["price"] for row in people_rows if row.get("price") is not None)
@@ -3357,7 +3790,8 @@ def build_auction_prices_xlsx(
         ["Возвраты продавцу", skipped_returned],
         ["Без последней ставки / проверяется админом", skipped_no_bid],
         ["С битой ценой", skipped_bad_price],
-        ["Дубликаты лотов", skipped_duplicates],
+        ["Повторные номера лотов (засчитаны)", repeated_lot_numbers_counted],
+        ["Повторные Discord-сообщения (пропущены)", duplicate_message_ids_skipped],
         ["Сырые embed-логи обрезаны на количество", raw_embed_rows_truncated],
     ]
 
@@ -3520,14 +3954,19 @@ async def slash_auction_prices(
     log_rows: List[List[Any]] = []
     raw_embed_rows: List[List[Any]] = []
 
-    seen_new_lots = set()
-    seen_ancient_lots = set()
+    # Повторный НОМЕР лота — это не дубль сообщения и должен считаться.
+    # Дедупликация нужна только если один и тот же Discord message_id
+    # каким-либо образом попал в выборку повторно.
+    seen_message_ids: Set[str] = set()
+    seen_new_lots: Set[int] = set()
+    seen_ancient_lots: Set[int] = set()
 
     scanned = 0
     skipped_returned = 0
     skipped_no_bid = 0
     skipped_bad_price = 0
-    skipped_duplicates = 0
+    repeated_lot_numbers_counted = 0
+    duplicate_message_ids_skipped = 0
 
     raw_embed_rows_limit = 5000
     raw_embed_rows_truncated = 0
@@ -3551,6 +3990,22 @@ async def slash_auction_prices(
 
             info = raw_to_info(raw_message, guild_id, channel_id)
             text = info["text"]
+            message_id = str(info.get("message_id") or "")
+
+            if message_id and message_id in seen_message_ids:
+                duplicate_message_ids_skipped += 1
+                log_rows.append([
+                    "MESSAGE_DUPLICATE",
+                    "",
+                    "Тот же Discord message_id уже был обработан; повтор API пропущен",
+                    message_id,
+                    info.get("message_url", ""),
+                    text,
+                ])
+                continue
+
+            if message_id:
+                seen_message_ids.add(message_id)
 
             if not text:
                 continue
@@ -3574,26 +4029,16 @@ async def slash_auction_prices(
             if new_lot:
                 lot_no = new_lot["lot"]
 
-                if False and lot_no in seen_new_lots:
-                    skipped_duplicates += 1
-
-                    duplicate_row = {
-                        **new_lot,
-                        "status": "Дубликат: уже был более свежий вариант этого лота",
-                    }
-
-                    all_new_lot_rows.append(duplicate_row)
-
+                if lot_no in seen_new_lots:
+                    repeated_lot_numbers_counted += 1
                     log_rows.append([
-                        "NEW_DUPLICATE",
+                        "NEW_REPEAT_COUNTED",
                         lot_no,
-                        "Дубликат нового лота, пропущен",
+                        "Повторный номер нового лота: запись НЕ пропущена и будет засчитана",
                         info.get("message_id", ""),
                         info.get("message_url", ""),
                         text,
                     ])
-
-                    continue
 
                 seen_new_lots.add(lot_no)
                 all_new_lot_rows.append(new_lot)
@@ -3646,17 +4091,16 @@ async def slash_auction_prices(
             if ancient_lot:
                 lot_no = ancient_lot["lot"]
 
-                if False and lot_no in seen_ancient_lots:
-                    skipped_duplicates += 1
+                if lot_no in seen_ancient_lots:
+                    repeated_lot_numbers_counted += 1
                     log_rows.append([
-                        "ANCIENT_DUPLICATE",
+                        "ANCIENT_REPEAT_COUNTED",
                         lot_no,
-                        "Дубликат древнего лота, пропущен",
+                        "Повторный номер древнего лота: запись НЕ пропущена и будет засчитана",
                         info.get("message_id", ""),
                         info.get("message_url", ""),
                         text,
                     ])
-                    continue
 
                 seen_ancient_lots.add(lot_no)
 
@@ -3714,7 +4158,8 @@ async def slash_auction_prices(
             skipped_returned=skipped_returned,
             skipped_no_bid=skipped_no_bid,
             skipped_bad_price=skipped_bad_price,
-            skipped_duplicates=skipped_duplicates,
+            repeated_lot_numbers_counted=repeated_lot_numbers_counted,
+            duplicate_message_ids_skipped=duplicate_message_ids_skipped,
             raw_embed_rows_truncated=raw_embed_rows_truncated,
         )
 
@@ -3731,7 +4176,8 @@ async def slash_auction_prices(
             f"↩️ Возвраты продавцу пропущены: `{skipped_returned}`\n"
             f"➖ Без последней ставки / на проверке: `{skipped_no_bid}`\n"
             f"⚠️ С битой ценой пропущены: `{skipped_bad_price}`\n"
-            f"🔁 Дубликаты лотов пропущены: `{skipped_duplicates}`\n"
+            f"🔁 Повторные номера лотов засчитаны: `{repeated_lot_numbers_counted}`\n"
+            f"🧹 Повторные Discord-сообщения пропущены: `{duplicate_message_ids_skipped}`\n"
             f"🧾 Лог-строк: `{len(log_rows)}`\n\n"
             f"📎 Excel-таблица с логами прикреплена ниже."
         )
@@ -3781,8 +4227,8 @@ async def slash_download_logs(interaction: disnake.CommandInteraction):
 
     await asyncio.sleep(0.1)
 
-    if os.path.exists('bot_errors.log'):
-        await interaction.followup.send(file=disnake.File('bot_errors.log'))
+    if os.path.exists(BOT_ERROR_LOG):
+        await interaction.followup.send(file=disnake.File(BOT_ERROR_LOG))
     else:
         await interaction.followup.send("❌ Гав! Файл логов пуст или не найден. *скулит*", ephemeral=True)
 
@@ -4946,15 +5392,19 @@ REAL_ESTATE_WORLD = {
 }
 
 REAL_ESTATE_QUALITIES = [
-    "Ужасное",
-    "Плохое",
-    "Ниже среднего",
-    "Нормальное",
-    "Хорошее",
-    "Очень хорошее",
+    "Ужасное",          # 2%
+    "Плохое",           # 5%
+    "Ниже среднего",    # 10%
+    "Приемлемое",       # 14%
+    "Нормальное",       # 34%
+    "Хорошее",          # 20%
+    "Очень хорошее",    # 10%
+    "Отличное",         # 4%
+    "Шедевр",           # 1%
 ]
 
-REAL_ESTATE_QUALITY_WEIGHTS = [0.8, 1, 2, 5, 3, 2]
+# Недвижкаролл использует ровно ту же шкалу вероятностей, что и Качестворолл.
+REAL_ESTATE_QUALITY_WEIGHTS = [2, 5, 10, 14, 34, 20, 10, 4, 1]
 
 
 def has_real_estate_access(member):
@@ -5164,8 +5614,8 @@ async def quality_roll_message_listener(message):
 # И УДАЛИТЬ СТАРУЮ КОМАНДУ /наёмник, ЕСЛИ ОНА УЖЕ ЕСТЬ НИЖЕ.
 # ============================================================================
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MERCENARY_DB_FILE = os.path.join(BASE_DIR, "data", "mercenary_command_database_v2.xlsx")
+BASE_DIR = str(ROOT_DIR)
+MERCENARY_DB_FILE = str(CORE_MERCENARY_DB_FILE)
 
 MERCENARY_SKILL_PROBABILITIES: Dict[str, int] = {
     "Новичок": 10,
@@ -5885,7 +6335,7 @@ def resolve_mercenary_query(query: str) -> Tuple[Optional[str], List[str]]:
 
 load_mercenary_database_from_xlsx()
 # ============================================================================
-# ТЕМНИЦА: обычное сообщение без префикса + временная роль «Спит»
+# АДМИН-КОМАНДА «ТЕМНИЦА»: обычное сообщение без префикса + временная роль «Спит»
 #
 # Использование ответом на сообщение:
 # Ты отправляешься в темницу на 15 минут за 2.14
@@ -5913,6 +6363,17 @@ JAIL_PATTERN = re.compile(
     r"ты\s+отправляешься\s+в\s+темницу\s+на\s+"
     r"(?P<minutes>\d{1,6})\s*"
     r"(?:минута|минуту|минуты|минут|мин\.?)"
+    r"\s+за\s+"
+    r"(?P<reason>.+?)"
+    r"\s*[.!]?\s*$",
+    flags=re.IGNORECASE,
+)
+
+
+JAIL_RELEASE_PATTERN = re.compile(
+    r"^\s*"
+    r"(?:(?P<mention><@!?\d{15,25}>)\s*[,—–-]?\s*)?"
+    r"ты\s+освобождаешься\s+из\s+темницы"
     r"\s+за\s+"
     r"(?P<reason>.+?)"
     r"\s*[.!]?\s*$",
@@ -6630,6 +7091,202 @@ async def jail_sentence_listener(
         )
 
 # ============================================================================
+# ДОСРОЧНОЕ ОСВОБОЖДЕНИЕ ИЗ ТЕМНИЦЫ: снимает роль «Спит» и отменяет таймер
+#
+# Ответом на сообщение:
+# Ты освобождаешься из темницы за наказание снято
+#
+# Через упоминание:
+# @Пользователь ты освобождаешься из темницы за наказание снято
+# ============================================================================
+
+@bot.listen("on_message")
+async def jail_manual_release_listener(
+    message: disnake.Message,
+) -> None:
+    if message.author.bot or message.guild is None:
+        return
+
+    content = (message.content or "").strip()
+    match = JAIL_RELEASE_PATTERN.fullmatch(content)
+
+    if match is None:
+        return
+
+    if (
+        not isinstance(message.author, disnake.Member)
+        or not has_jail_access(message.author)
+    ):
+        await message.reply(
+            "❌ Открывать Темницу могут только администраторы, "
+            "Гвардейцы и Старшие Гвардейцы.",
+            mention_author=False,
+        )
+        return
+
+    reason = match.group("reason").strip()
+    if len(reason) > 500:
+        await message.reply(
+            "❌ Примечание слишком длинное. Максимум — 500 символов.",
+            mention_author=False,
+        )
+        return
+
+    target = await get_jail_mentioned_target(
+        message,
+        match.group("mention"),
+    )
+
+    if target is None and match.group("mention") is None:
+        target = await get_jail_reply_target(message)
+
+    if target is None:
+        await message.reply(
+            "❌ Не понял, кого освобождать из темницы.\n"
+            "Ответь этой фразой на сообщение участника либо поставь "
+            "его настоящее упоминание перед фразой.",
+            mention_author=False,
+        )
+        return
+
+    if target.bot:
+        await message.reply(
+            "❌ Боты в Темнице не содержатся.",
+            mention_author=False,
+        )
+        return
+
+    sleep_role = message.guild.get_role(JAIL_ROLE_ID)
+    if sleep_role is None:
+        await message.reply(
+            f"❌ Не нашёл роль `Спит` с ID `{JAIL_ROLE_ID}`.",
+            mention_author=False,
+        )
+        return
+
+    bot_member = message.guild.me
+    if (
+        bot_member is None
+        or not bot_member.guild_permissions.manage_roles
+    ):
+        await message.reply(
+            "❌ У бота нет права **Управлять ролями**.",
+            mention_author=False,
+        )
+        return
+
+    if sleep_role.managed:
+        await message.reply(
+            "❌ Роль `Спит` управляется интеграцией, поэтому бот не может её снять.",
+            mention_author=False,
+        )
+        return
+
+    if sleep_role >= bot_member.top_role:
+        await message.reply(
+            "❌ Роль бота должна находиться выше роли `Спит` в списке ролей сервера.",
+            mention_author=False,
+        )
+        return
+
+    if (
+        target.id == message.guild.owner_id
+        or target.top_role >= bot_member.top_role
+    ):
+        await message.reply(
+            "❌ Бот не может изменить роли этого участника: "
+            "его высшая роль находится не ниже роли бота.",
+            mention_author=False,
+        )
+        return
+
+    audit_reason = (
+        f"Досрочное освобождение из Темницы; "
+        f"причина: {reason[:300]}; "
+        f"модератор: {message.author} ({message.author.id})"
+    )
+
+    try:
+        role_was_present = sleep_role in target.roles
+
+        if role_was_present:
+            await target.remove_roles(
+                sleep_role,
+                reason=audit_reason,
+            )
+
+        # Только после успешного снятия роли отменяем сохранённый срок.
+        key = (message.guild.id, target.id)
+        jail_deadlines.pop(key, None)
+
+        old_task = jail_tasks.pop(key, None)
+        if old_task is not None and not old_task.done():
+            old_task.cancel()
+
+        try:
+            await asyncio.to_thread(
+                delete_jail_sentence_db,
+                message.guild.id,
+                target.id,
+            )
+        except Exception as db_error:
+            logger.error(
+                f"Темница: не удалось удалить срок после ручного освобождения: {db_error}",
+                exc_info=True,
+            )
+
+        if role_was_present:
+            text = (
+                f"🔓 Ворота Темницы открыты для {target.mention}. "
+                f"Роль `Спит` снята.\n**Причина:** {reason}"
+            )
+        else:
+            text = (
+                f"🔓 {target.mention} уже не носит роль `Спит`; "
+                f"сохранённый срок Темницы, если он был, отменён.\n"
+                f"**Причина:** {reason}"
+            )
+
+        await message.reply(
+            text,
+            mention_author=False,
+            allowed_mentions=disnake.AllowedMentions(
+                everyone=False,
+                roles=False,
+                users=True,
+                replied_user=False,
+            ),
+        )
+
+    except disnake.Forbidden:
+        await message.reply(
+            "❌ Discord не позволил открыть Темницу. Проверь право "
+            "**Управлять ролями** и иерархию ролей.",
+            mention_author=False,
+        )
+
+    except disnake.HTTPException as e:
+        logger.error(
+            f"Ошибка Discord при ручном освобождении из Темницы: {e}",
+            exc_info=True,
+        )
+        await message.reply(
+            f"❌ Discord вернул ошибку при снятии роли: `{str(e)[:250]}`",
+            mention_author=False,
+        )
+
+    except Exception as e:
+        logger.error(
+            f"Неожиданная ошибка ручного освобождения из Темницы: {e}",
+            exc_info=True,
+        )
+        await message.reply(
+            "❌ При освобождении из Темницы произошла непредвиденная ошибка.",
+            mention_author=False,
+        )
+
+
+# ============================================================================
 # 🛡️ СЛЭШ-КОМАНДА: /наёмник
 # ВСТАВИТЬ ПОСЛЕ СТРОКИ: bot = commands.Bot(command_prefix="!", intents=intents)
 # Если старая команда /наёмник уже есть ниже — удалить её целиком.
@@ -6813,7 +7470,7 @@ async def slash_mercenary(
 # bot = commands.Bot(command_prefix="!", intents=intents)
 # ============================================================================
 PC_MOSCOW_TZ = timezone(timedelta(hours=3), name="MSK")
-PC_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "post_count_settings.json")
+PC_SETTINGS_FILE = str(POST_COUNT_SETTINGS_FILE)
 PC_CONCURRENCY = max(1, min(safe_int_env("POST_COUNT_CONCURRENCY", 3), 8))
 PC_ARCHIVE_CONCURRENCY = max(1, min(safe_int_env("POST_COUNT_ARCHIVE_CONCURRENCY", 4), 8))
 PC_PROGRESS_SECONDS = 8.0
@@ -7588,6 +8245,10 @@ def pc_empty_group(canonical):
         "canonical": canonical,
         "occurrences": 0,
         "messages": 0,
+        # Для ГМ это отдельная статистика длины конкретной арки/метки.
+        # Общая статистика семейства выше при этом сохраняется без изменений.
+        "long": 0,
+        "short": 0,
         "channels": {},
         "exact": pc_empty_surface_stats(),
         "variants": {},
@@ -7747,6 +8408,8 @@ def pc_apply_content(
         for family, payload_key in group_message_keys:
             group = result["families"][family]["groups"][payload_key]
             group["messages"] += 1
+            if length_kind is not None and pc_length_enabled_for_family(family):
+                group[length_kind] += 1
             pc_channel_counter_add(
                 group["channels"],
                 channel_id,
@@ -8455,6 +9118,8 @@ def pc_merge_stats(results, families):
                 group["messages"] += int(
                     source_group.get("messages", 0)
                 )
+                group["long"] += int(source_group.get("long", 0))
+                group["short"] += int(source_group.get("short", 0))
                 pc_merge_channel_counters(
                     group["channels"],
                     source_group.get("channels", {}),
@@ -8623,8 +9288,18 @@ def pc_template_channel_report_lines(stats, families):
                     f"### {canonical} — сообщений `{group['messages']}`, "
                     f"каналов `{len(group_channels)}`"
                 ),
-                "**По каналам:**",
             ])
+            if pc_length_enabled_for_family(family):
+                group_long = int(group.get("long", 0))
+                group_short = int(group.get("short", 0))
+                group_total = group_long + group_short
+                lines.append(
+                    f"**Длина по арке:** длинных `{group_long}` "
+                    f"(`{pc_percent(group_long, group_total):.1f}%`), "
+                    f"коротких `{group_short}` "
+                    f"(`{pc_percent(group_short, group_total):.1f}%`)."
+                )
+            lines.append("**По каналам:**")
             lines.extend(pc_channel_report_lines(group_channels))
 
         lines.append("")
@@ -9152,8 +9827,20 @@ def pc_full_report(
                 f"Сообщений: {group['messages']}",
                 f"Меток: {group['occurrences']}",
                 f"Каналов: {len(group.get('channels', {}))}",
-                "Распределение шаблона по каналам:",
             ])
+            if pc_length_enabled_for_family(family):
+                group_total = int(group.get("long", 0)) + int(group.get("short", 0))
+                lines.extend([
+                    (
+                        f"Длинных по арке: {group.get('long', 0)} "
+                        f"({pc_percent(group.get('long', 0), group_total):.1f}%)"
+                    ),
+                    (
+                        f"Коротких по арке: {group.get('short', 0)} "
+                        f"({pc_percent(group.get('short', 0), group_total):.1f}%)"
+                    ),
+                ])
+            lines.append("Распределение шаблона по каналам:")
             pc_append_txt_channels(lines, group.get("channels", {}))
 
     # Самый конец TXT: точные написания, все варианты/опечатки,
@@ -10133,7 +10820,7 @@ async def on_command_error(ctx, error):
     logger.error(f"Command error {ctx.command}: {error}", exc_info=True)
 
     try:
-        with open('bot_errors.log', 'a', encoding='utf-8') as f:
+        with open(BOT_ERROR_LOG, 'a', encoding='utf-8') as f:
             f.write(f"\n[{datetime.now()}] ERROR: {type(error).__name__}: {error}\n")
             f.flush()
             os.fsync(f.fileno())
@@ -10152,11 +10839,11 @@ async def on_command_error(ctx, error):
 
 
 if __name__ == "__main__":
-    logger.info("🚀 Start PsIInka Bot v2.0-Full-Integrated")
+    logger.info("🚀 Start PsIInka Bot v0.4.3")
     try:
         discord_token = os.getenv("DISCORD_TOKEN")
         if not discord_token:
-            raise RuntimeError("DISCORD_TOKEN не найден в .env")
+            raise RuntimeError("DISCORD_TOKEN не найден в переменных окружения (.env или панели хостинга)")
         bot.run(discord_token)
     except Exception as e:
         logger.critical(f"💥 Startup crash: {e}", exc_info=True)

@@ -1,6 +1,6 @@
 disnake==2.12.0
 python-dotenv==1.2.2
-git+https://github.com/xtekky/gpt4free.git
+g4f
 openai==2.36.0
 groq==1.2.0
 aiohttp==3.13.5
