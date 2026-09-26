@@ -121,6 +121,7 @@ from core.paths import (
     POST_COUNT_SETTINGS_FILE,
     ROOT_DIR,
 )
+from core.short_commands import expand_short_command
 
 try:
     from g4f.client import AsyncClient as G4FAsyncClient
@@ -6911,7 +6912,8 @@ async def jail_sentence_listener(
     if message.author.bot or message.guild is None:
         return
 
-    content = (message.content or "").strip()
+    # Короткий приказ разворачивается в полную фразу, права прежние.
+    content = expand_short_command((message.content or "").strip())
 
     # Проверяем, совпадает ли сообщение с нужной фразой.
     match = JAIL_PATTERN.fullmatch(content)
@@ -7144,7 +7146,8 @@ async def jail_manual_release_listener(
     if message.author.bot or message.guild is None:
         return
 
-    content = (message.content or "").strip()
+    # Короткий приказ разворачивается в полную фразу, права прежние.
+    content = expand_short_command((message.content or "").strip())
     match = JAIL_RELEASE_PATTERN.fullmatch(content)
 
     if match is None:
