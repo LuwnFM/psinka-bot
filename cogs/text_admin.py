@@ -4,6 +4,8 @@
 Темница (роль ``Спит``) остаётся в основном модуле, потому что там хранится
 её БД/таймерная логика. Здесь находятся Карцер (Discord timeout), изгнание,
 возвращение из бана, управление обычными ролями и служебная справка.
+Короткие приказы Псинка разворачиваются в полные фразы через core.short_commands.
+Очистка сообщений есть только в короткой форме.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from typing import Optional, Tuple
 
 import disnake
 from disnake.ext import commands
+from core import short_commands
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +100,27 @@ ROLE_REMOVE_RE = re.compile(
 
 HELP_TRIGGER = "огласи устав гвардии"
 
+PURGE_MAX = 75
+PURGE_SCAN_LIMIT = 1000
+
+PURGE_MAX_AGE = timedelta(days=14) - timedelta(minutes=1)
+
+PURGE_RE = re.compile(
+    r"^\s*(?:(?P<pre><@!?\d{15,25}>)\s*[,\u2014\u2013-]?\s*)?"
+    r"пси{1,2}нка\s*,?\s+очисть"
+    r"(?:\s+(?P<rest>.*?))?\s*$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+PURGE_ARGS_RE = re.compile(
+    r"^(?:(?P<before><@!?\d{15,25}>)\s+)?"
+    r"(?P<amount>\d{1,6})"
+    r"(?:\s+(?P<after><@!?\d{15,25}>))?$"
+)
+
+PURGE_USAGE = "`Псинка очисть 20` или `Псинка очисть 20 @участник`"
+PURGE_MESSAGE_TYPES = (disnake.MessageType.default, disnake.MessageType.reply)
+
 
 def _reason(value: Optional[str]) -> str:
     value = (value or "").strip()
@@ -128,6 +152,29 @@ def _has_unban_access(member: object) -> bool:
 def _has_help_access(member: object) -> bool:
     """Справка доступна всем штатным модераторским уровням."""
     return _is_admin(member) or _has_named_role(member, STAFF_HELP_ROLE_NAMES)
+
+
+def _has_jail_access(member: object) -> bool:
+    """Темница. Администратор, Гвардеец или Старший Гвардеец"""
+    return _is_admin(member) or _has_named_role(member, GUARD_ROLE_NAMES)
+
+
+def _has_purge_access(member: object) -> bool:
+    """Очистка. Администратор, Гвардеец, Старший Гвардеец или Глава Гвардии."""
+    return _is_admin(member) or _has_named_role(member, STAFF_HELP_ROLE_NAMES)
+
+
+SHORT_COMMAND_ACCESS = {
+    short_commands.HELP: _has_help_access,
+    short_commands.JAIL: _has_jail_access,
+    short_commands.JAIL_RELEASE: _has_jail_access,
+    short_commands.CARCER: _has_carcer_access,
+    short_commands.CARCER_RELEASE: _has_carcer_access,
+    short_commands.KICK: _is_admin,
+    short_commands.UNBAN: _has_unban_access,
+    short_commands.ROLE_GRANT: _is_admin,
+    short_commands.ROLE_REMOVE: _is_admin,
+}
 
 
 def _bot_member(guild: disnake.Guild, bot: commands.Bot) -> Optional[disnake.Member]:
@@ -296,6 +343,24 @@ class TextAdminCog(commands.Cog):
         if not content:
             return
 
+        purge_match = PURGE_RE.fullmatch(content)
+        if purge_match:
+            await self._handle_purge(message, purge_match)
+            return
+
+        # Переписываем в полную фразу и идём по прежним проверкам прав.
+        short = short_commands.parse_short_command(
+            content,
+            [role.name for role in message.guild.roles],
+        )
+        if short is not None:
+            if short.phrase is None:
+                # Подсказку по синтаксису видят только те, кому приказ доступен.
+                if SHORT_COMMAND_ACCESS[short.action](message.author):
+                    await message.reply(f"❌ {short.error}", mention_author=False)
+                return
+            content = short.phrase
+
         # Точный RP-триггер справки: обычная разговорная фраза его не вызовет.
         if content.casefold().rstrip(".! ") == HELP_TRIGGER:
             if not _has_help_access(message.author):
@@ -393,10 +458,116 @@ class TextAdminCog(commands.Cog):
             "`С тебя снимается знак Посетитель Аукциона за снятие полномочий`\n"
             "Роль указывается **обычным названием без @упоминания**. Ответ бота роль не пингует.\n"
             "Доступ: **только Администратор**.\n\n"
-            "Команд очистки сообщений в служебном наборе **нет**.",
+            "**🧹 Очистка сообщений**\n"
+            "`Псинка очисть 20` - 20 последних сообщений в канале\n"
+            "`Псинка очисть 20 @участник` - 20 последних сообщений участника\n"
+            "Не больше 75 за раз. Сообщения ботов, закреплённые и старше 14 дней не трогаются.\n"
+            "Доступ: **Администратор / Гвардеец / Старший Гвардеец / Глава Гвардии Фаервелла**.",
             mention_author=False,
             allowed_mentions=disnake.AllowedMentions.none(),
         )
+        await message.reply(
+            "**⚡ Короткие приказы**\n"
+            "Быстрый ввод тех же приказов - доступ **тот же**, что у полных фраз.\n"
+            "Участник - `@упоминание` (до `Псинка` или после команды) либо ответ на его сообщение. "
+            "Причину можно не указывать.\n\n"
+            "`Псинка справка` - этот устав\n"
+            "`Псинка мут @участник 15 флуд` - Темница\n"
+            "`Псинка снять мут @участник` - освободить из Темницы\n"
+            "`Псинка та @участник 2ч флуд` - Карцер\n"
+            "`Псинка снять та @участник` - освободить из Карцера\n"
+            "`Псинка кик @участник нарушение устава` - изгнание\n"
+            "`Псинка снять бан 123456789012345678 апелляция принята` - возвращение из бана\n"
+            "`Псинка выдать роль @участник Посетитель Аукциона назначение` - выдать знак\n"
+            "`Псинка снять роль @участник Посетитель Аукциона снятие полномочий` - снять знак\n\n"
+            "Срок: `15` или `15м` - минуты, `2ч` - часы, `1д` - сутки. "
+            "Роль - обычным названием, как в полной фразе.",
+            mention_author=False,
+            allowed_mentions=disnake.AllowedMentions.none(),
+        )
+
+    async def _handle_purge(self, message: disnake.Message, match: re.Match[str]) -> None:
+        assert message.guild is not None
+        has_access = _has_purge_access(message.author)
+
+        args = PURGE_ARGS_RE.fullmatch(" ".join((match.group("rest") or "").split()))
+        mentions = [m for m in (match.group("pre"), args and args.group("before"), args and args.group("after")) if m]
+        if args is None or len(mentions) > 1:
+            if has_access:
+                await message.reply(f"❌ Формат очистки: {PURGE_USAGE}", mention_author=False)
+            return
+
+        if not has_access:
+            await self._deny(
+                message,
+                "Очищать канал могут только Администраторы, Гвардейцы, "
+                "Старшие Гвардейцы и Глава Гвардии Фаервелла.",
+            )
+            return
+
+        amount = int(args.group("amount"))
+        if not 1 <= amount <= PURGE_MAX:
+            await message.reply(f"❌ Удалить можно от 1 до {PURGE_MAX} сообщений за раз.", mention_author=False)
+            return
+
+        user_match = USER_MENTION_RE.fullmatch(mentions[0]) if mentions else None
+        user_id = int(user_match.group(1)) if user_match else None
+
+        channel = message.channel
+        bot_member = _bot_member(message.guild, self.bot)
+        perms = channel.permissions_for(bot_member) if bot_member is not None else None
+        if perms is None or not perms.manage_messages or not perms.read_message_history:
+            await message.reply(
+                "❌ У бота нет прав **Управлять сообщениями** и **Читать историю сообщений** в этом канале.",
+                mention_author=False,
+            )
+            return
+        if not hasattr(channel, "delete_messages"):
+            await message.reply("❌ В этом канале очистка недоступна.", mention_author=False)
+            return
+
+        cutoff = disnake.utils.utcnow() - PURGE_MAX_AGE
+        found: list[disnake.Message] = []
+        hit_age_limit = False
+        try:
+            async for old in channel.history(limit=PURGE_SCAN_LIMIT, before=message):
+                if old.created_at < cutoff:
+                    hit_age_limit = True
+                    break
+                if old.author.bot or old.pinned or old.type not in PURGE_MESSAGE_TYPES:
+                    continue
+                # Стартовое сообщение ветки не трогаем.
+                if old.id == channel.id:
+                    continue
+                if user_id is not None and old.author.id != user_id:
+                    continue
+                found.append(old)
+                if len(found) >= amount:
+                    break
+
+            await channel.delete_messages(found + [message])
+        except disnake.Forbidden:
+            await message.reply(
+                "❌ Discord не позволил удалить сообщения. Проверь право **Управлять сообщениями**.",
+                mention_author=False,
+            )
+            return
+        except disnake.HTTPException as exc:
+            logger.warning("RP admin purge failed: %s", exc, exc_info=True)
+            await message.reply(f"❌ Discord вернул ошибку очистки: `{str(exc)[:250]}`", mention_author=False)
+            return
+
+        logger.info(
+            "RP admin purge: %s messages in %s by %s (%s), user filter %s",
+            len(found), channel.id, message.author, message.author.id, user_id,
+        )
+
+        whose = f" участника <@{user_id}>" if user_id is not None else ""
+        text = f"🧹 Удалено сообщений{whose}: **{len(found)}**."
+        if len(found) < amount:
+            text += " Больше подходящих сообщений не нашлось"
+            text += ", более старые Discord удалять пачкой не даёт." if hit_age_limit else "."
+        await channel.send(text, delete_after=10, allowed_mentions=disnake.AllowedMentions.none())
 
     async def _handle_kick(self, message: disnake.Message, match: re.Match[str]) -> None:
         target = await self._target_or_error(message, match.group("mention"))
