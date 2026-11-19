@@ -88,6 +88,9 @@ jobs:
           assert len(app.bot.slash_commands) == 19, len(app.bot.slash_commands)
           assert app.db_manager.SessionLocal is None
           assert app.PC_STORE is not None
+          app.load_mercenary_database_from_xlsx()
+          assert app.MERCENARIES_DB, 'Mercenary catalog did not initialize'
+          assert app.find_mercenary_matches('страж'), 'Mercenary lookup failed'
           assert Path('pending_test_log.csv').exists() == before
           print('Bot imported, 19 slash commands registered; no live credentials needed')
           PY
