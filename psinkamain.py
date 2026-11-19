@@ -151,6 +151,7 @@ from services.post_count_templates import (
     pc_variant,
     pc_word_pattern,
 )
+from services.post_count_settings import pc_empty_settings, pc_normalize_settings
 from core.paths import (
     ANALYSIS_LOG_FILE as CORE_ANALYSIS_LOG_FILE,
     BOT_ERROR_LOG,
@@ -7587,43 +7588,6 @@ PC_SEARCH_HTTP_RETRIES = 5
 PC_SEARCH_MAX_RETRY_WAIT = 30.0
 PC_SEARCH_SPLIT_STATUSES = {400, 413, 414, 431}
 PC_DISCORD_EPOCH_MS = 1420070400000
-
-def pc_empty_settings():
-    return {"guilds": {}}
-
-
-def pc_normalize_settings(data):
-    if not isinstance(data, dict):
-        return pc_empty_settings()
-
-    guilds = data.get("guilds")
-    if not isinstance(guilds, dict):
-        return pc_empty_settings()
-
-    normalized = {"guilds": {}}
-    for guild_id, raw_guild in guilds.items():
-        if not str(guild_id).isdigit() or not isinstance(raw_guild, dict):
-            continue
-
-        guild_data = {"categories": [], "roles": []}
-        for key in ("categories", "roles"):
-            raw_values = raw_guild.get(key, [])
-            if not isinstance(raw_values, list):
-                continue
-            values = set()
-            for value in raw_values:
-                try:
-                    value_id = int(value)
-                except (TypeError, ValueError):
-                    continue
-                if value_id > 0:
-                    values.add(value_id)
-            guild_data[key] = sorted(values)
-
-        normalized["guilds"][str(guild_id)] = guild_data
-
-    return normalized
-
 
 def pc_load_settings():
     if not os.path.exists(PC_SETTINGS_FILE):
