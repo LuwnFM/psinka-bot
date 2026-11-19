@@ -2,11 +2,11 @@
 
 import random
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from handlers.utility_commands import respond_to_bark, respond_to_cube
+from handlers.utility_commands import respond_to_bark, respond_to_cube, respond_to_status
 from services.dice import DiceParser
 
 
@@ -58,3 +58,36 @@ async def test_invalid_dice_formula_is_ephemeral_error() -> None:
     await respond_to_cube(interaction, "abc___invalid", DiceParser())
     interaction.followup.send.assert_awaited_once()
     assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+async def test_status_reports_ranked_models_and_database_connection() -> None:
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    permissions = AsyncMock(return_value=True)
+    storage = Mock()
+    storage.get_top_models.return_value = [("Groq", "model-a", 25)]
+    storage.has_data.return_value = True
+    storage.is_connected.return_value = True
+    await respond_to_status(interaction, permissions, storage)
+    permissions.assert_awaited_once_with(interaction)
+    interaction.response.defer.assert_awaited_once()
+    embed = interaction.edit_original_response.await_args.kwargs["embed"]
+    assert "model-a" in embed.fields[0].value
+    assert "Подключена" in embed.fields[1].value
+
+
+@pytest.mark.asyncio
+async def test_status_denied_access_sends_no_details() -> None:
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+    )
+    permissions = AsyncMock(return_value=False)
+    storage = Mock()
+    await respond_to_status(interaction, permissions, storage)
+    interaction.response.defer.assert_not_awaited()
+    storage.get_top_models.assert_not_called()
