@@ -12,6 +12,7 @@ ORIGINAL_FILE = "psinkamain.py"
 EXTRACTED_FILES = (
     "services/post_count_templates.py",
     "services/post_count_settings.py",
+    "services/post_count_metrics.py",
     "services/auction_text.py",
     "services/auction_lots.py",
     "services/dice.py",
