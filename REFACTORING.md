@@ -7,6 +7,8 @@ This branch is an **incremental**, unmerged refactor. It is **not** a complete A
 - Extracted the post-counting template parser (periods, aliases, typo-tolerant prefixes, text normalization) into `services/post_count_templates.py`.
 - Extracted persisted post-count settings normalization into `services/post_count_settings.py`.
 - Extracted auction text, nested embed flattening, price parsing, and author normalization into `services/auction_text.py`.
+- Extracted original dice parser and roll-output formatting into `services/dice.py` and `services/dice_format.py`, preserving all class and function ASTs; added seeded regression fixtures.
+- Removed import-time `pip install --upgrade g4f` so dependencies are installed during deployment, not at module import.
 - The entrypoint imports the same exported names, preserving command registration and original matching algorithms.
 - Introduced isolated regression tests and GitHub Actions checks on Python 3.10 and 3.12.
 - Added structural AST comparisons to the source on `origin/main`, guarding original function/class bodies and the 19 slash-command decorator contracts.
