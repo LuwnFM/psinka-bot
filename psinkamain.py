@@ -1009,7 +1009,7 @@ async def _build_model_queue(*, db_first: bool) -> List[Tuple[str, str]]:
     """Общий конструктор очереди для /скажи и /анализ."""
     queue = []
     seen = set()
-    pending = pending_test_manager.get_pending_models()
+    pending = await asyncio.to_thread(pending_test_manager.get_pending_models)
     db_models = await asyncio.to_thread(db_manager.get_all_models) if SessionLocal else []
 
     if db_first:
@@ -1233,7 +1233,7 @@ async def test_provider_models(provider: str, models: list, prompt: str = TEST_P
 
             # Логгируем успешные тесты
             if ok:
-                pending_test_manager.log_success(provider, model, int(lat * 1000))
+                await asyncio.to_thread(pending_test_manager.log_success, provider, model, int(lat * 1000))
 
             results.append(result)
             await asyncio.sleep(0.3)  # Небольшая пауза между запросами
@@ -1317,7 +1317,7 @@ class TestModeView(disnake.ui.View):
                 try:
                     ok, ans, lat = await make_g4f_request(prov, mod, TEST_PROMPT, timeout=45.0)
                     if ok:
-                        pending_test_manager.log_success(prov, mod, int(lat * 1000))
+                        await asyncio.to_thread(pending_test_manager.log_success, prov, mod, int(lat * 1000))
                     return {
                         'provider': prov,
                         'model': mod,
@@ -1441,7 +1441,7 @@ class TestModeView(disnake.ui.View):
                 )
 
                 if ok:
-                    pending_test_manager.log_success(prov, model, int(lat * 1000))
+                    await asyncio.to_thread(pending_test_manager.log_success, prov, model, int(lat * 1000))
 
                 result = {
                     'model': model,
@@ -1532,7 +1532,7 @@ class TestModeView(disnake.ui.View):
                 )
 
                 if ok:
-                    pending_test_manager.log_success(prov, model, int(lat * 1000))
+                    await asyncio.to_thread(pending_test_manager.log_success, prov, model, int(lat * 1000))
 
                 result = {
                     'model': model,
@@ -1698,7 +1698,7 @@ async def run_mass_test(channel):
                 )
 
                 if ok:
-                    pending_test_manager.log_success(provider, model, int(lat * 1000))
+                    await asyncio.to_thread(pending_test_manager.log_success, provider, model, int(lat * 1000))
 
                 return {'provider': provider, 'model': model, 'success': ok, 'time': lat,
                         'error': ans if not ok else None}
@@ -2940,7 +2940,7 @@ async def slash_commit_tests(interaction: disnake.CommandInteraction):
         await interaction.followup.send("❌ Гав! БД не подключена, временный лог не трогаю.", ephemeral=True)
         return
 
-    records = pending_test_manager.read_records()
+    records = await asyncio.to_thread(pending_test_manager.read_records)
     if not records:
         await interaction.followup.send("ℹ️ ПсИИнка проверил временный лог — там пусто. *нюхает* 🐕", ephemeral=True)
         return
