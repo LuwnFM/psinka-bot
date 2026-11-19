@@ -144,12 +144,6 @@ except ImportError:
     # Для совместимости со старыми версиями
     ProviderError = ModelNotFoundError = RequestLimitError = AuthenticationError = Exception
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(), logging.FileHandler(BOT_ERROR_LOG, encoding='utf-8', delay=True)],
-    force=True
-)
 logger = logging.getLogger(__name__)
 
 settings = BotSettings.from_environment()
@@ -181,6 +175,7 @@ def check_tokens():
 
     return tokens
 
+from core.logging_setup import configure_logging
 from repositories.pending_tests import PendingTestManager
 from db.models import Base, ModelSuccessLog
 from db.session import init_db
@@ -216,24 +211,8 @@ G4F_FALLBACK_PROVIDERS = ["PollinationsAI", "Qwen", "Perplexity"]
 # 🔧 ЛОГИРОВАНИЕ
 # ============================================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(BOT_ERROR_LOG, encoding='utf-8', delay=True)
-    ],
-    force=True
-)
-logger = logging.getLogger(__name__)
-
 ANALYSIS_LOG_FILE = str(CORE_ANALYSIS_LOG_FILE)
 analysis_logger = logging.getLogger("analysis_debug")
-analysis_logger.setLevel(logging.INFO)
-if not analysis_logger.handlers:
-    fh = logging.FileHandler(ANALYSIS_LOG_FILE, mode='w', encoding='utf-8')
-    fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    analysis_logger.addHandler(fh)
 
 
 def log_analysis(msg: str, level: str = "INFO"):
@@ -8614,6 +8593,7 @@ async def on_command_error(ctx, error):
 
 
 if __name__ == "__main__":
+    configure_logging(BOT_ERROR_LOG, ANALYSIS_LOG_FILE)
     logger.info("🚀 Start PsIInka Bot v0.4.3")
     try:
         discord_token = os.getenv("DISCORD_TOKEN")
