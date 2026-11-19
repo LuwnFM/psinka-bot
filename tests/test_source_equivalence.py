@@ -20,6 +20,7 @@ EXTRACTED_FILES = (
     "services/auction_lots.py",
     "services/dice.py",
     "services/mercenary_normalize.py",
+    "services/jail_time.py",
     "services/dice_format.py",
 )
 
