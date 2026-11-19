@@ -1017,7 +1017,7 @@ async def _build_model_queue(*, db_first: bool) -> List[Tuple[str, str]]:
     queue = []
     seen = set()
     pending = pending_test_manager.get_pending_models()
-    db_models = db_manager.get_all_models() if SessionLocal else []
+    db_models = await asyncio.to_thread(db_manager.get_all_models) if SessionLocal else []
 
     if db_first:
         _queue_extend(queue, seen, db_models)
@@ -1102,7 +1102,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
                     if (normalize_provider_name(prov), mod) in _pending_route_keys():
                         used_temp_file = True
                     if not used_temp_file and SessionLocal:
-                        db_manager.log_success(prov, mod, int(lat * 1000))
+                        await asyncio.to_thread(db_manager.log_success, prov, mod, int(lat * 1000))
                     break
 
             except Exception as e:
@@ -1267,7 +1267,7 @@ async def slash_status(interaction: disnake.CommandInteraction):
         if not await check_access(interaction): return
         await interaction.response.defer()
 
-        top = db_manager.get_top_models(10)
+        top = await asyncio.to_thread(db_manager.get_top_models, 10)
 
         embed = disnake.Embed(
             title="📊 ПсИИнка отчитывается",
@@ -1288,7 +1288,7 @@ async def slash_status(interaction: disnake.CommandInteraction):
                             inline=False)
 
         db_state = "✅ Подключена *гав!*" if db_manager.is_connected() else "⚠️ Отключена *скулит*"
-        data_state = "✅ Есть записи" if db_manager.has_data() else "📭 Записей пока нет"
+        data_state = "✅ Есть записи" if await asyncio.to_thread(db_manager.has_data) else "📭 Записей пока нет"
         embed.add_field(name="🔧 Режим", value=f"Экономия ресурсов (No Warmup)\nБД: {db_state}\nДанные: {data_state}", inline=False)
         embed.set_footer(text="ПсИИнка бот | Statistics 🐾")
 
@@ -2177,7 +2177,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                         if (normalize_provider_name(prov), mod) in _pending_route_keys():
                             used_temp_file = True
                         if not used_temp_file:
-                            db_manager.log_success(prov, mod, int(lat * 1000))
+                            await asyncio.to_thread(db_manager.log_success, prov, mod, int(lat * 1000))
                         break
                 except Exception as e:
                     log_analysis(f"Error {prov}/{mod}: {e}", "DEBUG")
@@ -2986,7 +2986,7 @@ async def slash_download_db(interaction: disnake.CommandInteraction):
         return
 
     await interaction.response.defer()
-    csv_data = db_manager.export_to_csv()
+    csv_data = await asyncio.to_thread(db_manager.export_to_csv)
 
     if csv_data:
         file_obj = io.BytesIO(csv_data.encode('utf-8'))
@@ -3044,9 +3044,9 @@ async def slash_commit_tests(interaction: disnake.CommandInteraction):
     count = 0
     try:
         for prov, mod, lat in records:
-            db_manager.log_success(prov, mod, lat)
+            await asyncio.to_thread(db_manager.log_success, prov, mod, lat)
             count += 1
-        pending_test_manager.clear()
+        await asyncio.to_thread(pending_test_manager.clear)
         await interaction.followup.send(f"✅ ПсИИнка записал `{count}` успешных тестов в БД Neon! *виляет хвостом* 🐕",
                                         ephemeral=True)
     except Exception as e:
