@@ -170,7 +170,8 @@ def init_db():
         return None, None
 
 
-db_engine, SessionLocal = init_db()
+# Database connections are opened during startup after all ORM models are registered.
+db_engine, SessionLocal = None, None
 
 
 class DBManager:
@@ -5615,19 +5616,6 @@ class JailSentence(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
 
 
-# Основная инициализация БД в боте происходит раньше объявления этой модели,
-# поэтому создаём новую таблицу отдельно.
-if db_engine is not None:
-    try:
-        Base.metadata.create_all(db_engine)
-        logger.info("✅ Таблица jail_sentences готова.")
-    except Exception as e:
-        logger.error(
-            f"Не удалось создать таблицу jail_sentences: {e}",
-            exc_info=True,
-        )
-
-
 # Активные таймеры:
 # ключ — (ID сервера, ID участника)
 jail_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
@@ -9655,6 +9643,9 @@ if __name__ == "__main__":
         discord_token = os.getenv("DISCORD_TOKEN")
         if not discord_token:
             raise RuntimeError("DISCORD_TOKEN не найден в переменных окружения (.env или панели хостинга)")
+        # Initialize PostgreSQL only after ModelSuccessLog and JailSentence exist.
+        db_engine, SessionLocal = init_db()
+        db_manager.SessionLocal = SessionLocal
         bot.run(discord_token)
     except Exception as e:
         logger.critical(f"💥 Startup crash: {e}", exc_info=True)
