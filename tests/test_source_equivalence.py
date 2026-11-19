@@ -13,6 +13,7 @@ EXTRACTED_FILES = (
     "services/post_count_templates.py",
     "services/post_count_settings.py",
     "services/post_count_metrics.py",
+    "services/post_count_reporting.py",
     "services/auction_text.py",
     "services/auction_lots.py",
     "services/dice.py",
