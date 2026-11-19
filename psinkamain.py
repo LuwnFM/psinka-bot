@@ -78,6 +78,7 @@ from services.auction_text import (
 from services.dice import DiceParser, DiceResult, DiceTermResult
 from services.dice_format import _dice_paginate, _dice_result_block
 from services.spreadsheets import clean_xlsx_value, make_xlsx_file, sanitize_sheet_name
+from core.config import BotSettings, env_bool, safe_int_env
 from core.paths import (
     ANALYSIS_LOG_FILE as CORE_ANALYSIS_LOG_FILE,
     BOT_ERROR_LOG,
@@ -112,35 +113,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-load_dotenv(ENV_FILE)
-
-
-def safe_int_env(name: str, default: int = 0) -> int:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return int(str(raw).strip())
-    except (TypeError, ValueError):
-        logger.warning(f"⚠️ {name}: ожидалось число, получено `{raw}`. Использую {default}.")
-        return default
-
-
-def env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "y", "да", "on"}
-
-
-DATABASE_URL = os.getenv('DATABASE_URL')
-IS_RAILWAY = env_bool('RAILWAY') or env_bool('IS_RAILWAY')
-OWNER_ID = safe_int_env('OWNER_ID', 0)
-REQUIRED_ROLE_ID = safe_int_env('REQUIRED_ROLE_ID', 0)
-DEBUG = env_bool('DEBUG', False)
-MAX_CONCURRENT = max(1, safe_int_env('MAX_CONCURRENT', 5))
-PROXY_REFRESH_HOURS = max(1, safe_int_env('PROXY_REFRESH_HOURS', 6))
-USE_PROXY = env_bool('USE_PROXY', False)
+settings = BotSettings.from_environment()
+DATABASE_URL = settings.database_url
+IS_RAILWAY = settings.is_railway
+OWNER_ID = settings.owner_id
+REQUIRED_ROLE_ID = settings.required_role_id
+DEBUG = settings.debug
+MAX_CONCURRENT = settings.max_concurrent
+PROXY_REFRESH_HOURS = settings.proxy_refresh_hours
+USE_PROXY = settings.use_proxy
 ai_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
 
