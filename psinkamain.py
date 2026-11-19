@@ -8038,8 +8038,12 @@ logger.info(
 # СОБЫТИЯ
 # ============================================================================
 
+heartbeat_task: asyncio.Task[None] | None = None
+
+
 @bot.event
 async def on_ready():
+    global heartbeat_task
     check_tokens()  # ✅ Проверка токенов
     logger.info(f"Bot {bot.user} ready! (Railway: {IS_RAILWAY})")
     logger.info("🚀 MODE: NO WARMUP (DB SAVING ENABLED)")
@@ -8051,7 +8055,8 @@ async def on_ready():
 
     if USE_PROXY:
         logger.info("Proxy mode allowed by .env, but proxy list refreshes only when /скажи прокси=Да.")
-    asyncio.create_task(heartbeat_keeper())
+    if heartbeat_task is None or heartbeat_task.done():
+        heartbeat_task = asyncio.create_task(heartbeat_keeper())
 
 
 @bot.event
@@ -8060,13 +8065,8 @@ async def on_command_error(ctx, error):
 
     logger.error(f"Command error {ctx.command}: {error}", exc_info=True)
 
-    try:
-        with open(BOT_ERROR_LOG, 'a', encoding='utf-8') as f:
-            f.write(f"\n[{datetime.now()}] ERROR: {type(error).__name__}: {error}\n")
-            f.flush()
-            os.fsync(f.fileno())
-    except Exception as e:
-        print(f"Failed to write to log file: {e}")
+    # Logging already writes through the configured file handler. Avoid
+    # doing another synchronous disk write inside the Discord event loop.
 
     if hasattr(ctx, 'author') and ctx.author.id == OWNER_ID:
         try:
@@ -8075,8 +8075,8 @@ async def on_command_error(ctx, error):
                 await ctx.followup.send(msg, ephemeral=True)
             else:
                 await ctx.send(msg, delete_after=10)
-        except:
-            pass
+        except disnake.HTTPException:
+            logger.warning("Не удалось отправить ответ об ошибке команды", exc_info=True)
 
 
 if __name__ == "__main__":
