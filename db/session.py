@@ -3,12 +3,14 @@
 import logging
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session, sessionmaker
 
 from db.models import Base
 
 
-def init_db(database_url: str | None):
+def init_db(database_url: str | None) -> tuple[Engine | None, sessionmaker[Session] | None]:
     """Create engine and DB tables after all model modules are imported.
 
     Args:
@@ -26,6 +28,6 @@ def init_db(database_url: str | None):
         factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
         logging.info("✅ База данных Neon подключена.")
         return engine, factory
-    except Exception:
+    except (SQLAlchemyError, ValueError, ImportError, OSError):
         logging.exception("❌ Ошибка подключения к БД")
         return None, None
