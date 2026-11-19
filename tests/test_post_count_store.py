@@ -46,7 +46,7 @@ async def test_concurrent_changes_are_serialized(tmp_path: Path) -> None:
     assert store.values(10, "roles") == set(range(1, 13))
     restarted = PCSettingsStore(store.filename)
     restarted.initialize()
-    assert restarted.values(10, "roles") == set(range(12))
+    assert restarted.values(10, "roles") == set(range(1, 13))
 
 
 def test_malformed_json_falls_back_to_empty(tmp_path: Path) -> None:
