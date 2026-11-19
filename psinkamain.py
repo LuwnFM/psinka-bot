@@ -189,6 +189,7 @@ from services.mercenary_workbook import read_mercenary_sheets
 from handlers.utility_commands import respond_to_bark, respond_to_cube, respond_to_status
 from core.logging_setup import configure_logging
 from repositories.pending_tests import PendingTestManager
+from repositories.post_count_settings import PCSettingsStore
 from db.models import Base, JailSentence, ModelSuccessLog
 from repositories import jail as jail_storage
 from services.jail_time import normalize_jail_datetime
@@ -5826,125 +5827,7 @@ PC_SEARCH_MAX_RETRY_WAIT = 30.0
 PC_SEARCH_SPLIT_STATUSES = {400, 413, 414, 431}
 PC_DISCORD_EPOCH_MS = 1420070400000
 
-def pc_load_settings():
-    if not os.path.exists(PC_SETTINGS_FILE):
-        return pc_empty_settings()
-
-    try:
-        with open(PC_SETTINGS_FILE, "r", encoding="utf-8") as file:
-            return pc_normalize_settings(json.load(file))
-    except Exception as exc:
-        logger.error(
-            "Не удалось прочитать настройки подсчёта из %s: %s",
-            PC_SETTINGS_FILE,
-            exc,
-            exc_info=True,
-        )
-        return pc_empty_settings()
-
-
-def pc_write_settings(data):
-    directory = os.path.dirname(PC_SETTINGS_FILE) or "."
-    os.makedirs(directory, exist_ok=True)
-    temp_file = PC_SETTINGS_FILE + ".tmp"
-
-    with open(temp_file, "w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2, sort_keys=True)
-        file.flush()
-        os.fsync(file.fileno())
-
-    os.replace(temp_file, PC_SETTINGS_FILE)
-
-
-PC_SETTINGS_CACHE = pc_load_settings()
-PC_SETTINGS_DIRTY = False
-PC_SETTINGS_FLUSH_TASK = None
-
-
-class PCSettingsStore:
-    def __init__(self):
-        self.lock = asyncio.Lock()
-
-    @staticmethod
-    def _guild_data(guild_id):
-        guilds = PC_SETTINGS_CACHE.setdefault("guilds", {})
-        return guilds.setdefault(
-            str(guild_id),
-            {"categories": [], "roles": []},
-        )
-
-    def values(self, guild_id: int, key: str) -> Set[int]:
-        guild_data = self._guild_data(guild_id)
-        return {int(value) for value in guild_data.get(key, [])}
-
-    async def _save_locked(self):
-        global PC_SETTINGS_DIRTY
-        try:
-            await asyncio.to_thread(pc_write_settings, PC_SETTINGS_CACHE)
-            PC_SETTINGS_DIRTY = False
-            return True
-        except Exception as exc:
-            PC_SETTINGS_DIRTY = True
-            logger.error(
-                "Не удалось записать настройки подсчёта в %s: %s",
-                PC_SETTINGS_FILE,
-                exc,
-                exc_info=True,
-            )
-            return False
-
-    async def add(self, guild_id: int, key: str, value_id: int) -> bool:
-        global PC_SETTINGS_DIRTY
-        async with self.lock:
-            guild_data = self._guild_data(guild_id)
-            values = {int(value) for value in guild_data.setdefault(key, [])}
-            if value_id in values:
-                return False
-
-            values.add(value_id)
-            guild_data[key] = sorted(values)
-            PC_SETTINGS_DIRTY = True
-            if not await self._save_locked():
-                raise OSError(f"не удалось записать {PC_SETTINGS_FILE}")
-            return True
-
-    async def remove(self, guild_id: int, key: str, value_id: int) -> bool:
-        global PC_SETTINGS_DIRTY
-        async with self.lock:
-            guild_data = self._guild_data(guild_id)
-            values = {int(value) for value in guild_data.setdefault(key, [])}
-            if value_id not in values:
-                return False
-
-            values.remove(value_id)
-            guild_data[key] = sorted(values)
-            PC_SETTINGS_DIRTY = True
-            if not await self._save_locked():
-                raise OSError(f"не удалось записать {PC_SETTINGS_FILE}")
-            return True
-
-    async def clear(self, guild_id: int, key: str) -> int:
-        global PC_SETTINGS_DIRTY
-        async with self.lock:
-            guild_data = self._guild_data(guild_id)
-            count = len(guild_data.setdefault(key, []))
-            if count == 0:
-                return 0
-
-            guild_data[key] = []
-            PC_SETTINGS_DIRTY = True
-            if not await self._save_locked():
-                raise OSError(f"не удалось записать {PC_SETTINGS_FILE}")
-            return count
-
-    async def flush_if_dirty(self):
-        async with self.lock:
-            if not PC_SETTINGS_DIRTY:
-                return True
-            return await self._save_locked()
-
-
-PC_STORE = PCSettingsStore()
+PC_STORE = PCSettingsStore(PC_SETTINGS_FILE)
 
 
 async def pc_periodic_settings_flush():
@@ -8207,6 +8090,7 @@ if __name__ == "__main__":
         db_engine, SessionLocal = init_db(DATABASE_URL)
         db_manager.SessionLocal = SessionLocal
         pending_test_manager.initialize()
+        PC_STORE.initialize()
         load_mercenary_database_from_xlsx()
         bot.run(discord_token)
     except Exception as e:
