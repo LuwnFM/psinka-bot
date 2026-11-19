@@ -54,6 +54,6 @@ jobs:
       - name: Install code-quality tools
         run: python -m pip install ruff mypy sqlalchemy python-dotenv
       - name: Ruff — new infrastructure modules
-        run: ruff check core/logging_setup.py db/session.py repositories/model_success.py repositories/pending_tests.py
+        run: ruff check core/logging_setup.py db/session.py repositories/model_success.py repositories/pending_tests.py services/spreadsheets.py services/jail_time.py
       - name: mypy — new infrastructure modules
-        run: mypy --follow-imports=skip core/logging_setup.py db/session.py repositories/model_success.py repositories/pending_tests.py
+        run: mypy --follow-imports=skip core/logging_setup.py db/session.py repositories/model_success.py repositories/pending_tests.py services/spreadsheets.py services/jail_time.py
