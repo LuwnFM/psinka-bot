@@ -42,8 +42,8 @@ async def test_add_remove_clear_roundtrip(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_concurrent_changes_are_serialized(tmp_path: Path) -> None:
     store = PCSettingsStore(str(tmp_path / "guilds.json"))
-    await asyncio.gather(*(store.add(10, "roles", value) for value in range(12)))
-    assert store.values(10, "roles") == set(range(12))
+    await asyncio.gather(*(store.add(10, "roles", value) for value in range(1, 13)))
+    assert store.values(10, "roles") == set(range(1, 13))
     restarted = PCSettingsStore(store.filename)
     restarted.initialize()
     assert restarted.values(10, "roles") == set(range(12))
