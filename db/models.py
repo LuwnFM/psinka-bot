@@ -18,3 +18,17 @@ class ModelSuccessLog(Base):
     __table_args__ = (UniqueConstraint('provider', 'model_name', name='_provider_model_uc'),)
 
 
+
+class JailSentence(Base):
+    __tablename__ = "jail_sentences"
+
+    guild_id = Column(String(32), primary_key=True)
+    user_id = Column(String(32), primary_key=True)
+
+    role_id = Column(String(32), nullable=False)
+    moderator_id = Column(String(32), nullable=False)
+
+    reason = Column(String(500), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+
+
