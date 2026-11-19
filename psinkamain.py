@@ -188,7 +188,8 @@ from services.mercenary_normalize import (
 from services.mercenary_workbook import read_mercenary_sheets
 from core.logging_setup import configure_logging
 from repositories.pending_tests import PendingTestManager
-from db.models import Base, ModelSuccessLog
+from db.models import Base, JailSentence, ModelSuccessLog
+from repositories import jail as jail_storage
 from db.session import init_db
 from repositories.model_success import DBManager
 
@@ -4948,19 +4949,6 @@ JAIL_RELEASE_PATTERN = re.compile(
 # ТАБЛИЦА ДЛЯ СОХРАНЕНИЯ СРОКОВ В БАЗЕ
 # ============================================================================
 
-class JailSentence(Base):
-    __tablename__ = "jail_sentences"
-
-    guild_id = Column(String(32), primary_key=True)
-    user_id = Column(String(32), primary_key=True)
-
-    role_id = Column(String(32), nullable=False)
-    moderator_id = Column(String(32), nullable=False)
-
-    reason = Column(String(500), nullable=False)
-    expires_at = Column(DateTime(timezone=True), nullable=False)
-
-
 # Активные таймеры:
 # ключ — (ID сервера, ID участника)
 jail_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
@@ -4997,123 +4985,21 @@ def has_jail_access(member: disnake.Member) -> bool:
 # РАБОТА СО ВРЕМЕНЕМ И БАЗОЙ
 # ============================================================================
 
-def normalize_jail_datetime(value: datetime) -> datetime:
-    """Приводит дату к UTC с часовым поясом."""
-
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-
-    return value.astimezone(timezone.utc)
+def save_jail_sentence_db(guild_id: int, user_id: int, moderator_id: int, reason: str, expires_at: datetime) -> None:
+    """Persist jail state through the repository using the configured session."""
+    jail_storage.save_jail_sentence_db(SessionLocal, JAIL_ROLE_ID, guild_id, user_id, moderator_id, reason, expires_at)
 
 
-def save_jail_sentence_db(
-    guild_id: int,
-    user_id: int,
-    moderator_id: int,
-    reason: str,
-    expires_at: datetime,
-) -> None:
-    """Создаёт или обновляет срок темницы в базе данных."""
-
-    if SessionLocal is None:
-        return
-
-    session = SessionLocal()
-
-    try:
-        record = (
-            session.query(JailSentence)
-            .filter_by(
-                guild_id=str(guild_id),
-                user_id=str(user_id),
-            )
-            .first()
-        )
-
-        if record is None:
-            record = JailSentence(
-                guild_id=str(guild_id),
-                user_id=str(user_id),
-                role_id=str(JAIL_ROLE_ID),
-                moderator_id=str(moderator_id),
-                reason=reason,
-                expires_at=expires_at,
-            )
-
-            session.add(record)
-
-        else:
-            record.role_id = str(JAIL_ROLE_ID)
-            record.moderator_id = str(moderator_id)
-            record.reason = reason
-            record.expires_at = expires_at
-
-        session.commit()
-
-    except Exception:
-        session.rollback()
-        raise
-
-    finally:
-        session.close()
-
-
-def delete_jail_sentence_db(
-    guild_id: int,
-    user_id: int,
-) -> None:
-    """Удаляет завершившийся срок из базы."""
-
-    if SessionLocal is None:
-        return
-
-    session = SessionLocal()
-
-    try:
-        (
-            session.query(JailSentence)
-            .filter_by(
-                guild_id=str(guild_id),
-                user_id=str(user_id),
-            )
-            .delete(synchronize_session=False)
-        )
-
-        session.commit()
-
-    except Exception:
-        session.rollback()
-        raise
-
-    finally:
-        session.close()
+def delete_jail_sentence_db(guild_id: int, user_id: int) -> None:
+    """Delete one jail term through the repository."""
+    jail_storage.delete_jail_sentence_db(SessionLocal, guild_id, user_id)
 
 
 def load_jail_sentences_db() -> List[Tuple[int, int, datetime]]:
-    """Загружает действующие сроки после перезапуска бота."""
-
-    if SessionLocal is None:
-        return []
-
-    session = SessionLocal()
-
-    try:
-        rows = session.query(JailSentence).all()
-
-        return [
-            (
-                int(row.guild_id),
-                int(row.user_id),
-                normalize_jail_datetime(row.expires_at),
-            )
-            for row in rows
-        ]
-
-    finally:
-        session.close()
+    """Read jail terms through the repository for restart recovery."""
+    return jail_storage.load_jail_sentences_db(SessionLocal)
 
 
-# ============================================================================
 # ПОИСК НАРУШИТЕЛЯ
 # ============================================================================
 
