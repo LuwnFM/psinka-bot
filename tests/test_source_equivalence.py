@@ -15,7 +15,6 @@ EXTRACTED_FILES = (
     "services/post_count_metrics.py",
     "services/post_count_reporting.py",
     "db/models.py",
-    "repositories/model_success.py",
     "services/auction_text.py",
     "services/auction_lots.py",
     "services/dice.py",
