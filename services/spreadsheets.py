@@ -2,7 +2,7 @@
 
 import io
 import re
-from typing import Any, List, Tuple
+from typing import Any
 
 from openpyxl import Workbook
 
@@ -26,10 +26,12 @@ def sanitize_sheet_name(name: str) -> str:
     return name[:31] or "Лист"
 
 
-def make_xlsx_file(sheets: List[Tuple[str, List[List[Any]]]], filename: str) -> io.BytesIO:
+def make_xlsx_file(sheets: list[tuple[str, list[list[Any]]]], filename: str) -> io.BytesIO:
     """Serialize an XLSX stream consumable by the existing Discord attachment API."""
     workbook = Workbook()
-    workbook.remove(workbook.active)
+    initial_sheet = workbook.active
+    if initial_sheet is not None:
+        workbook.remove(initial_sheet)
     for title, rows in sheets:
         worksheet = workbook.create_sheet(title=sanitize_sheet_name(title))
         for row in rows:
