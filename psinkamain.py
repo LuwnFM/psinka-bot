@@ -186,7 +186,7 @@ from services.mercenary_normalize import (
     _clean_profession_targets,
 )
 from services.mercenary_workbook import read_mercenary_sheets
-from handlers.utility_commands import respond_to_bark, respond_to_cube
+from handlers.utility_commands import respond_to_bark, respond_to_cube, respond_to_status
 from core.logging_setup import configure_logging
 from repositories.pending_tests import PendingTestManager
 from db.models import Base, JailSentence, ModelSuccessLog
@@ -1167,40 +1167,7 @@ async def slash_bark(interaction: disnake.CommandInteraction):
 
 @bot.slash_command(name="статус", description="Статистика использования моделей")
 async def slash_status(interaction: disnake.CommandInteraction):
-    try:
-        if not await check_access(interaction): return
-        await interaction.response.defer()
-
-        top = await asyncio.to_thread(db_manager.get_top_models, 10)
-
-        embed = disnake.Embed(
-            title="📊 ПсИИнка отчитывается",
-            description="*виляет хвостом* Вот моя статистика, хозяин! 🐕",
-            color=0x00FF88,
-            timestamp=datetime.now()
-        )
-
-        if top:
-            stats_text = ""
-            for i, (p, m, lat) in enumerate(top, 1):
-                medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][i - 1] if i <= 5 else f"{i}."
-                stats_text += f"{medal} `{p}` / `{m}` — `{lat}мс`\n"
-
-            embed.add_field(name="🏆 Топ-10 моделей", value=stats_text, inline=False)
-        else:
-            embed.add_field(name="📭 Данные", value="Нет записей. *Гавкни* `/скажи` для начала сбора статистики!",
-                            inline=False)
-
-        db_state = "✅ Подключена *гав!*" if db_manager.is_connected() else "⚠️ Отключена *скулит*"
-        data_state = "✅ Есть записи" if await asyncio.to_thread(db_manager.has_data) else "📭 Записей пока нет"
-        embed.add_field(name="🔧 Режим", value=f"Экономия ресурсов (No Warmup)\nБД: {db_state}\nДанные: {data_state}", inline=False)
-        embed.set_footer(text="ПсИИнка бот | Statistics 🐾")
-
-        await interaction.edit_original_response(embed=embed)
-
-    except Exception as e:
-        logger.error(f"Error in /status: {e}", exc_info=True)
-        await interaction.followup.send(f"❌ Гав! Ошибка: {str(e)[:100]}", ephemeral=True)
+    await respond_to_status(interaction, check_access, db_manager)
 
 
 # ============================================================================
