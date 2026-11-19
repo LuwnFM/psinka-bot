@@ -181,6 +181,7 @@ def check_tokens():
 
     return tokens
 
+from repositories.pending_tests import PendingTestManager
 from db.models import Base, ModelSuccessLog
 from db.session import init_db
 from repositories.model_success import DBManager
@@ -195,71 +196,6 @@ db_manager = DBManager(SessionLocal)
 # ============================================================================
 
 PENDING_TEST_LOG = str(CORE_PENDING_TEST_LOG)
-
-
-class PendingTestManager:
-    def __init__(self, filename: str):
-        self.filename = filename
-        if not os.path.exists(self.filename):
-            with open(self.filename, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(['provider', 'model', 'latency_ms', 'timestamp'])
-
-    def log_success(self, provider: str, model: str, latency_ms: int):
-        try:
-            with open(self.filename, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([provider, model, latency_ms, datetime.now(timezone.utc).isoformat()])
-        except Exception as e:
-            logger.error(f"Ошибка записи во временный лог тестов: {e}")
-
-    def read_records(self) -> List[Tuple[str, str, int]]:
-        results = []
-        if not os.path.exists(self.filename):
-            return results
-        try:
-            with open(self.filename, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f)
-                next(reader, None)
-                for row in reader:
-                    if len(row) >= 3:
-                        results.append((row[0], row[1], int(row[2])))
-            return results
-        except Exception as e:
-            logger.error(f"Ошибка чтения временного лога: {e}")
-            return []
-
-    def clear(self):
-        try:
-            with open(self.filename, 'w', encoding='utf-8') as f:
-                f.write('provider,model,latency_ms,timestamp\n')
-        except Exception as e:
-            logger.error(f"Ошибка очистки временного лога: {e}")
-
-    def read_and_clear(self) -> List[Tuple[str, str, int]]:
-        results = self.read_records()
-        if results:
-            self.clear()
-        return results
-
-    def get_pending_models(self) -> List[Tuple[str, str]]:
-        models = []
-        if not os.path.exists(self.filename):
-            return models
-        try:
-            with open(self.filename, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f)
-                next(reader, None)
-                seen = set()
-                for row in reader:
-                    if len(row) >= 2:
-                        key = (row[0], row[1])
-                        if key not in seen:
-                            models.append(key)
-                            seen.add(key)
-            return models
-        except:
-            return []
 
 
 pending_test_manager = PendingTestManager(PENDING_TEST_LOG)
@@ -8686,6 +8622,7 @@ if __name__ == "__main__":
         # Initialize PostgreSQL only after ModelSuccessLog and JailSentence exist.
         db_engine, SessionLocal = init_db(DATABASE_URL)
         db_manager.SessionLocal = SessionLocal
+        pending_test_manager.initialize()
         bot.run(discord_token)
     except Exception as e:
         logger.critical(f"💥 Startup crash: {e}", exc_info=True)
