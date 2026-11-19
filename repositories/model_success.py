@@ -138,7 +138,7 @@ class DBManager:
             return False
         with self.SessionLocal() as session:
             try:
-                return session.query(ModelSuccessLog).count() > 0
+                return bool(session.query(ModelSuccessLog).count() > 0)
             except SQLAlchemyError:
                 logger.exception("Не удалось проверить наличие статистики моделей")
                 return False
