@@ -175,6 +175,7 @@ def check_tokens():
 
     return tokens
 
+from services.mercenary_workbook import read_mercenary_sheets
 from core.logging_setup import configure_logging
 from repositories.pending_tests import PendingTestManager
 from db.models import Base, ModelSuccessLog
@@ -4609,87 +4610,6 @@ def split_multi_field(value: str) -> List[str]:
     return dedupe_preserve_order([part.strip() for part in parts if part.strip()])
 
 
-def _xlsx_col_to_index(cell_ref: str) -> int:
-    letters = "".join(ch for ch in str(cell_ref or "") if ch.isalpha()).upper()
-    number = 0
-    for ch in letters:
-        number = number * 26 + (ord(ch) - ord("A") + 1)
-    return max(number - 1, 0)
-
-
-def _xlsx_cell_text(cell, shared_strings: List[str], ns: Dict[str, str]) -> str:
-    cell_type = cell.attrib.get("t", "")
-
-    if cell_type == "inlineStr":
-        return "".join(t.text or "" for t in cell.findall(".//a:t", ns)).strip()
-
-    value = cell.find("a:v", ns)
-    if value is None or value.text is None:
-        return ""
-
-    raw = value.text.strip()
-    if cell_type == "s":
-        try:
-            return shared_strings[int(raw)].strip()
-        except Exception:
-            return raw
-    return raw
-
-
-def _read_xlsx_sheets(path: str) -> Dict[str, List[List[str]]]:
-    """Мини-ридер .xlsx без openpyxl: читает текст/числа из листов."""
-    ns = {
-        "a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
-        "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-        "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
-    }
-
-    with zipfile.ZipFile(path) as z:
-        shared_strings: List[str] = []
-        if "xl/sharedStrings.xml" in z.namelist():
-            root = ET.fromstring(z.read("xl/sharedStrings.xml"))
-            for si in root.findall("a:si", ns):
-                shared_strings.append("".join(t.text or "" for t in si.findall(".//a:t", ns)))
-
-        workbook = ET.fromstring(z.read("xl/workbook.xml"))
-        rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
-
-        rel_map: Dict[str, str] = {}
-        for rel in rels.findall("rel:Relationship", ns):
-            rel_id = rel.attrib.get("Id")
-            target = rel.attrib.get("Target", "")
-            if target.startswith("/"):
-                sheet_path = target.lstrip("/")
-            elif target.startswith("xl/"):
-                sheet_path = target
-            else:
-                sheet_path = "xl/" + target.lstrip("/")
-            rel_map[rel_id] = sheet_path
-
-        result: Dict[str, List[List[str]]] = {}
-        for sheet in workbook.findall("a:sheets/a:sheet", ns):
-            sheet_name = sheet.attrib.get("name", "")
-            rel_id = sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
-            sheet_path = rel_map.get(rel_id)
-            if not sheet_path or sheet_path not in z.namelist():
-                continue
-
-            root = ET.fromstring(z.read(sheet_path))
-            rows: List[List[str]] = []
-            for row in root.findall(".//a:sheetData/a:row", ns):
-                values_by_col: Dict[int, str] = {}
-                max_col = -1
-                for cell in row.findall("a:c", ns):
-                    col_index = _xlsx_col_to_index(cell.attrib.get("r", "A1"))
-                    max_col = max(max_col, col_index)
-                    values_by_col[col_index] = _xlsx_cell_text(cell, shared_strings, ns)
-                if max_col >= 0:
-                    rows.append([values_by_col.get(i, "") for i in range(max_col + 1)])
-            result[sheet_name] = rows
-
-        return result
-
-
 def _rows_to_dicts(rows: List[List[str]], required_header: str) -> List[Dict[str, str]]:
     header_index = None
     for i, row in enumerate(rows):
@@ -4755,7 +4675,7 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
             f"Положи mercenary_command_database_v2.xlsx в папку data рядом с psinkamain.py."
         )
 
-    sheets = _read_xlsx_sheets(path)
+    sheets = read_mercenary_sheets(path)
 
     skill_rows = _rows_to_dicts(sheets.get(XLSX_SKILLS_SHEET, []), "Навык")
     known_skills = {row.get("Навык", "").strip() for row in skill_rows if row.get("Навык", "").strip()}
@@ -5058,7 +4978,6 @@ def resolve_mercenary_query(query: str) -> Tuple[Optional[str], List[str]]:
     return None, matches
 
 
-load_mercenary_database_from_xlsx()
 # ============================================================================
 # АДМИН-КОМАНДА «ТЕМНИЦА»: обычное сообщение без префикса + временная роль «Спит»
 #
@@ -8603,6 +8522,7 @@ if __name__ == "__main__":
         db_engine, SessionLocal = init_db(DATABASE_URL)
         db_manager.SessionLocal = SessionLocal
         pending_test_manager.initialize()
+        load_mercenary_database_from_xlsx()
         bot.run(discord_token)
     except Exception as e:
         logger.critical(f"💥 Startup crash: {e}", exc_info=True)
