@@ -4,14 +4,16 @@ Status: **not release-ready**, `main` unchanged. The strict quality audit is an 
 
 ## Verified CI evidence
 
-Full audit run: https://github.com/LuwnFM/psinka-bot/actions/runs/44537833086
+Initial full audit: https://github.com/LuwnFM/psinka-bot/actions/runs/44537833086
+
+Updated audit after targeted fixes: https://github.com/LuwnFM/psinka-bot/actions/runs/44538798942
 
 - **Compilation:** all tracked Python sources compile.
 - **Runtime import:** `psinkamain` imports successfully with installed project requirements and no Discord/API/database secrets; all 19 slash commands register.
 - **pytest:** **72 passed, 1 warning**, Python 3.12; Python 3.10 also runs tests once the full checkout fix was applied.
-- **Ruff (full project): 548 findings**; 406 were marked automatically fixable by Ruff but should be reviewed with behavior tests before applying.
-- **Ruff format (full project): 28 Python files** fail the formatting check.
-- **mypy (full project): 284 errors in 14 files** (30 sources checked).
+- **Initial Ruff (full project): 548 findings**; 406 were marked automatically fixable. **Updated audit: 527 findings**. Review safe fixes with behavior tests before applying.
+- **Ruff format: initially 28 files; updated audit 26 files** fail the formatting check.
+- **mypy: initially 284 errors in 14 files; updated audit 280 errors in 13 files** (30 sources checked initially).
 - **Selected infrastructure modules:** the separate `quality-new-modules` job passes Ruff and mypy, but does **not** mean whole-project quality passes.
 
 The first full-audit iteration checked out a shallow Git history and caused two test-only AST comparisons to fail because `origin/main` was unavailable. The audit workflow now uses `fetch-depth: 0`; the subsequent complete test suite succeeds.
@@ -35,3 +37,12 @@ The 300–500-line module guidance from AGENTS.md is a maintainability signal, *
 5. Review runtime resource lifecycle, logging, API client timeouts, file state, and shut-down paths before a merge.
 
 Current live audit workflow: `.github/workflows/full-audit.yml`; original regression workflow: `.github/workflows/regression.yml`. Draft PR: https://github.com/LuwnFM/psinka-bot/pull/6
+
+## Incremental corrections after audit
+
+- Rewrote the pending AI model CSV repository with explicit return types, concrete filesystem/CSV exception handling, and stable header behavior, preserving the existing successful persistence tests.
+- Modernized XLSX writer type annotations and guarded workbook initialization; tidied the jail time helper.
+- Expanded the separate quality gate to verify these newly modernized infrastructure modules.
+- Startup smoke now loads the real bundled mercenary workbook and validates search behavior without production credentials.
+
+No full CI green status is claimed: only the regression workflow and selected-module quality gate currently pass. The intentionally strict full-project quality checks still fail.
