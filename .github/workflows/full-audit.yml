@@ -1,0 +1,89 @@
+name: Full project audit
+
+on:
+  push:
+    branches:
+      - refactor/modularization-ci-2026-11-19
+    paths:
+      - '.github/workflows/full-audit.yml'
+      - 'psinkamain.py'
+      - 'core/**'
+      - 'cogs/**'
+      - 'services/**'
+      - 'repositories/**'
+      - 'db/**'
+      - 'handlers/**'
+      - 'tests/**'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-static-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install project dependencies and audit tools
+        run: python -m pip install -r requirements.txt ruff mypy pytest pytest-asyncio
+      - name: Compile every tracked Python source
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import py_compile
+          files = sorted(path for path in Path('.').rglob('*.py')
+                         if not any(part in {'.git', '.venv', 'venv', '__pycache__'} for part in path.parts))
+          for file in files:
+              py_compile.compile(str(file), doraise=True)
+          print(f'Compiled {len(files)} Python files')
+          PY
+      - name: Ruff full project (strict)
+        run: ruff check .
+      - name: Ruff format full project (strict)
+        if: success() || failure()
+        run: ruff format --check .
+      - name: mypy full project (strict)
+        if: success() || failure()
+        run: mypy psinkamain.py core cogs services repositories db handlers
+      - name: pytest full project
+        if: success() || failure()
+        run: python -m pytest -q
+
+  startup-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Import without service credentials
+        env:
+          DATABASE_URL: ''
+          DISCORD_TOKEN: ''
+          GROQ_TOKEN: ''
+          OPENR_TOKEN: ''
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          before = Path('pending_test_log.csv').exists()
+          import psinkamain as app
+          assert len(app.bot.slash_commands) == 19, len(app.bot.slash_commands)
+          assert app.db_manager.SessionLocal is None
+          assert app.PC_STORE is not None
+          assert Path('pending_test_log.csv').exists() == before
+          print('Bot imported, 19 slash commands registered; no live credentials needed')
+          PY
