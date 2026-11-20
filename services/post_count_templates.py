@@ -359,4 +359,4 @@ def pc_length_enabled_for_family(family: str) -> bool:
 
 
 def pc_any_length_enabled(families: Iterable[str] | None) -> bool:
-    return bool(families) and any(pc_length_enabled_for_family(family) for family in families)
+    return any(pc_length_enabled_for_family(family) for family in families) if families else False

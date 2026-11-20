@@ -21,8 +21,13 @@ PC_PUBLIC_REPORT_CHUNK_CHARS = 3900
 class ReportUser(Protocol):
     """Only the properties required from a Discord user."""
 
-    id: int
-    mention: str
+    @property
+    def id(self) -> int:
+        """Discord snowflake ID."""
+
+    @property
+    def mention(self) -> str:
+        """Discord mention string."""
 
 
 def pc_merge_channel_counters(target: ChannelCounters, source: ChannelCounters) -> None:

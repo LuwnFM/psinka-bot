@@ -529,18 +529,24 @@ async def get_random_proxy_async(use_proxy: bool) -> str | None:
 
 
 async def check_access(
-    interaction: ApplicationCommandInteraction, allowed_role_names: list[str] = ["Псарь"]
+    interaction: ApplicationCommandInteraction,
+    allowed_role_names: tuple[str, ...] = ("Псарь",),
 ) -> bool:
     if interaction.author.id == OWNER_ID:
         return True
 
+    member = interaction.author
+    if not isinstance(member, disnake.Member):
+        await interaction.response.send_message("❌ Гав! Нет доступа вне сервера.", ephemeral=True)
+        return False
+
     if REQUIRED_ROLE_ID != 0:
-        if any(role.id == REQUIRED_ROLE_ID for role in interaction.author.roles):
+        if any(role.id == REQUIRED_ROLE_ID for role in member.roles):
             return True
         await interaction.response.send_message("❌ Гав! Нет доступа (нужна роль по ID).", ephemeral=True)
         return False
 
-    user_role_names = [role.name for role in interaction.author.roles]
+    user_role_names = [role.name for role in member.roles]
     if any(role_name in user_role_names for role_name in allowed_role_names):
         return True
 
@@ -1270,7 +1276,7 @@ class TestModeView(disnake.ui.View):
         )
         progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
         progress_embed.add_field(name="Статус", value="Запуск тестов...", inline=False)
-        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True)
+        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True, wait=True)
 
         all_results = []
         semaphore = asyncio.Semaphore(3)  # Ограничение параллельных запросов
@@ -1391,7 +1397,7 @@ class TestModeView(disnake.ui.View):
         )
         progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
         progress_embed.add_field(name="Статус", value="Запуск тестов...", inline=False)
-        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True)
+        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True, wait=True)
 
         all_results = []
 
@@ -1486,7 +1492,7 @@ class TestModeView(disnake.ui.View):
         )
         progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
         progress_embed.add_field(name="Статус", value="Запуск тестов...", inline=False)
-        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True)
+        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True, wait=True)
 
         all_results = []
 
@@ -3560,7 +3566,7 @@ def get_member_search_names(member: disnake.Member) -> set[str]:
     return names
 
 
-async def find_user_for_owner_dm(raw_target: str) -> tuple[disnake.User | None, str | None]:
+async def find_user_for_owner_dm(raw_target: str) -> tuple[disnake.User | disnake.Member | None, str | None]:
     """
     Ищет пользователя по:
     - числовому ID
@@ -8007,17 +8013,15 @@ async def slash_count_posts(
 
     # Исходное публичное сообщение становится первым и обычно единственным
     # embed-отчётом. Подробный TXT прикрепляется к нему без отдельной подписи.
-    edit_kwargs = {
-        "content": None,
-        "embed": first_embed,
-    }
-    if txt_files:
-        edit_kwargs["files"] = txt_files
-
     try:
-        final_message = await interaction.edit_original_response(
-            **edit_kwargs,
-        )
+        if txt_files:
+            final_message = await interaction.edit_original_response(
+                content=None, embed=first_embed, files=txt_files
+            )
+        else:
+            final_message = await interaction.edit_original_response(
+                content=None, embed=first_embed
+            )
     except Exception as exc:
         logger.error(
             "Не удалось отредактировать публичный итог /подсчёт_постов: %s",
