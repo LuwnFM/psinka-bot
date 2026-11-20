@@ -31,3 +31,9 @@ def test_log_success_without_explicit_initialize_preserves_header(tmp_path) -> N
     manager = PendingTestManager(str(location))
     manager.log_success("Groq", "fallback", 12)
     assert location.read_text(encoding="utf-8").splitlines()[0] == "provider,model,latency_ms,timestamp"
+
+
+def test_clear_signals_filesystem_failure(tmp_path) -> None:
+    """Never claim that the pending CSV was cleared when it was not."""
+    manager = PendingTestManager(str(tmp_path))
+    assert manager.clear() is False
