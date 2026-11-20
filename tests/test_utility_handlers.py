@@ -91,3 +91,58 @@ async def test_status_denied_access_sends_no_details() -> None:
     await respond_to_status(interaction, permissions, storage)
     interaction.response.defer.assert_not_awaited()
     storage.get_top_models.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_status_failure_before_defer_uses_initial_response() -> None:
+    """Do not send an unauthenticated followup when an access check raises."""
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(
+            defer=AsyncMock(),
+            is_done=Mock(return_value=False),
+            send_message=AsyncMock(),
+        ),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    permissions = AsyncMock(side_effect=RuntimeError("permission service offline"))
+    storage = Mock()
+    await respond_to_status(interaction, permissions, storage)
+    interaction.response.defer.assert_not_awaited()
+    interaction.response.send_message.assert_awaited_once()
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+    interaction.followup.send.assert_not_awaited()
+    storage.get_top_models.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_status_failure_after_defer_uses_ephemeral_followup() -> None:
+    """A deferred interaction cannot receive a second initial response."""
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(
+            defer=AsyncMock(), is_done=Mock(return_value=True),
+            send_message=AsyncMock(),
+        ),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    storage = Mock()
+    storage.get_top_models.side_effect = RuntimeError("database offline")
+    await respond_to_status(interaction, AsyncMock(return_value=True), storage)
+    interaction.response.defer.assert_awaited_once()
+    interaction.followup.send.assert_awaited_once()
+    assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
+    interaction.response.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bark_error_before_initial_reply_is_ephemeral() -> None:
+    """A bad latency value still yields an actionable private error message."""
+    interaction = SimpleNamespace(
+        response=SimpleNamespace(
+            send_message=AsyncMock(), is_done=Mock(return_value=False),
+        ),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    await respond_to_bark(interaction, SimpleNamespace(latency=None))
+    interaction.response.send_message.assert_awaited_once()
+    assert interaction.response.send_message.await_args.kwargs["ephemeral"] is True
+    interaction.followup.send.assert_not_awaited()
