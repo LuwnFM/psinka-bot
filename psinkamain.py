@@ -119,7 +119,7 @@ ai_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
 
 # ✅ Проверка токенов при старте
-def check_tokens():
+def check_tokens() -> dict[str, str | None]:
     """Проверяет наличие всех необходимых токенов"""
     tokens = {
         "DISCORD_TOKEN": os.getenv("DISCORD_TOKEN"),
@@ -170,7 +170,7 @@ ANALYSIS_LOG_FILE = str(CORE_ANALYSIS_LOG_FILE)
 analysis_logger = logging.getLogger("analysis_debug")
 
 
-def log_analysis(msg: str, level: str = "INFO"):
+def log_analysis(msg: str, level: str = "INFO") -> None:
     getattr(analysis_logger, level.lower())(msg)
 
 
@@ -936,7 +936,7 @@ async def route_model_request(
     )
 
 
-async def heartbeat_keeper():
+async def heartbeat_keeper() -> None:
     while True:
         await asyncio.sleep(60)
         logger.debug("💓 Heartbeat OK")
@@ -1017,7 +1017,7 @@ async def slash_say(
     interaction: disnake.ApplicationCommandInteraction,
     вопрос: str = commands.Param(min_length=1, description="Ваш вопрос или запрос"),
     прокси: str = commands.Param(choices=["Да", "Нет"], default="Нет", description="Использовать прокси"),
-):
+) -> None:
     if not await check_access(interaction):
         return
 
@@ -1144,17 +1144,17 @@ async def slash_cube(
     формула: str | None = commands.Param(
         description="Формула броска (например: 1d6+1d4 или dndstats)", default=None
     ),
-):
+) -> None:
     await respond_to_cube(interaction, формула, dice_engine)
 
 
 @bot.slash_command(name="погавкай", description="Проверка пинга бота")
-async def slash_bark(interaction: disnake.ApplicationCommandInteraction):
+async def slash_bark(interaction: disnake.ApplicationCommandInteraction) -> None:
     await respond_to_bark(interaction, bot)
 
 
 @bot.slash_command(name="статус", description="Статистика использования моделей")
-async def slash_status(interaction: disnake.ApplicationCommandInteraction):
+async def slash_status(interaction: disnake.ApplicationCommandInteraction) -> None:
     await respond_to_status(interaction, check_access, db_manager)
 
 
@@ -1560,7 +1560,7 @@ class TestModeView(disnake.ui.View):
 
 
 @bot.slash_command(name="тест", description="Тестирование провайдеров и моделей")
-async def slash_test(interaction: disnake.ApplicationCommandInteraction):
+async def slash_test(interaction: disnake.ApplicationCommandInteraction) -> None:
     try:
         if not await check_access(interaction):
             return
@@ -2010,7 +2010,7 @@ async def slash_analyze(
         choices=["За последние 7 дней", "За последние 21 день"],
         description="Период анализа",
     ),
-):
+) -> None:
     if interaction.author.id != OWNER_ID:
         if not await check_access(interaction, allowed_role_names=["Псарь"]):
             return
@@ -2620,7 +2620,7 @@ async def slash_auction_prices(
         default=20000,
         description="Сколько последних сообщений проверить. Максимум 50000.",
     ),
-):
+) -> None:
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message(
             "❌ Эта команда доступна только овнеру бота.",
@@ -2917,7 +2917,7 @@ async def slash_auction_prices(
 
 
 @bot.slash_command(name="скачать_анализ", description="Скачать лог анализа")
-async def slash_download_analysis_log(interaction: disnake.ApplicationCommandInteraction):
+async def slash_download_analysis_log(interaction: disnake.ApplicationCommandInteraction) -> None:
     if interaction.author.id != OWNER_ID:
         return
     await interaction.response.defer()
@@ -2932,7 +2932,7 @@ async def slash_download_analysis_log(interaction: disnake.ApplicationCommandInt
 
 
 @bot.slash_command(name="скачать_ошибки", description="Скачать общий лог ошибок бота")
-async def slash_download_logs(interaction: disnake.ApplicationCommandInteraction):
+async def slash_download_logs(interaction: disnake.ApplicationCommandInteraction) -> None:
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
         return
@@ -2953,7 +2953,7 @@ async def slash_download_logs(interaction: disnake.ApplicationCommandInteraction
 
 
 @bot.slash_command(name="скачать_бд", description="Скачать таблицу успехов из БД (CSV)")
-async def slash_download_db(interaction: disnake.ApplicationCommandInteraction):
+async def slash_download_db(interaction: disnake.ApplicationCommandInteraction) -> None:
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
         return
@@ -2972,7 +2972,7 @@ async def slash_download_db(interaction: disnake.ApplicationCommandInteraction):
 
 
 @bot.slash_command(name="очистить_бд", description="Полная очистка таблицы успехов в БД")
-async def slash_clear_db(interaction: disnake.ApplicationCommandInteraction):
+async def slash_clear_db(interaction: disnake.ApplicationCommandInteraction) -> None:
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
         return
@@ -2995,7 +2995,7 @@ async def slash_clear_db(interaction: disnake.ApplicationCommandInteraction):
 
 
 @bot.slash_command(name="записать_тест", description="Перенос данных из временного лога тестов в БД")
-async def slash_commit_tests(interaction: disnake.ApplicationCommandInteraction):
+async def slash_commit_tests(interaction: disnake.ApplicationCommandInteraction) -> None:
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
         return
@@ -3229,7 +3229,7 @@ def replace_role_name_mentions_for_guild(text: str, guild: disnake.Guild) -> str
     return result
 
 
-async def ensure_guild_members_loaded(guild: disnake.Guild):
+async def ensure_guild_members_loaded(guild: disnake.Guild) -> None:
     """
     Подгружает участников сервера в кэш, чтобы бот мог найти @ник по имени.
     Требует включённый Server Members Intent в Discord Developer Portal.
@@ -3365,7 +3365,7 @@ async def slash_owner_write(
     закрепить: str = commands.Param(
         choices=["Нет", "Да"], default="Нет", description="Закрепить отправленное сообщение в канале?"
     ),
-):
+) -> None:
     try:
         # Только владелец бота.
         if interaction.author.id != OWNER_ID:
@@ -3632,7 +3632,7 @@ async def slash_owner_write_user(
     interaction: disnake.ApplicationCommandInteraction,
     пользователь: str = commands.Param(min_length=1, description="ID пользователя, mention или @username"),
     текст: str = commands.Param(min_length=1, description="Текст, который бот отправит человеку в ЛС"),
-):
+) -> None:
     try:
         if interaction.author.id != OWNER_ID:
             await interaction.response.send_message("❌ Эта команда доступна только владельцу бота.")
@@ -3697,7 +3697,7 @@ async def slash_owner_write_user(
 
 
 @bot.listen("on_message")
-async def owner_dm_relay_listener(message: disnake.Message):
+async def owner_dm_relay_listener(message: disnake.Message) -> None:
     """
     Если пользователь пишет боту в ЛС, бот пересылает это владельцу.
     Сообщения самого владельца не пересылаем, чтобы не ловить собственные команды/текст.
@@ -3886,7 +3886,7 @@ async def slash_owner_edit_bot_message(
     interaction: disnake.ApplicationCommandInteraction,
     сообщение: str = commands.Param(min_length=1, description="Ссылка на сообщение бота"),
     текст: str = commands.Param(min_length=1, description="Новый текст сообщения"),
-):
+) -> None:
     try:
         # Только владелец бота.
         if interaction.author.id != OWNER_ID:
@@ -3929,7 +3929,7 @@ async def slash_owner_edit_bot_message(
 
 
 @bot.event
-async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
+async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent) -> None:
     """
     Если владелец ставит 📝 на сообщение бота, бот спрашивает новый текст в ЛС
     и редактирует это сообщение.
@@ -4158,7 +4158,7 @@ REAL_ESTATE_TRIGGER = "недвижкаролл"
 
 
 @bot.listen("on_message")
-async def real_estate_message_listener(message):
+async def real_estate_message_listener(message) -> None:
     if message.author.bot:
         return
 
@@ -4248,7 +4248,7 @@ def roll_item_quality():
 
 
 @bot.listen("on_message")
-async def quality_roll_message_listener(message):
+async def quality_roll_message_listener(message) -> None:
     if message.author.bot:
         return
 
@@ -5754,7 +5754,7 @@ async def slash_mercenary(
         description="Начни писать: раб, рабочий, певец, бандит, ландскнехт, Лучник...",
         autocomplete=mercenary_name_autocomplete,
     ),
-):
+) -> None:
     try:
         await interaction.response.defer(ephemeral=False)
 
@@ -5917,7 +5917,7 @@ PC_DISCORD_EPOCH_MS = 1420070400000
 PC_STORE = PCSettingsStore(PC_SETTINGS_FILE)
 
 
-async def pc_periodic_settings_flush():
+async def pc_periodic_settings_flush() -> None:
     await bot.wait_until_ready()
     while not bot.is_closed():
         await asyncio.sleep(300)
@@ -5925,7 +5925,7 @@ async def pc_periodic_settings_flush():
 
 
 @bot.listen("on_ready")
-async def pc_start_periodic_settings_flush():
+async def pc_start_periodic_settings_flush() -> None:
     global PC_SETTINGS_FLUSH_TASK
     if PC_SETTINGS_FLUSH_TASK is None or PC_SETTINGS_FLUSH_TASK.done():
         PC_SETTINGS_FLUSH_TASK = asyncio.create_task(pc_periodic_settings_flush())
@@ -6163,7 +6163,7 @@ def pc_chunks(values, size):
         yield values[index : index + size]
 
 
-def pc_search_headers():
+def pc_search_headers() -> dict[str, str]:
     token = (os.getenv("DISCORD_TOKEN") or "").strip()
     if not token:
         raise PCSearchUnavailable("DISCORD_TOKEN не найден")
@@ -7244,7 +7244,7 @@ def pc_full_report(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def pc_txt_file(text: str, filename: str):
+def pc_txt_file(text: str, filename: str) -> disnake.File:
     return disnake.File(
         io.BytesIO(text.encode("utf-8-sig")),
         filename=filename,
@@ -7300,7 +7300,7 @@ def pc_faq(title, description, fields):
     return embed
 
 
-def pc_categories_faq():
+def pc_categories_faq() -> disnake.Embed:
     return pc_faq(
         "FAQ: /категории_подсчёта",
         "Настраивает категории, внутри которых бот ищет сообщения. Менять список может только владелец бота из `OWNER_ID`.",
@@ -7321,7 +7321,7 @@ def pc_categories_faq():
     )
 
 
-def pc_roles_faq():
+def pc_roles_faq() -> disnake.Embed:
     return pc_faq(
         "FAQ: /роли_подсчёта",
         "Настраивает дополнительные роли, которым разрешён `/подсчёт_постов`. Изменять список могут владелец и серверные администраторы.",
@@ -7336,7 +7336,7 @@ def pc_roles_faq():
     )
 
 
-def pc_posts_faq():
+def pc_posts_faq() -> disnake.Embed:
     return pc_faq(
         "FAQ: /подсчёт_постов",
         "Считает сообщения выбранного пользователя во всех доступных каналах и ветках настроенных категорий. Сначала использует быстрый серверный поиск Discord по автору; при его недоступности автоматически возвращается к обычному обходу истории.",
@@ -7391,7 +7391,7 @@ async def slash_count_categories(
         channel_types=[disnake.ChannelType.category],
         description="Категория для добавления или удаления",
     ),
-):
+) -> None:
     if действие is None and категория is None:
         await interaction.response.send_message(embed=pc_categories_faq(), ephemeral=True)
         return
@@ -7474,7 +7474,7 @@ async def slash_count_roles(
         default=None,
         description="Роль для добавления или удаления",
     ),
-):
+) -> None:
     if действие is None and роль is None:
         await interaction.response.send_message(embed=pc_roles_faq(), ephemeral=True)
         return
@@ -7561,7 +7561,7 @@ async def slash_count_posts(
         default=None,
         description="Конец включительно: ДД.ММ.ГГ или ДД.ММ.ГГГГ",
     ),
-):
+) -> None:
     # Пустой вызов показывает публичный FAQ в канале.
     if пользователь is None and слово is None and с_даты is None and по_дату is None:
         await interaction.response.send_message(
@@ -8067,7 +8067,7 @@ heartbeat_task: asyncio.Task[None] | None = None
 
 
 @bot.event
-async def on_ready():
+async def on_ready() -> None:
     global heartbeat_task
     check_tokens()  # ✅ Проверка токенов
     logger.info(f"Bot {bot.user} ready! (Railway: {IS_RAILWAY})")
@@ -8085,7 +8085,7 @@ async def on_ready():
 
 
 @bot.event
-async def on_command_error(ctx, error):
+async def on_command_error(ctx, error) -> None:
     if isinstance(error, commands.CommandNotFound):
         return
 
