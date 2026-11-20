@@ -33,7 +33,9 @@ def check_deployment(
     findings: list[PreflightFinding] = []
     token = (settings.discord_token or "").strip()
     if not token or token.lower() in _PLACEHOLDERS:
-        findings.append(PreflightFinding("ERROR", "DISCORD_TOKEN отсутствует или содержит шаблонное значение."))
+        findings.append(
+            PreflightFinding("ERROR", "DISCORD_TOKEN отсутствует или содержит шаблонное значение.")
+        )
     elif any(char.isspace() for char in token):
         findings.append(PreflightFinding("ERROR", "DISCORD_TOKEN содержит пробелы или переносы строк."))
 
@@ -43,7 +45,9 @@ def check_deployment(
         findings.append(PreflightFinding("ERROR", f"Excel-база наёмников пуста: {workbook.name}."))
 
     if settings.owner_id == 0:
-        findings.append(PreflightFinding("WARNING", "OWNER_ID не указан: команды владельца будут недоступны."))
+        findings.append(
+            PreflightFinding("WARNING", "OWNER_ID не указан: команды владельца будут недоступны.")
+        )
     if not settings.groq_token and not settings.openrouter_token:
         findings.append(
             PreflightFinding("WARNING", "Не указаны GROQ_TOKEN и OPENR_TOKEN: остаётся только g4f fallback.")
@@ -57,7 +61,9 @@ def check_deployment(
         else:
             if url.get_backend_name() != "postgresql":
                 findings.append(
-                    PreflightFinding("WARNING", "DATABASE_URL указывает не на PostgreSQL; проверьте окружение.")
+                    PreflightFinding(
+                        "WARNING", "DATABASE_URL указывает не на PostgreSQL; проверьте окружение."
+                    )
                 )
     else:
         findings.append(PreflightFinding("WARNING", "DATABASE_URL отсутствует: функции БД будут ограничены."))

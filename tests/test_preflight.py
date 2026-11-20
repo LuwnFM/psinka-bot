@@ -68,8 +68,6 @@ def test_malformed_database_url_is_fatal_without_exposing_password(tmp_path) -> 
 def test_non_postgres_database_raises_warning_not_failure(tmp_path) -> None:
     workbook = tmp_path / "mercenaries.xlsx"
     workbook.write_bytes(b"fixture")
-    findings = check_deployment(
-        replace(_settings(), database_url="sqlite:///:memory:"), workbook=workbook
-    )
+    findings = check_deployment(replace(_settings(), database_url="sqlite:///:memory:"), workbook=workbook)
     assert len(findings) == 1
     assert findings[0].severity == "WARNING"
