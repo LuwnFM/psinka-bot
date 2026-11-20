@@ -53,17 +53,48 @@ def test_extracted_logic_matches_original_ast() -> None:
 
 
 def test_slash_command_contract_matches_main() -> None:
-    """Guard registration names, parameter metadata, and decorators."""
-    def commands(source: str) -> dict[str, list[str]]:
+    """Protect the full Discord API, including original argument defaults.
+
+    Name-only checks can miss a breaking change to parameter type, order,
+    autocomplete binding, choices, or default values.
+    """
+
+    def command_contracts(source: str) -> dict[str, tuple[str, str]]:
         tree = ast.parse(source)
         return {
-            node.name: [ast.dump(d, include_attributes=False) for d in node.decorator_list]
+            node.name: (
+                ast.dump(node.args, include_attributes=False),
+                ast.dump(ast.Module(body=node.decorator_list, type_ignores=[]), include_attributes=False),
+            )
             for node in tree.body
             if isinstance(node, ast.AsyncFunctionDef)
-            and any("slash_command" in ast.unparse(d) for d in node.decorator_list)
+            and any("slash_command" in ast.unparse(decorator) for decorator in node.decorator_list)
         }
 
     current = Path(ORIGINAL_FILE).read_text(encoding="utf-8")
     baseline = source_from_main()
-    assert len(commands(baseline)) == 19
-    assert commands(current) == commands(baseline)
+    assert len(command_contracts(baseline)) == 19
+    assert command_contracts(current) == command_contracts(baseline)
+
+
+def test_discord_listener_bindings_match_main() -> None:
+    """Do not silently lose reaction handlers or scheduled ready listeners."""
+
+    def listeners(source: str) -> dict[str, tuple[str, ...]]:
+        tree = ast.parse(source)
+        registered: dict[str, tuple[str, ...]] = {}
+        for node in tree.body:
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            decorators = tuple(
+                ast.dump(item, include_attributes=False)
+                for item in node.decorator_list
+                if "bot.listen" in ast.unparse(item) or "bot.event" in ast.unparse(item)
+            )
+            if decorators:
+                registered[node.name] = decorators
+        return registered
+
+    current = Path(ORIGINAL_FILE).read_text(encoding="utf-8")
+    baseline = source_from_main()
+    assert listeners(current) == listeners(baseline)
