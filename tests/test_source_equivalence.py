@@ -158,3 +158,21 @@ def test_discord_listener_bindings_match_main() -> None:
     current = Path(ORIGINAL_FILE).read_text(encoding="utf-8")
     baseline = source_from_main()
     assert listeners(current) == listeners(baseline)
+
+
+def test_type_style_normalization_preserves_command_defaults() -> None:
+    """Changing Optional to X | None is safe; changing a default is not."""
+    original = ast.parse("def check(x: Optional[str] = None): return x").body[0]
+    modern = ast.parse("def check(x: str | None = None): return x").body[0]
+    changed = ast.parse("def check(x: str | None = 'changed'): return x").body[0]
+    assert _canonical_ast(original) == _canonical_ast(modern)
+    assert _canonical_ast(original) != _canonical_ast(changed)
+
+
+def test_dictionary_iteration_style_does_not_hide_logic_changes() -> None:
+    """Dictionary iteration spelling is equivalent; algorithm changes are not."""
+    original = ast.parse("def check(values):\n    for value in values.keys():\n        print(value)").body[0]
+    modern = ast.parse("def check(values):\n    for value in values:\n        print(value)").body[0]
+    changed = ast.parse("def check(values):\n    for value in values:\n        print(str(value))").body[0]
+    assert _canonical_ast(original) == _canonical_ast(modern)
+    assert _canonical_ast(original) != _canonical_ast(changed)
