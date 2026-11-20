@@ -39,3 +39,22 @@ def test_no_database_config_does_not_write() -> None:
     assert not manager.has_data()
     assert manager.export_to_csv() is None
     assert manager.get_top_models() == []
+
+
+def test_clear_all_stats_returns_exact_count(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'cleanup.sqlite3'}")
+    Base.metadata.create_all(engine)
+    manager = DBManager(sessionmaker(bind=engine))
+    try:
+        manager.log_success("Groq", "model-a", 60)
+        manager.log_success("Groq", "model-a", 40)
+        manager.log_success("OpenRouter", "model-b", 30)
+        assert manager.clear_all() == 2
+        assert manager.clear_all() == 0
+        assert manager.get_all_models() == []
+    finally:
+        engine.dispose()
+
+
+def test_clear_without_database_does_not_claim_success() -> None:
+    assert DBManager(None).clear_all() is None
