@@ -52,13 +52,15 @@ class PendingTestManager:
             logger.exception("Ошибка чтения временного лога тестов")
             return []
 
-    def clear(self) -> None:
-        """Truncate the temporary log, preserving its CSV header."""
+    def clear(self) -> bool:
+        """Truncate the log and confirm success instead of hiding disk errors."""
         try:
             with Path(self.filename).open("w", newline="", encoding="utf-8") as stream:
                 csv.writer(stream).writerow(["provider", "model", "latency_ms", "timestamp"])
+            return True
         except OSError:
             logger.exception("Ошибка очистки временного лога тестов")
+            return False
 
     def read_and_clear(self) -> list[tuple[str, str, int]]:
         """Read current records and clear the CSV only when records were found."""
