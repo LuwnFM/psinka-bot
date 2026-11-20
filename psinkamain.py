@@ -2764,7 +2764,7 @@ async def slash_download_analysis_log(interaction: disnake.CommandInteraction):
         if isinstance(handler, logging.FileHandler):
             handler.flush()
 
-    if os.path.exists(ANALYSIS_LOG_FILE):
+    if await asyncio.to_thread(os.path.exists, ANALYSIS_LOG_FILE):
         await interaction.followup.send(file=disnake.File(ANALYSIS_LOG_FILE))
     else:
         await interaction.followup.send("❌ Гав! Файл не найден. *нюхает*", ephemeral=True)
@@ -2785,7 +2785,7 @@ async def slash_download_logs(interaction: disnake.CommandInteraction):
 
     await asyncio.sleep(0.1)
 
-    if os.path.exists(BOT_ERROR_LOG):
+    if await asyncio.to_thread(os.path.exists, BOT_ERROR_LOG):
         await interaction.followup.send(file=disnake.File(BOT_ERROR_LOG))
     else:
         await interaction.followup.send("❌ Гав! Файл логов пуст или не найден. *скулит*", ephemeral=True)
