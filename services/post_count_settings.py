@@ -1,5 +1,6 @@
 """Validation and normalization of persisted post-counting settings."""
 
+
 def pc_empty_settings():
     return {"guilds": {}}
 
@@ -35,5 +36,3 @@ def pc_normalize_settings(data):
         normalized["guilds"][str(guild_id)] = guild_data
 
     return normalized
-
-

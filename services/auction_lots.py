@@ -192,7 +192,7 @@ def extract_bidder(text: str, raw_message: dict[str, Any], bid_area: str) -> str
 
     last_bid_match = re.search(r"Последняя\s+ставка", text, re.IGNORECASE)
     if last_bid_match:
-        candidates.append(text[last_bid_match.end():last_bid_match.end() + 2000])
+        candidates.append(text[last_bid_match.end() : last_bid_match.end() + 2000])
 
     candidates.append(text)
 
@@ -332,5 +332,3 @@ def parse_ancient_auction_lot(info: dict[str, Any]) -> dict[str, Any] | None:
         "created_at": info.get("created_at", ""),
         "raw_text": text,
     }
-
-

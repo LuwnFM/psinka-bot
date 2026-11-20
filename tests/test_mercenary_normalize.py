@@ -17,20 +17,14 @@ def test_name_normalization_removes_numeric_suffix_only() -> None:
 
 def test_preserve_first_spelling_and_remove_alias_duplicates() -> None:
     assert dedupe_preserve_order(["Ёж", "еж", "Лучник", "ЛУЧНИК"]) == ["Ёж", "Лучник"]
-    assert split_multi_field("Страж, Гвардеец; страж\n Лучник") == [
-        "Страж", "Гвардеец", "Лучник"
-    ]
+    assert split_multi_field("Страж, Гвардеец; страж\n Лучник") == ["Страж", "Гвардеец", "Лучник"]
 
 
 def test_mercenary_excel_table_keeps_sparse_columns() -> None:
     rows = [["Заметки"], ["Профессия", "", "Профессия код"], ["Страж", "", "23"]]
-    assert _rows_to_dicts(rows, "Профессия") == [
-        {"Профессия": "Страж", "Профессия код": "23"}
-    ]
+    assert _rows_to_dicts(rows, "Профессия") == [{"Профессия": "Страж", "Профессия код": "23"}]
 
 
 def test_unrecognized_specialization_targets_are_not_added() -> None:
     pool = {"Гвардеец": ["Меч"], "Работник": ["Ремесло"]}
-    assert _clean_profession_targets(["гвардеец", "Несуществующий", "ГВАРДЕЕЦ"], pool) == [
-        "Гвардеец"
-    ]
+    assert _clean_profession_targets(["гвардеец", "Несуществующий", "ГВАРДЕЕЦ"], pool) == ["Гвардеец"]

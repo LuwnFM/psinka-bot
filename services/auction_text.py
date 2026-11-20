@@ -15,7 +15,7 @@ def clean_auction_text(text: Any) -> str:
     # Убираем невидимые символы, которые часто ломают regex.
     text = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]", "", text)
 
-    text = text.replace("\u00A0", " ")
+    text = text.replace("\u00a0", " ")
     text = text.replace("Ｎ", "N")
     text = text.replace("ｏ", "o")
     text = text.replace("О", "О")
@@ -84,5 +84,3 @@ def get_raw_author_name(raw_message: dict[str, Any]) -> str:
 def get_raw_author_id(raw_message: dict[str, Any]) -> str:
     author = raw_message.get("author") or {}
     return str(author.get("id") or "")
-
-

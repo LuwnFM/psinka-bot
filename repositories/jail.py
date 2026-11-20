@@ -114,5 +114,3 @@ def load_jail_sentences_db(session_factory) -> list[tuple[int, int, datetime]]:
 
     finally:
         session.close()
-
-

@@ -1,6 +1,5 @@
 """Formatting and Discord pagination of dice results."""
 
-
 from services.dice import DiceResult, DiceTermResult
 
 
@@ -98,11 +97,9 @@ def _dice_paginate(header: str, blocks: list[str], max_chars: int = 3900) -> lis
             current = block
         else:
             # Защитный fallback для крайне длинной цепочки перебросов/взрывов.
-            chunks = [block[i:i + max_chars] for i in range(0, len(block), max_chars)]
+            chunks = [block[i : i + max_chars] for i in range(0, len(block), max_chars)]
             pages.extend(chunks[:-1])
             current = chunks[-1]
     if current:
         pages.append(current)
     return pages
-
-

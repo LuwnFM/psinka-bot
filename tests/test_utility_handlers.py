@@ -119,7 +119,8 @@ async def test_status_failure_after_defer_uses_ephemeral_followup() -> None:
     """A deferred interaction cannot receive a second initial response."""
     interaction = SimpleNamespace(
         response=SimpleNamespace(
-            defer=AsyncMock(), is_done=Mock(return_value=True),
+            defer=AsyncMock(),
+            is_done=Mock(return_value=True),
             send_message=AsyncMock(),
         ),
         followup=SimpleNamespace(send=AsyncMock()),
@@ -138,7 +139,8 @@ async def test_bark_error_before_initial_reply_is_ephemeral() -> None:
     """A bad latency value still yields an actionable private error message."""
     interaction = SimpleNamespace(
         response=SimpleNamespace(
-            send_message=AsyncMock(), is_done=Mock(return_value=False),
+            send_message=AsyncMock(),
+            is_done=Mock(return_value=False),
         ),
         followup=SimpleNamespace(send=AsyncMock()),
     )

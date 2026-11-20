@@ -5,6 +5,7 @@ from services.post_count_templates import PC_LABELS, pc_length_enabled_for_famil
 
 PC_PUBLIC_REPORT_CHUNK_CHARS = 3900
 
+
 def pc_merge_channel_counters(target, source):
     for key, item in (source or {}).items():
         current = target.setdefault(
@@ -58,12 +59,8 @@ def pc_merge_stats(results, families):
                     key,
                     pc_empty_group(source_group["canonical"]),
                 )
-                group["occurrences"] += int(
-                    source_group.get("occurrences", 0)
-                )
-                group["messages"] += int(
-                    source_group.get("messages", 0)
-                )
+                group["occurrences"] += int(source_group.get("occurrences", 0))
+                group["messages"] += int(source_group.get("messages", 0))
                 group["long"] += int(source_group.get("long", 0))
                 group["short"] += int(source_group.get("short", 0))
                 pc_merge_channel_counters(
@@ -75,9 +72,7 @@ def pc_merge_stats(results, families):
                     source_group.get("exact", {}),
                 )
 
-                for variant, source_variant in (
-                    source_group.get("variants", {}).items()
-                ):
+                for variant, source_variant in source_group.get("variants", {}).items():
                     variant_target = group["variants"].setdefault(
                         variant,
                         pc_empty_surface_stats(),
@@ -92,14 +87,8 @@ def pc_merge_stats(results, families):
 
 def pc_merge_lengths(results):
     return {
-        "long": sum(
-            item.get("lengths", {}).get("long", 0)
-            for item in results
-        ),
-        "short": sum(
-            item.get("lengths", {}).get("short", 0)
-            for item in results
-        ),
+        "long": sum(item.get("lengths", {}).get("long", 0) for item in results),
+        "short": sum(item.get("lengths", {}).get("short", 0) for item in results),
     }
 
 
@@ -112,11 +101,7 @@ def pc_collect_template_records(results):
             identity = (
                 record.get("id")
                 or record.get("jump_url")
-                or (
-                    f"{record.get('channel_id')}:"
-                    f"{record.get('created_at')}:"
-                    f"{len(records)}"
-                )
+                or (f"{record.get('channel_id')}:{record.get('created_at')}:{len(records)}")
             )
             if identity in seen:
                 continue
@@ -128,7 +113,6 @@ def pc_collect_template_records(results):
 
 def pc_percent(part: int, total: int) -> float:
     return (part * 100.0 / total) if total else 0.0
-
 
 
 def pc_public_clip(value, limit=240):
@@ -155,14 +139,8 @@ def pc_channel_report_lines(channels, indent="  "):
     for item in pc_sorted_channels(channels):
         channel_id = item.get("id")
         label = pc_public_clip(item.get("label"), 220)
-        location = (
-            f"<#{channel_id}> — {label}"
-            if channel_id
-            else label
-        )
-        rendered.append(
-            f"{indent}• `{item.get('messages', 0)}` — {location}"
-        )
+        location = f"<#{channel_id}> — {label}" if channel_id else label
+        rendered.append(f"{indent}• `{item.get('messages', 0)}` — {location}")
     return rendered or [f"{indent}• Совпадений нет."]
 
 
@@ -191,10 +169,12 @@ def pc_template_channel_report_lines(stats, families):
         channels_count = len(data.get("channels", {}))
 
         if messages == 0:
-            lines.extend([
-                f"## {PC_LABELS[family]} — совпадений нет.",
-                "",
-            ])
+            lines.extend(
+                [
+                    f"## {PC_LABELS[family]} — совпадений нет.",
+                    "",
+                ]
+            )
             continue
 
         lines.append(
@@ -228,13 +208,12 @@ def pc_template_channel_report_lines(stats, families):
         for group in groups:
             canonical = pc_public_clip(group.get("canonical"), 300)
             group_channels = group.get("channels", {})
-            lines.extend([
-                "",
-                (
-                    f"### {canonical} — сообщений `{group['messages']}`, "
-                    f"каналов `{len(group_channels)}`"
-                ),
-            ])
+            lines.extend(
+                [
+                    "",
+                    (f"### {canonical} — сообщений `{group['messages']}`, каналов `{len(group_channels)}`"),
+                ]
+            )
             if pc_length_enabled_for_family(family):
                 group_long = int(group.get("long", 0))
                 group_short = int(group.get("short", 0))
@@ -251,6 +230,7 @@ def pc_template_channel_report_lines(stats, families):
         lines.append("")
 
     return lines
+
 
 def pc_template_public_report_lines(
     user,
@@ -269,10 +249,7 @@ def pc_template_public_report_lines(
     lines = [
         f"**Пользователь:** {user.mention} (`{user.id}`)",
         f"**Режим:** `{str(mode_value)[:200]}`",
-        (
-            f"**Период (МСК):** `{period.start_date:%d.%m.%Y}` — "
-            f"`{period.end_date:%d.%m.%Y}` включительно"
-        ),
+        (f"**Период (МСК):** `{period.start_date:%d.%m.%Y}` — `{period.end_date:%d.%m.%Y}` включительно"),
         (
             f"**Итог:** найдено сообщений `"
             f"{matched}` • проверено сообщений пользователя `{scanned}` • "
@@ -289,6 +266,7 @@ def pc_template_public_report_lines(
 
     lines.append(f"Время выполнения: `{elapsed:.1f} сек.`")
     return lines
+
 
 def pc_split_lines_for_discord(
     lines,
@@ -319,5 +297,3 @@ def pc_split_lines_for_discord(
         chunks.append("\n".join(current))
 
     return chunks
-
-

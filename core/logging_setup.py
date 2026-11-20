@@ -15,7 +15,10 @@ def configure_logging(error_log: str | Path, analysis_log: str | Path) -> None:
         root.addHandler(console)
     error_file = Path(error_log)
     error_file.parent.mkdir(parents=True, exist_ok=True)
-    if not any(isinstance(h, logging.FileHandler) and h.baseFilename == str(error_file.resolve()) for h in root.handlers):
+    if not any(
+        isinstance(h, logging.FileHandler) and h.baseFilename == str(error_file.resolve())
+        for h in root.handlers
+    ):
         handler = logging.FileHandler(error_file, encoding="utf-8", delay=True)
         handler.setFormatter(formatter)
         root.addHandler(handler)

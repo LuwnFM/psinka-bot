@@ -20,8 +20,16 @@ def test_initialize_and_record_round_trip(tmp_path) -> None:
     manager.log_success("Groq", "fast-model", 30)
     manager.log_success("OpenRouter", "other-model", 40)
     assert manager.get_pending_models() == [("Groq", "fast-model"), ("OpenRouter", "other-model")]
-    assert manager.read_records() == [("Groq", "fast-model", 20), ("Groq", "fast-model", 30), ("OpenRouter", "other-model", 40)]
-    assert manager.read_and_clear() == [("Groq", "fast-model", 20), ("Groq", "fast-model", 30), ("OpenRouter", "other-model", 40)]
+    assert manager.read_records() == [
+        ("Groq", "fast-model", 20),
+        ("Groq", "fast-model", 30),
+        ("OpenRouter", "other-model", 40),
+    ]
+    assert manager.read_and_clear() == [
+        ("Groq", "fast-model", 20),
+        ("Groq", "fast-model", 30),
+        ("OpenRouter", "other-model", 40),
+    ]
     assert manager.get_pending_models() == []
     assert manager.read_records() == []
 

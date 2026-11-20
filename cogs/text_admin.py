@@ -428,7 +428,9 @@ class TextAdminCog(commands.Cog):
             )
         except disnake.HTTPException as exc:
             logger.warning("RP admin kick failed: %s", exc, exc_info=True)
-            await message.reply(f"❌ Discord вернул ошибку изгнания: `{str(exc)[:250]}`", mention_author=False)
+            await message.reply(
+                f"❌ Discord вернул ошибку изгнания: `{str(exc)[:250]}`", mention_author=False
+            )
 
     async def _handle_carcer(self, message: disnake.Message, match: re.Match[str]) -> None:
         target = await self._target_or_error(message, match.group("mention"))
@@ -439,7 +441,9 @@ class TextAdminCog(commands.Cog):
         if problem or bot_member is None:
             return
         if not bot_member.guild_permissions.moderate_members:
-            await message.reply("❌ У бота нет права **Модерировать участников** (`moderate_members`).", mention_author=False)
+            await message.reply(
+                "❌ У бота нет права **Модерировать участников** (`moderate_members`).", mention_author=False
+            )
             return
 
         amount = int(match.group("amount"))
@@ -452,7 +456,9 @@ class TextAdminCog(commands.Cog):
             return
 
         reason = _reason(match.group("reason"))
-        audit_reason = f"Карцер на {minutes} мин.; причина: {reason}; модератор: {message.author} ({message.author.id})"
+        audit_reason = (
+            f"Карцер на {minutes} мин.; причина: {reason}; модератор: {message.author} ({message.author.id})"
+        )
 
         try:
             await target.timeout(duration=timedelta(minutes=minutes), reason=audit_reason)
@@ -488,11 +494,15 @@ class TextAdminCog(commands.Cog):
         if problem or bot_member is None:
             return
         if not bot_member.guild_permissions.moderate_members:
-            await message.reply("❌ У бота нет права **Модерировать участников** (`moderate_members`).", mention_author=False)
+            await message.reply(
+                "❌ У бота нет права **Модерировать участников** (`moderate_members`).", mention_author=False
+            )
             return
 
         reason = _reason(match.group("reason"))
-        audit_reason = f"Досрочное освобождение из Карцера: {reason}; модератор: {message.author} ({message.author.id})"
+        audit_reason = (
+            f"Досрочное освобождение из Карцера: {reason}; модератор: {message.author} ({message.author.id})"
+        )
 
         try:
             await target.timeout(duration=None, reason=audit_reason)
@@ -513,7 +523,9 @@ class TextAdminCog(commands.Cog):
             )
         except disnake.HTTPException as exc:
             logger.warning("RP admin carcer release failed: %s", exc, exc_info=True)
-            await message.reply(f"❌ Discord вернул ошибку освобождения: `{str(exc)[:250]}`", mention_author=False)
+            await message.reply(
+                f"❌ Discord вернул ошибку освобождения: `{str(exc)[:250]}`", mention_author=False
+            )
 
     async def _handle_unban(self, message: disnake.Message, match: re.Match[str]) -> None:
         assert message.guild is not None
@@ -527,7 +539,9 @@ class TextAdminCog(commands.Cog):
 
         user_id = int(match.group("user_id"))
         reason = _reason(match.group("reason"))
-        audit_reason = f"Врата Фаервелла вновь открыты: {reason}; модератор: {message.author} ({message.author.id})"
+        audit_reason = (
+            f"Врата Фаервелла вновь открыты: {reason}; модератор: {message.author} ({message.author.id})"
+        )
 
         try:
             await message.guild.unban(disnake.Object(id=user_id), reason=audit_reason)
@@ -538,10 +552,15 @@ class TextAdminCog(commands.Cog):
         except disnake.NotFound:
             await message.reply("❌ Этого ID нет среди изгнанных (бан-лист сервера).", mention_author=False)
         except disnake.Forbidden:
-            await message.reply("❌ Discord не позволил открыть врата. Проверь право бота на снятие бана.", mention_author=False)
+            await message.reply(
+                "❌ Discord не позволил открыть врата. Проверь право бота на снятие бана.",
+                mention_author=False,
+            )
         except disnake.HTTPException as exc:
             logger.warning("RP admin unban failed: %s", exc, exc_info=True)
-            await message.reply(f"❌ Discord вернул ошибку снятия бана: `{str(exc)[:250]}`", mention_author=False)
+            await message.reply(
+                f"❌ Discord вернул ошибку снятия бана: `{str(exc)[:250]}`", mention_author=False
+            )
 
     async def _handle_role(
         self,

@@ -8,8 +8,13 @@ def test_repeated_template_counts_one_message_but_two_occurrences() -> None:
     families = [PC_GM, PC_DRP]
     result = pc_empty_result("Канал", families, 17)
     pc_apply_content(
-        result, "гмпост#Роза гмпост#Роза", None, families,
-        message_id=1, channel_id=17, guild_id=2,
+        result,
+        "гмпост#Роза гмпост#Роза",
+        None,
+        families,
+        message_id=1,
+        channel_id=17,
+        guild_id=2,
     )
     assert result["scanned"] == 1
     assert result["matched"] == 1

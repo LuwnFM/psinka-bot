@@ -11,6 +11,7 @@ from services.post_count_templates import (
 
 PC_LONG_POST_MIN_CHARS = 300
 
+
 def pc_channel_counter_add(counter, channel_id, label, amount=1):
     key = str(channel_id) if channel_id is not None else f"label:{label}"
     item = counter.setdefault(
@@ -107,28 +108,16 @@ def pc_apply_content(
 
         result["matched"] += 1
         message_families = {match.family for match in matches}
-        channel_id = (
-            int(channel_id)
-            if channel_id is not None
-            else result.get("channel_id")
-        )
+        channel_id = int(channel_id) if channel_id is not None else result.get("channel_id")
         channel_label = result.get("label") or "неизвестный канал"
 
-        length_families = {
-            family
-            for family in message_families
-            if pc_length_enabled_for_family(family)
-        }
+        length_families = {family for family in message_families if pc_length_enabled_for_family(family)}
         body_length = None
         length_kind = None
 
         if length_families:
             body_length = pc_template_body_length(content, matches)
-            length_kind = (
-                "long"
-                if body_length >= PC_LONG_POST_MIN_CHARS
-                else "short"
-            )
+            length_kind = "long" if body_length >= PC_LONG_POST_MIN_CHARS else "short"
             # Одно сообщение учитывается в общей статистике длины один раз,
             # даже если содержит несколько учитываемых семейств.
             result["lengths"][length_kind] += 1
@@ -151,9 +140,7 @@ def pc_apply_content(
             if match.exact_surface:
                 surface = group["exact"]
                 surface["occurrences"] += 1
-                surface_message_keys.add(
-                    (match.family, match.payload_key, "exact", "")
-                )
+                surface_message_keys.add((match.family, match.payload_key, "exact", ""))
                 surface_name = match.canonical
             else:
                 surface = group["variants"].setdefault(
@@ -171,13 +158,15 @@ def pc_apply_content(
                 )
                 surface_name = match.raw_variant
 
-            record_matches.append({
-                "family": match.family,
-                "payload_key": match.payload_key,
-                "canonical": match.canonical,
-                "exact": bool(match.exact_surface),
-                "surface": surface_name,
-            })
+            record_matches.append(
+                {
+                    "family": match.family,
+                    "payload_key": match.payload_key,
+                    "canonical": match.canonical,
+                    "exact": bool(match.exact_surface),
+                    "surface": surface_name,
+                }
+            )
 
         # Сообщение в статистике семейства и канала считается один раз.
         for family in message_families:
@@ -189,10 +178,7 @@ def pc_apply_content(
                 channel_label,
             )
 
-            if (
-                length_kind is not None
-                and pc_length_enabled_for_family(family)
-            ):
+            if length_kind is not None and pc_length_enabled_for_family(family):
                 family_data[length_kind] += 1
 
         # Сообщение в каждой канонической группе считается один раз,
@@ -224,24 +210,21 @@ def pc_apply_content(
             )
 
         if jump_url is None and guild_id and channel_id and message_id:
-            jump_url = (
-                f"https://discord.com/channels/"
-                f"{guild_id}/{channel_id}/{message_id}"
-            )
+            jump_url = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
 
-        result["template_messages"].append({
-            "id": str(message_id or ""),
-            "channel_id": str(channel_id or ""),
-            "channel": channel_label,
-            "created_at": pc_iso_datetime(created_at),
-            "jump_url": str(jump_url or ""),
-            "content": content,
-            "body_length": body_length,
-            "length_kind": length_kind,
-            "matches": record_matches,
-        })
+        result["template_messages"].append(
+            {
+                "id": str(message_id or ""),
+                "channel_id": str(channel_id or ""),
+                "channel": channel_label,
+                "created_at": pc_iso_datetime(created_at),
+                "jump_url": str(jump_url or ""),
+                "content": content,
+                "body_length": body_length,
+                "length_kind": length_kind,
+                "matches": record_matches,
+            }
+        )
 
     elif word_pattern.search(pc_normalize_text(content)):
         result["matched"] += 1
-
-

@@ -64,9 +64,7 @@ class PendingTestManager:
     def clear(self) -> bool:
         """Clear the entire file and report whether that operation succeeded."""
         try:
-            with self._lock, Path(self.filename).open(
-                "w", newline="", encoding="utf-8"
-            ) as stream:
+            with self._lock, Path(self.filename).open("w", newline="", encoding="utf-8") as stream:
                 csv.writer(stream).writerow(HEADER)
             return True
         except OSError:

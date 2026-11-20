@@ -26,9 +26,7 @@ class DBManager:
             return
         with self.SessionLocal() as session:
             try:
-                record = session.query(ModelSuccessLog).filter_by(
-                    provider=provider, model_name=model
-                ).first()
+                record = session.query(ModelSuccessLog).filter_by(provider=provider, model_name=model).first()
                 if record:
                     record.success_count += 1
                     record.avg_latency_ms = int(
@@ -66,9 +64,9 @@ class DBManager:
             )
             if old_ids:
                 identifiers = [item[0] for item in old_ids]
-                session.query(ModelSuccessLog).filter(
-                    ModelSuccessLog.id.in_(identifiers)
-                ).delete(synchronize_session=False)
+                session.query(ModelSuccessLog).filter(ModelSuccessLog.id.in_(identifiers)).delete(
+                    synchronize_session=False
+                )
                 session.commit()
         except SQLAlchemyError:
             session.rollback()
@@ -109,9 +107,7 @@ class DBManager:
                 writer.writerow(
                     ["ID", "Provider", "Model", "Success Count", "Avg Latency (ms)", "Last Success"]
                 )
-                records = session.query(ModelSuccessLog).order_by(
-                    ModelSuccessLog.success_count.desc()
-                ).all()
+                records = session.query(ModelSuccessLog).order_by(ModelSuccessLog.success_count.desc()).all()
                 for record in records:
                     writer.writerow(
                         [
@@ -140,9 +136,9 @@ class DBManager:
         with self.SessionLocal() as session:
             try:
                 for provider, model, latency_ms in records:
-                    record = session.query(ModelSuccessLog).filter_by(
-                        provider=provider, model_name=model
-                    ).first()
+                    record = (
+                        session.query(ModelSuccessLog).filter_by(provider=provider, model_name=model).first()
+                    )
                     if record is None:
                         session.add(
                             ModelSuccessLog(

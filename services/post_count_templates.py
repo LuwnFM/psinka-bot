@@ -129,12 +129,10 @@ def pc_parse_period(start_raw: str, end_raw: str) -> PCPeriod:
     end_last = pc_calendar.monthrange(end_year, end_month)[1]
     actual_end_day = min(requested_end_day, end_last)
 
-    start_local = datetime(
-        start_year, start_month, start_day, tzinfo=PC_MOSCOW_TZ
+    start_local = datetime(start_year, start_month, start_day, tzinfo=PC_MOSCOW_TZ)
+    end_exclusive_local = datetime(end_year, end_month, actual_end_day, tzinfo=PC_MOSCOW_TZ) + timedelta(
+        days=1
     )
-    end_exclusive_local = datetime(
-        end_year, end_month, actual_end_day, tzinfo=PC_MOSCOW_TZ
-    ) + timedelta(days=1)
     if end_exclusive_local <= start_local:
         raise PCDateError("конечная дата раньше начальной")
 
@@ -191,12 +189,7 @@ def pc_damerau(left: str, right: str) -> int:
                 matrix[i][j - 1] + 1,
                 matrix[i - 1][j - 1] + cost,
             )
-            if (
-                i > 1
-                and j > 1
-                and left[i - 1] == right[j - 2]
-                and left[i - 2] == right[j - 1]
-            ):
+            if i > 1 and j > 1 and left[i - 1] == right[j - 2] and left[i - 2] == right[j - 1]:
                 matrix[i][j] = min(matrix[i][j], matrix[i - 2][j - 2] + 1)
     return matrix[-1][-1]
 
@@ -249,10 +242,9 @@ def pc_clean_payload(raw: str):
     key = "".join(ch.casefold() for ch in value if ch.isalnum())
     if not key:
         return "", ""
-    display = "".join(
-        ch for ch in value
-        if ch != "_" and not ch.isspace() and ch not in "()[]{}<>"
-    ).strip("-–—_=+.:/\\")
+    display = "".join(ch for ch in value if ch != "_" and not ch.isspace() and ch not in "()[]{}<>").strip(
+        "-–—_=+.:/\\"
+    )
     return key, (display or key).upper()
 
 
@@ -292,7 +284,7 @@ def pc_find_templates(content: str, families):
             if prefix is None:
                 continue
             family, consumed = prefix
-            payload_key, payload_display = pc_clean_payload(segment[positions[consumed - 1] + 1:])
+            payload_key, payload_display = pc_clean_payload(segment[positions[consumed - 1] + 1 :])
             if not payload_key:
                 continue
             location = (segment_match.start() + start, segment_match.end(), family)
@@ -302,22 +294,21 @@ def pc_find_templates(content: str, families):
             canonical = f"{PC_LABELS[family]}-{payload_display}"
 
             display_start = start
-            while (
-                display_start > 0
-                and segment[display_start - 1] in "#([{" + PC_VARIANT_LEFT
-            ):
+            while display_start > 0 and segment[display_start - 1] in "#([{" + PC_VARIANT_LEFT:
                 display_start -= 1
 
             raw_variant = pc_variant(segment, start)
-            found.append(PCTemplateMatch(
-                family=family,
-                payload_key=payload_key,
-                canonical=canonical,
-                raw_variant=raw_variant,
-                exact_surface=pc_is_exact_surface(raw_variant, canonical),
-                span_start=segment_match.start() + display_start,
-                span_end=segment_match.end(),
-            ))
+            found.append(
+                PCTemplateMatch(
+                    family=family,
+                    payload_key=payload_key,
+                    canonical=canonical,
+                    raw_variant=raw_variant,
+                    exact_surface=pc_is_exact_surface(raw_variant, canonical),
+                    span_start=segment_match.start() + display_start,
+                    span_end=segment_match.end(),
+                )
+            )
             break
     return found
 
@@ -361,17 +352,8 @@ def pc_template_body_length(content: str, matches) -> int:
 
 
 def pc_length_enabled_for_family(family: str) -> bool:
-    return bool(
-        PC_COUNT_LENGTH_FOR_ALL_TEMPLATES
-        or family == PC_GM
-    )
+    return bool(PC_COUNT_LENGTH_FOR_ALL_TEMPLATES or family == PC_GM)
 
 
 def pc_any_length_enabled(families) -> bool:
-    return bool(families) and any(
-        pc_length_enabled_for_family(family)
-        for family in families
-    )
-
-
-
+    return bool(families) and any(pc_length_enabled_for_family(family) for family in families)

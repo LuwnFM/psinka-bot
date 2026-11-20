@@ -10,8 +10,13 @@ def test_defaults_for_missing_or_corrupt_payload() -> None:
 
 
 def test_guild_ids_and_role_ids_are_sanitized() -> None:
-    data = {"guilds": {"123": {"categories": ["3", 3, -1, "abc"], "roles": [7, 2, 7]},
-                       "invalid": {"roles": [4]}, "456": "invalid"}}
+    data = {
+        "guilds": {
+            "123": {"categories": ["3", 3, -1, "abc"], "roles": [7, 2, 7]},
+            "invalid": {"roles": [4]},
+            "456": "invalid",
+        }
+    }
     assert pc_normalize_settings(data) == {
         "guilds": {
             "123": {"categories": [3], "roles": [2, 7]},
@@ -21,6 +26,4 @@ def test_guild_ids_and_role_ids_are_sanitized() -> None:
 
 def test_unknown_settings_keys_are_not_persisted() -> None:
     data = {"guilds": {"99": {"categories": [4], "roles": [], "unknown": "ignored"}}}
-    assert pc_normalize_settings(data) == {
-        "guilds": {"99": {"categories": [4], "roles": []}}
-    }
+    assert pc_normalize_settings(data) == {"guilds": {"99": {"categories": [4], "roles": []}}}

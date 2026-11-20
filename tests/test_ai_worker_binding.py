@@ -8,11 +8,7 @@ from types import ModuleType, SimpleNamespace
 
 def _sync_call_nodes() -> list[ast.FunctionDef]:
     tree = ast.parse(Path("psinkamain.py").read_text(encoding="utf-8"))
-    return [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "sync_call"
-    ]
+    return [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "sync_call"]
 
 
 def test_all_provider_worker_closures_bind_loop_parameters() -> None:
@@ -20,7 +16,7 @@ def test_all_provider_worker_closures_bind_loop_parameters() -> None:
     functions = _sync_call_nodes()
     assert len(functions) == 3
     bound_names = [
-        {argument.arg for argument in function.args.args[-len(function.args.defaults):]}
+        {argument.arg for argument in function.args.args[-len(function.args.defaults) :]}
         for function in functions
     ]
     assert {"provider_class", "kwargs"} in bound_names
@@ -31,9 +27,7 @@ def test_fallback_model_workers_keep_their_original_model() -> None:
     """Executing a queued model call must use the model at scheduling time."""
     calls: list[dict] = []
     client = SimpleNamespace(
-        chat=SimpleNamespace(
-            completions=SimpleNamespace(create=lambda **kwargs: calls.append(kwargs))
-        )
+        chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **kwargs: calls.append(kwargs)))
     )
     for function in _sync_call_nodes():
         if not any(arg.arg == "model" for arg in function.args.args):
@@ -54,14 +48,15 @@ def test_batch_request_closure_binds_prompt_before_next_iteration() -> None:
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "try_request"
     ]
     assert len(functions) == 1
-    default_args = {arg.arg for arg in functions[0].args.args[-len(functions[0].args.defaults):]}
+    default_args = {arg.arg for arg in functions[0].args.args[-len(functions[0].args.defaults) :]}
     assert "user_prompt" in default_args
 
 
 def test_g4f_worker_keeps_provider_and_request_after_loop_moves(monkeypatch) -> None:
     """The synchronous g4f fallback freezes provider and request options."""
     functions = [
-        node for node in _sync_call_nodes()
+        node
+        for node in _sync_call_nodes()
         if any(argument.arg == "provider_class" for argument in node.args.args)
     ]
     assert len(functions) == 1
@@ -71,9 +66,7 @@ def test_g4f_worker_keeps_provider_and_request_after_loop_moves(monkeypatch) -> 
     class FakeClient:
         def __init__(self, provider=None) -> None:
             self.chat = SimpleNamespace(
-                completions=SimpleNamespace(
-                    create=lambda **kwargs: recorded.append((provider, kwargs))
-                )
+                completions=SimpleNamespace(create=lambda **kwargs: recorded.append((provider, kwargs)))
             )
 
     package = ModuleType("g4f")

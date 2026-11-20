@@ -16,10 +16,23 @@ def test_logging_configuration_is_explicit_and_idempotent(tmp_path) -> None:
     try:
         configure_logging(err, analysis)
         configure_logging(err, analysis)
-        assert sum(1 for handler in root.handlers if isinstance(handler, logging.FileHandler)
-                   and handler.baseFilename == str(err.resolve())) == 1
-        assert sum(1 for handler in diagnostic.handlers if isinstance(handler, logging.FileHandler)
-                   and handler.baseFilename == str(analysis.resolve())) == 1
+        assert (
+            sum(
+                1
+                for handler in root.handlers
+                if isinstance(handler, logging.FileHandler) and handler.baseFilename == str(err.resolve())
+            )
+            == 1
+        )
+        assert (
+            sum(
+                1
+                for handler in diagnostic.handlers
+                if isinstance(handler, logging.FileHandler)
+                and handler.baseFilename == str(analysis.resolve())
+            )
+            == 1
+        )
         diagnostic.info("log test")
         assert "log test" in analysis.read_text(encoding="utf-8")
     finally:

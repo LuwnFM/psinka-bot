@@ -19,9 +19,7 @@ def test_new_lot_last_bid_and_person_are_retained() -> None:
     text = "Лот 12\nНачальная стоимость: 100\nПоследняя ставка: 350\nОт: Иван"
     result = parse_new_auction_lot(build_info(text))
     assert result is not None
-    assert (result["lot"], result["type"], result["price"], result["bidder"]) == (
-        12, "new", 350, "Иван"
-    )
+    assert (result["lot"], result["type"], result["price"], result["bidder"]) == (12, "new", 350, "Иван")
     assert result["is_auctioneer"] is False
 
 
@@ -33,9 +31,7 @@ def test_returned_lot_not_counted_as_sale() -> None:
 
 
 def test_ancient_lot_keeps_its_separate_price_interpretation() -> None:
-    result = parse_ancient_auction_lot(
-        build_info("Номер лота: 25\nНазвание: Лук\nНачальная стоимость: 700")
-    )
+    result = parse_ancient_auction_lot(build_info("Номер лота: 25\nНазвание: Лук\nНачальная стоимость: 700"))
     assert result is not None
     assert result["type"] == "ancient"
     assert result["lot"] == 25

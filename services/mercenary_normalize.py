@@ -52,7 +52,7 @@ def _rows_to_dicts(rows: list[list[str]], required_header: str) -> list[dict[str
 
     headers = [str(x or "").strip() for x in rows[header_index]]
     data: list[dict[str, str]] = []
-    for row in rows[header_index + 1:]:
+    for row in rows[header_index + 1 :]:
         item: dict[str, str] = {}
         for idx, header in enumerate(headers):
             if header:
@@ -92,5 +92,3 @@ def _clean_profession_targets(targets: list[str], mercs: dict[str, list[str]]) -
         if resolved:
             cleaned.append(resolved)
     return dedupe_preserve_order(cleaned)
-
-

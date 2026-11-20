@@ -14,9 +14,7 @@ from services.dice_format import _dice_paginate, _dice_result_block
 logger = logging.getLogger(__name__)
 
 
-async def _send_ephemeral_error(
-    interaction: disnake.CommandInteraction, message: str
-) -> None:
+async def _send_ephemeral_error(interaction: disnake.CommandInteraction, message: str) -> None:
     """Send errors via the correct Disnake response path.
 
     A slash interaction has exactly one initial response. After a defer or
@@ -42,7 +40,7 @@ async def respond_to_cube(
             title="🎲 ПсИИнка: Справка по кубикам",
             description=dice_engine.get_help_text(),
             color=0xFF8844,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         help_embed.set_footer(text="ПсИИнка бот | Dice Roller 🐾")
         await interaction.response.send_message(embed=help_embed)
@@ -63,7 +61,10 @@ async def respond_to_cube(
             formula_results = grouped[formula_index]
             first = formula_results[0]
             header_lines = [f"*подбрасывает лапой* Формула: `{first.formula_raw}` 🐾"]
-            if first.formula_expanded and first.formula_expanded.strip() != first.formula_raw.split('!', 1)[0].strip():
+            if (
+                first.formula_expanded
+                and first.formula_expanded.strip() != first.formula_raw.split("!", 1)[0].strip()
+            ):
                 header_lines.append(f"Разобрано как: `{first.formula_expanded}`")
             header = "\n".join(header_lines)
             blocks = [_dice_result_block(result) for result in formula_results]
@@ -89,8 +90,7 @@ async def respond_to_cube(
         error_embed = disnake.Embed(
             title="❌ ПсИИнка не понял формулу",
             description=(
-                f"*склонил голову набок* Не могу разобрать: `{shown_formula}` 🐕\n\n"
-                f"**Причина:** {e}"
+                f"*склонил голову набок* Не могу разобрать: `{shown_formula}` 🐕\n\n**Причина:** {e}"
             ),
             color=0xFF4444,
             timestamp=datetime.now(),
@@ -122,7 +122,7 @@ async def respond_to_bark(interaction: disnake.CommandInteraction, bot: disnake.
             title="🐕 Гав! ПсИИнка на связи!",
             description=f"{status} **Пинг:** `{ping_ms} мс` *тяв!*",
             color=0x00FF88 if ping_ms < 100 else 0xFFAA00 if ping_ms < 300 else 0xFF4444,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         embed.add_field(name="📊 Статус", value="Бот работает нормально *виляет хвостом*", inline=False)
         embed.set_footer(text="ПсИИнка бот | Health Check 🐾")
@@ -150,7 +150,7 @@ async def respond_to_status(
             title="📊 ПсИИнка отчитывается",
             description="*виляет хвостом* Вот моя статистика, хозяин! 🐕",
             color=0x00FF88,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
 
         if top:
@@ -161,12 +161,21 @@ async def respond_to_status(
 
             embed.add_field(name="🏆 Топ-10 моделей", value=stats_text, inline=False)
         else:
-            embed.add_field(name="📭 Данные", value="Нет записей. *Гавкни* `/скажи` для начала сбора статистики!",
-                            inline=False)
+            embed.add_field(
+                name="📭 Данные",
+                value="Нет записей. *Гавкни* `/скажи` для начала сбора статистики!",
+                inline=False,
+            )
 
         db_state = "✅ Подключена *гав!*" if db_manager.is_connected() else "⚠️ Отключена *скулит*"
-        data_state = "✅ Есть записи" if await asyncio.to_thread(db_manager.has_data) else "📭 Записей пока нет"
-        embed.add_field(name="🔧 Режим", value=f"Экономия ресурсов (No Warmup)\nБД: {db_state}\nДанные: {data_state}", inline=False)
+        data_state = (
+            "✅ Есть записи" if await asyncio.to_thread(db_manager.has_data) else "📭 Записей пока нет"
+        )
+        embed.add_field(
+            name="🔧 Режим",
+            value=f"Экономия ресурсов (No Warmup)\nБД: {db_state}\nДанные: {data_state}",
+            inline=False,
+        )
         embed.set_footer(text="ПсИИнка бот | Statistics 🐾")
 
         await interaction.edit_original_response(embed=embed)

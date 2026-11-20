@@ -96,9 +96,7 @@ def definitions(source: str) -> dict[str, ast.AST]:
 
 def source_from_main() -> str:
     """Read the original entrypoint from main without importing bot dependencies."""
-    return subprocess.check_output(
-        ["git", "show", f"origin/main:{ORIGINAL_FILE}"], text=True
-    )
+    return subprocess.check_output(["git", "show", f"origin/main:{ORIGINAL_FILE}"], text=True)
 
 
 def test_extracted_logic_matches_original_ast() -> None:
@@ -107,9 +105,9 @@ def test_extracted_logic_matches_original_ast() -> None:
     for path in EXTRACTED_FILES:
         for name, node in definitions(Path(path).read_text(encoding="utf-8")).items():
             assert name in original, f"{name} is not in baseline main"
-            assert _canonical_ast(node) == _canonical_ast(
-                original[name]
-            ), f"Executable logic changed while extracting {name}"
+            assert _canonical_ast(node) == _canonical_ast(original[name]), (
+                f"Executable logic changed while extracting {name}"
+            )
 
 
 def test_slash_command_contract_matches_main() -> None:

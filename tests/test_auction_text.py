@@ -23,7 +23,9 @@ def test_unicode_cleanup_and_normalization() -> None:
 
 def test_nested_embed_strings_flatten_in_order() -> None:
     assert flatten_any_strings({"title": "Лот", "fields": ["Цена", {"value": "500"}]}) == [
-        "Лот", "Цена", "500"
+        "Лот",
+        "Цена",
+        "500",
     ]
 
 

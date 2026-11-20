@@ -79,7 +79,7 @@ class DiceParser:
         if len(command_str) > self.MAX_INPUT_LENGTH:
             raise ValueError(f"Формула слишком длинная: максимум {self.MAX_INPUT_LENGTH} символов.")
 
-        formulas = [part.strip() for part in command_str.split(';') if part.strip()]
+        formulas = [part.strip() for part in command_str.split(";") if part.strip()]
         if not formulas:
             return []
         if len(formulas) > self.MAX_FORMULAS:
@@ -109,24 +109,26 @@ class DiceParser:
 
     def _parse_expression(self, expression: str) -> list[DiceResult]:
         comment = ""
-        if '!' in expression:
-            expression, comment = expression.split('!', 1)
+        if "!" in expression:
+            expression, comment = expression.split("!", 1)
             expression = expression.strip()
             comment = comment.strip()
             if len(comment) > self.MAX_COMMENT_LENGTH:
-                raise ValueError(f"Комментарий после `!` должен быть не длиннее {self.MAX_COMMENT_LENGTH} символов.")
+                raise ValueError(
+                    f"Комментарий после `!` должен быть не длиннее {self.MAX_COMMENT_LENGTH} символов."
+                )
         if not expression:
             raise ValueError("Перед комментарием `!` должна быть формула броска.")
 
         expanded = self._expand_alias(expression)
 
         num_sets = 1
-        set_match = re.match(r'^(\d+)\s+(.+)$', expanded)
+        set_match = re.match(r"^(\d+)\s+(.+)$", expanded)
         if set_match:
             possible_sets = int(set_match.group(1))
             remainder = set_match.group(2).strip()
             first_token = remainder.split(maxsplit=1)[0].lower() if remainder else ""
-            if 'd' in remainder.lower() or first_token in self.aliases:
+            if "d" in remainder.lower() or first_token in self.aliases:
                 if not 1 <= possible_sets <= self.MAX_SETS:
                     raise ValueError(f"Количество наборов должно быть от 1 до {self.MAX_SETS}.")
                 num_sets = possible_sets
@@ -143,10 +145,10 @@ class DiceParser:
         return results
 
     def _extract_global_modifier(self, expression: str) -> tuple[str, tuple[str, float] | None]:
-        match = re.search(r'\s*([*/])\s*(-?\d+(?:\.\d+)?)\s*$', expression)
+        match = re.search(r"\s*([*/])\s*(-?\d+(?:\.\d+)?)\s*$", expression)
         if not match:
             return expression.strip(), None
-        core = expression[:match.start()].strip()
+        core = expression[: match.start()].strip()
         if not core:
             raise ValueError("Перед `*` или `/` должна быть формула.")
         return core, (match.group(1), float(match.group(2)))
@@ -161,15 +163,15 @@ class DiceParser:
         saw_content = False
 
         for ch in expression:
-            if ch in '+-':
-                text = ''.join(current).strip()
+            if ch in "+-":
+                text = "".join(current).strip()
                 if text:
                     terms.append((sign, text))
                     current = []
-                    sign = 1 if ch == '+' else -1
+                    sign = 1 if ch == "+" else -1
                     saw_content = True
                 elif not saw_content and not terms:
-                    sign = 1 if ch == '+' else -1
+                    sign = 1 if ch == "+" else -1
                     saw_content = True
                 else:
                     raise ValueError("Некорректная последовательность `+`/`-` в формуле.")
@@ -178,7 +180,7 @@ class DiceParser:
                 if not ch.isspace():
                     saw_content = True
 
-        text = ''.join(current).strip()
+        text = "".join(current).strip()
         if not text:
             raise ValueError("Формула не может заканчиваться оператором `+` или `-`.")
         terms.append((sign, text))
@@ -187,13 +189,19 @@ class DiceParser:
     def _parse_flags(self, tail: str, num_sides: int) -> dict[str, tuple[str, int]]:
         flags: dict[str, tuple[str, int]] = {}
         pos = 0
-        pattern = re.compile(r'(ie|ir|kh|kl|dh|dl|e|r|k|d|t)\s*(\d+)?', re.IGNORECASE)
+        pattern = re.compile(r"(ie|ir|kh|kl|dh|dl|e|r|k|d|t)\s*(\d+)?", re.IGNORECASE)
         category_for = {
-            'r': 'reroll', 'ir': 'reroll',
-            'e': 'explode', 'ie': 'explode',
-            'k': 'keepdrop', 'kh': 'keepdrop', 'kl': 'keepdrop',
-            'd': 'keepdrop', 'dl': 'keepdrop', 'dh': 'keepdrop',
-            't': 'target',
+            "r": "reroll",
+            "ir": "reroll",
+            "e": "explode",
+            "ie": "explode",
+            "k": "keepdrop",
+            "kh": "keepdrop",
+            "kl": "keepdrop",
+            "d": "keepdrop",
+            "dl": "keepdrop",
+            "dh": "keepdrop",
+            "t": "target",
         }
 
         while pos < len(tail):
@@ -213,14 +221,20 @@ class DiceParser:
             flag = match.group(1).lower()
             category = category_for[flag]
             if category in flags:
-                raise ValueError(f"Нельзя указывать два модификатора одного типа в одном кубике: `{tail.strip()}`.")
+                raise ValueError(
+                    f"Нельзя указывать два модификатора одного типа в одном кубике: `{tail.strip()}`."
+                )
 
-            default_value = num_sides if category in {'explode', 'target'} else 1
+            default_value = num_sides if category in {"explode", "target"} else 1
             value = int(match.group(2)) if match.group(2) is not None else default_value
-            if category in {'reroll', 'explode', 'target'} and not 1 <= value <= num_sides:
-                raise ValueError(f"Значение `{flag}{value}` должно быть от 1 до {num_sides} для d{num_sides}.")
-            if flag == 'ir' and value >= num_sides:
-                raise ValueError(f"`ir{value}` для d{num_sides} никогда не сможет завершиться: порог должен быть ниже {num_sides}.")
+            if category in {"reroll", "explode", "target"} and not 1 <= value <= num_sides:
+                raise ValueError(
+                    f"Значение `{flag}{value}` должно быть от 1 до {num_sides} для d{num_sides}."
+                )
+            if flag == "ir" and value >= num_sides:
+                raise ValueError(
+                    f"`ir{value}` для d{num_sides} никогда не сможет завершиться: порог должен быть ниже {num_sides}."
+                )
 
             flags[category] = (flag, value)
             pos = end
@@ -229,21 +243,25 @@ class DiceParser:
 
     def _parse_term(self, text: str, sign: int) -> DiceTermResult:
         term = DiceTermResult(text, sign)
-        number_match = re.fullmatch(r'\d+(?:\.\d+)?', text.strip())
+        number_match = re.fullmatch(r"\d+(?:\.\d+)?", text.strip())
         if number_match:
             term.kind = "number"
             term.number_value = float(number_match.group(0))
             term.subtotal = term.number_value
             return term
 
-        dice_match = re.fullmatch(r'(\d*)d(\d+)(.*)', text.strip(), re.IGNORECASE)
+        dice_match = re.fullmatch(r"(\d*)d(\d+)(.*)", text.strip(), re.IGNORECASE)
         if not dice_match:
-            raise ValueError(f"Не удалось разобрать часть `{text}`. Используйте вид `XdY`, число или их сумму.")
+            raise ValueError(
+                f"Не удалось разобрать часть `{text}`. Используйте вид `XdY`, число или их сумму."
+            )
 
         num_dice = int(dice_match.group(1) or 1)
         num_sides = int(dice_match.group(2))
         if not 1 <= num_dice <= self.MAX_DICE_PER_SET:
-            raise ValueError(f"В одном кубиковом терме можно бросить от 1 до {self.MAX_DICE_PER_SET} кубиков.")
+            raise ValueError(
+                f"В одном кубиковом терме можно бросить от 1 до {self.MAX_DICE_PER_SET} кубиков."
+            )
         if not 2 <= num_sides <= self.MAX_SIDES:
             raise ValueError(f"Количество граней должно быть от 2 до {self.MAX_SIDES}.")
 
@@ -256,10 +274,10 @@ class DiceParser:
         term.all_rolls = rolls.copy()
         working_rolls = rolls.copy()
 
-        reroll = flags.get('reroll')
+        reroll = flags.get("reroll")
         if reroll:
             flag, threshold = reroll
-            infinite = flag == 'ir'
+            infinite = flag == "ir"
             budget = self.MAX_EXTRA_ROLLS
             for index, original in enumerate(list(working_rolls)):
                 if original > threshold or budget <= 0:
@@ -276,15 +294,17 @@ class DiceParser:
                 if sequence:
                     term.reroll_sequences.append((index, sequence))
             if budget == 0 and infinite and any(value <= threshold for value in working_rolls):
-                term.warnings.append(f"Достигнут защитный лимит {self.MAX_EXTRA_ROLLS} дополнительных перебросов.")
+                term.warnings.append(
+                    f"Достигнут защитный лимит {self.MAX_EXTRA_ROLLS} дополнительных перебросов."
+                )
             if term.reroll_sequences:
                 count = sum(len(seq) for _, seq in term.reroll_sequences)
                 term.details.append(f"переброс ≤{threshold}: {count}")
 
-        explode = flags.get('explode')
+        explode = flags.get("explode")
         if explode:
             flag, threshold = explode
-            infinite = flag == 'ie'
+            infinite = flag == "ie"
             to_check = list(working_rolls)
             budget = self.MAX_EXTRA_ROLLS
             while to_check and budget > 0:
@@ -298,12 +318,14 @@ class DiceParser:
                     if infinite and new_roll >= threshold:
                         to_check.append(new_roll)
             if budget == 0 and infinite and to_check:
-                term.warnings.append(f"Достигнут защитный лимит {self.MAX_EXTRA_ROLLS} дополнительных взрывов.")
+                term.warnings.append(
+                    f"Достигнут защитный лимит {self.MAX_EXTRA_ROLLS} дополнительных взрывов."
+                )
             if term.exploded_rolls:
                 term.details.append(f"взрыв ≥{threshold}: +{len(term.exploded_rolls)}")
 
         selected_rolls = working_rolls.copy()
-        keepdrop = flags.get('keepdrop')
+        keepdrop = flags.get("keepdrop")
         if keepdrop:
             flag, amount = keepdrop
             if amount > len(selected_rolls):
@@ -311,26 +333,30 @@ class DiceParser:
                     f"`{flag}{amount}` нельзя применить: после перебросов/взрывов доступно только {len(selected_rolls)} кубиков."
                 )
             indexed = list(enumerate(selected_rolls))
-            if flag in ('k', 'kh'):
-                keep_indexes = {
-                    idx for idx, _ in sorted(indexed, key=lambda x: x[1], reverse=True)[:amount]
-                } if amount else set()
+            if flag in ("k", "kh"):
+                keep_indexes = (
+                    {idx for idx, _ in sorted(indexed, key=lambda x: x[1], reverse=True)[:amount]}
+                    if amount
+                    else set()
+                )
                 term.details.append(f"оставлено лучших: {amount}")
-            elif flag == 'kl':
-                keep_indexes = {
-                    idx for idx, _ in sorted(indexed, key=lambda x: x[1])[:amount]
-                } if amount else set()
+            elif flag == "kl":
+                keep_indexes = (
+                    {idx for idx, _ in sorted(indexed, key=lambda x: x[1])[:amount]} if amount else set()
+                )
                 term.details.append(f"оставлено худших: {amount}")
-            elif flag in ('d', 'dl'):
-                drop_indexes = {
-                    idx for idx, _ in sorted(indexed, key=lambda x: x[1])[:amount]
-                } if amount else set()
+            elif flag in ("d", "dl"):
+                drop_indexes = (
+                    {idx for idx, _ in sorted(indexed, key=lambda x: x[1])[:amount]} if amount else set()
+                )
                 keep_indexes = {idx for idx, _ in indexed if idx not in drop_indexes}
                 term.details.append(f"сброшено худших: {amount}")
             else:  # dh
-                drop_indexes = {
-                    idx for idx, _ in sorted(indexed, key=lambda x: x[1], reverse=True)[:amount]
-                } if amount else set()
+                drop_indexes = (
+                    {idx for idx, _ in sorted(indexed, key=lambda x: x[1], reverse=True)[:amount]}
+                    if amount
+                    else set()
+                )
                 keep_indexes = {idx for idx, _ in indexed if idx not in drop_indexes}
                 term.details.append(f"сброшено лучших: {amount}")
 
@@ -340,7 +366,7 @@ class DiceParser:
 
         term.final_rolls = selected_rolls.copy()
 
-        target = flags.get('target')
+        target = flags.get("target")
         if target:
             _, target_value = target
             term.target = target_value
@@ -348,9 +374,7 @@ class DiceParser:
             term.failures = len(selected_rolls) - term.successes
             term.botches = sum(1 for value in selected_rolls if value == 1)
             term.subtotal = float(term.successes)
-            term.details.append(
-                f"цель ≥{target_value}: {term.successes} успех., {term.failures} провал."
-            )
+            term.details.append(f"цель ≥{target_value}: {term.successes} успех., {term.failures} провал.")
         else:
             term.subtotal = float(sum(selected_rolls))
 
@@ -366,7 +390,7 @@ class DiceParser:
         total_base_dice = 0
         for sign, text in additive_terms:
             term = self._parse_term(text, sign)
-            if term.kind == 'dice':
+            if term.kind == "dice":
                 total_base_dice += term.num_dice
             parsed_terms.append(term)
 
@@ -381,7 +405,7 @@ class DiceParser:
         if global_modifier:
             op, value = global_modifier
             before = res.total
-            if op == '*':
+            if op == "*":
                 res.total *= value
                 res.global_modifier = (op, value, before)
             elif value == 0:
@@ -391,7 +415,7 @@ class DiceParser:
                 res.global_modifier = (op, value, before)
 
         for term in parsed_terms:
-            if term.kind != 'dice':
+            if term.kind != "dice":
                 continue
             res.dice_rolls.extend(term.final_rolls)
             res.all_rolls.extend(term.all_rolls)
@@ -447,5 +471,3 @@ class DiceParser:
 **Ограничения:** до 100 базовых кубиков суммарно на набор, до 100 граней, до 20 наборов и до 4 формул через `;`.
 Неверные или неоднозначные части формулы теперь отклоняются с понятной причиной вместо молчаливого исправления.
 """
-
-

@@ -18,6 +18,7 @@ from groq import Groq
 from openai import OpenAI
 
 from core.config import BotSettings, safe_int_env
+from core.logging_setup import configure_logging
 from core.paths import (
     ANALYSIS_LOG_FILE as CORE_ANALYSIS_LOG_FILE,
     BOT_ERROR_LOG,
@@ -27,6 +28,12 @@ from core.paths import (
     ROOT_DIR,
     initialize_paths,
 )
+from db.session import init_db
+from handlers.utility_commands import respond_to_bark, respond_to_cube, respond_to_status
+from repositories import jail as jail_storage
+from repositories.model_success import DBManager
+from repositories.pending_tests import PendingTestManager
+from repositories.post_count_settings import PCSettingsStore
 from services.auction_lots import (
     parse_ancient_auction_lot,
     parse_new_auction_lot,
@@ -40,6 +47,18 @@ from services.auction_text import (
     norm_auction_text,
 )
 from services.dice import DiceParser
+from services.jail_time import normalize_jail_datetime
+from services.mercenary_normalize import (
+    _clean_profession_targets,
+    _resolve_existing_profession_name,
+    _rows_to_dicts,
+    _to_int,
+    _yes,
+    dedupe_preserve_order,
+    normalize_lookup_text,
+    split_multi_field,
+)
+from services.mercenary_workbook import read_mercenary_sheets
 from services.post_count_metrics import (
     PC_LONG_POST_MIN_CHARS,
     pc_apply_content,
@@ -68,25 +87,6 @@ from services.post_count_templates import (
     pc_word_pattern,
 )
 from services.spreadsheets import make_xlsx_file
-from core.logging_setup import configure_logging
-from db.session import init_db
-from handlers.utility_commands import respond_to_bark, respond_to_cube, respond_to_status
-from repositories import jail as jail_storage
-from repositories.model_success import DBManager
-from repositories.pending_tests import PendingTestManager
-from repositories.post_count_settings import PCSettingsStore
-from services.jail_time import normalize_jail_datetime
-from services.mercenary_normalize import (
-    _clean_profession_targets,
-    _resolve_existing_profession_name,
-    _rows_to_dicts,
-    _to_int,
-    _yes,
-    dedupe_preserve_order,
-    normalize_lookup_text,
-    split_multi_field,
-)
-from services.mercenary_workbook import read_mercenary_sheets
 
 try:
     from g4f.client import AsyncClient as G4FAsyncClient
@@ -122,9 +122,9 @@ ai_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 def check_tokens():
     """Проверяет наличие всех необходимых токенов"""
     tokens = {
-        'DISCORD_TOKEN': os.getenv('DISCORD_TOKEN'),
-        'GROQ_TOKEN': os.getenv('GROQ_TOKEN'),
-        'OPENR_TOKEN': os.getenv('OPENR_TOKEN'),
+        "DISCORD_TOKEN": os.getenv("DISCORD_TOKEN"),
+        "GROQ_TOKEN": os.getenv("GROQ_TOKEN"),
+        "OPENR_TOKEN": os.getenv("OPENR_TOKEN"),
     }
 
     for name, value in tokens.items():
@@ -218,8 +218,11 @@ OR_PRIORITY_MODELS = [
 ]
 
 FREE_PROXY_LIST = [
-    "http://103.152.112.162:80", "http://185.217.136.234:8080",
-    "http://47.88.29.109:8080", "http://103.167.135.110:80", "http://185.162.230.55:80",
+    "http://103.152.112.162:80",
+    "http://185.217.136.234:8080",
+    "http://47.88.29.109:8080",
+    "http://103.167.135.110:80",
+    "http://185.162.230.55:80",
 ]
 
 TEST_PROMPT = "Ответь только словом ок"
@@ -376,7 +379,7 @@ def get_db_combinations(provider: str | None = None) -> list[tuple[str, str]]:
 
 
 async def fetch_groq_model_ids() -> list[str]:
-    token = os.getenv('GROQ_TOKEN')
+    token = os.getenv("GROQ_TOKEN")
     if not token:
         return []
     try:
@@ -387,7 +390,7 @@ async def fetch_groq_model_ids() -> list[str]:
                     logger.warning(f"Groq models list status: {response.status}")
                     return []
                 data = await response.json()
-                return [item.get('id') for item in data.get('data', []) if item.get('id')]
+                return [item.get("id") for item in data.get("data", []) if item.get("id")]
     except Exception as e:
         logger.warning(f"Не удалось получить живой список Groq моделей: {e}")
         return []
@@ -395,7 +398,7 @@ async def fetch_groq_model_ids() -> list[str]:
 
 async def fetch_openrouter_model_ids(free_only: bool = True) -> list[str]:
     headers = {}
-    token = os.getenv('OPENR_TOKEN')
+    token = os.getenv("OPENR_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
@@ -406,15 +409,15 @@ async def fetch_openrouter_model_ids(free_only: bool = True) -> list[str]:
                     return []
                 data = await response.json()
                 models = []
-                for item in data.get('data', []):
-                    model_id = item.get('id')
+                for item in data.get("data", []):
+                    model_id = item.get("id")
                     if not model_id:
                         continue
-                    if free_only and not model_id.endswith(':free'):
-                        pricing = item.get('pricing') or {}
-                        prompt_price = str(pricing.get('prompt', ''))
-                        completion_price = str(pricing.get('completion', ''))
-                        if prompt_price not in {'0', '0.0'} or completion_price not in {'0', '0.0'}:
+                    if free_only and not model_id.endswith(":free"):
+                        pricing = item.get("pricing") or {}
+                        prompt_price = str(pricing.get("prompt", ""))
+                        completion_price = str(pricing.get("completion", ""))
+                        if prompt_price not in {"0", "0.0"} or completion_price not in {"0", "0.0"}:
                             continue
                     models.append(model_id)
                 return models
@@ -447,9 +450,12 @@ async def get_all_test_combinations_live() -> list[tuple[str, str]]:
     combos.extend(await get_all_groq_combinations_live())
     combos.extend(await get_all_openrouter_combinations_live())
     return dedupe_combinations(combos)
+
+
 # ============================================================================
 # 🛠 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================================
+
 
 async def fetch_free_proxies(count: int = 20) -> list[str]:
     """Загружает свежие HTTP-прокси. Не используется по умолчанию, только если /скажи прокси=Да."""
@@ -459,7 +465,7 @@ async def fetch_free_proxies(count: int = 20) -> list[str]:
             async with session.get(url, timeout=10) as response:
                 if response.status == 200:
                     text = await response.text()
-                    proxies = [f"http://{p.strip()}" for p in text.split('\n') if p.strip() and ':' in p]
+                    proxies = [f"http://{p.strip()}" for p in text.split("\n") if p.strip() and ":" in p]
                     proxies = [p for p in proxies if validate_proxy_format(p)]
                     if proxies:
                         logger.info(f"🌐 Обновлён список прокси: {len(proxies)} шт.")
@@ -473,11 +479,11 @@ def validate_proxy_format(proxy: str) -> bool:
     """Проверяет формат прокси: http(s)/socks + host:port."""
     if not proxy:
         return False
-    if not proxy.startswith(('http://', 'https://', 'socks4://', 'socks5://')):
+    if not proxy.startswith(("http://", "https://", "socks4://", "socks5://")):
         return False
     try:
-        host_port = proxy.split('://')[-1]
-        host, port = host_port.rsplit(':', 1)
+        host_port = proxy.split("://")[-1]
+        host, port = host_port.rsplit(":", 1)
         return bool(host) and port.isdigit() and 1 <= int(port) <= 65535
     except Exception:
         return False
@@ -520,7 +526,9 @@ async def get_random_proxy_async(use_proxy: bool) -> str | None:
     return random.choice(proxies) if proxies else None
 
 
-async def check_access(interaction: disnake.CommandInteraction, allowed_role_names: list[str] = ["Псарь"]) -> bool:
+async def check_access(
+    interaction: disnake.CommandInteraction, allowed_role_names: list[str] = ["Псарь"]
+) -> bool:
     if interaction.author.id == OWNER_ID:
         return True
 
@@ -534,13 +542,15 @@ async def check_access(interaction: disnake.CommandInteraction, allowed_role_nam
     if any(role_name in user_role_names for role_name in allowed_role_names):
         return True
 
-    await interaction.response.send_message(f"❌ Гав! Нет доступа (нужна роль: {', '.join(allowed_role_names)}).",
-                                            ephemeral=True)
+    await interaction.response.send_message(
+        f"❌ Гав! Нет доступа (нужна роль: {', '.join(allowed_role_names)}).", ephemeral=True
+    )
     return False
 
 
 def create_progress_bar(current: int, total: int, length: int = 10) -> str:
-    if total == 0: return "░" * length
+    if total == 0:
+        return "░" * length
     filled = int(length * current / total)
     return "█" * filled + "░" * (length - filled)
 
@@ -550,8 +560,8 @@ def strip_think_content(text: str) -> str:
     if not text:
         return text
 
-    cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    cleaned = re.sub(r'</?think>', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"</?think>", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.lstrip()
 
     return cleaned if cleaned.strip() else text
@@ -561,9 +571,15 @@ def strip_think_content(text: str) -> str:
 # 🌐 ЗАПРОСЫ К МОДЕЛЯМ (ИСПРАВЛЕНО)
 # ============================================================================
 
-async def make_g4f_request(provider_name: str, model: str, prompt: str,
-                           timeout: float = 45.0, system_prompt: str = None,
-                           proxy_url: str = None) -> tuple[bool, str, float]:
+
+async def make_g4f_request(
+    provider_name: str,
+    model: str,
+    prompt: str,
+    timeout: float = 45.0,
+    system_prompt: str = None,
+    proxy_url: str = None,
+) -> tuple[bool, str, float]:
     """Запрос к актуальному g4f через AsyncClient с сохранением каскадного fallback."""
     start = time.time()
 
@@ -630,6 +646,7 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
                 def sync_call(provider_class=provider_class, kwargs=kwargs):
                     # Freeze the provider/request for worker threads that may outlive a timeout.
                     from g4f.client import Client as G4FClient
+
                     client = G4FClient(provider=provider_class) if provider_class else G4FClient()
                     return client.chat.completions.create(**kwargs)
 
@@ -641,9 +658,9 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
             if response is None:
                 raise Exception("Пустой ответ (None)")
 
-            if hasattr(response, 'choices') and response.choices:
+            if hasattr(response, "choices") and response.choices:
                 choice = response.choices[0]
-                if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                if hasattr(choice, "message") and hasattr(choice.message, "content"):
                     answer = choice.message.content
                     if answer and str(answer).strip():
                         answer = strip_think_content(str(answer).strip())
@@ -663,7 +680,9 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
         except Exception as e:
             err_str = str(e).lower()
 
-            if any(kw in err_str for kw in ["api_key", "unauthorized", "authentication", "401", "missingauth"]):
+            if any(
+                kw in err_str for kw in ["api_key", "unauthorized", "authentication", "401", "missingauth"]
+            ):
                 logger.debug(f"⚠️ G4F {display_name} требует авторизацию")
                 continue
 
@@ -682,10 +701,11 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
     return False, "Все провайдеры G4F недоступны", elapsed
 
 
-async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.0,
-                                 system_prompt: str = None, proxy_url: str = None) -> tuple[bool, str, float]:
+async def test_openrouter_single(
+    models: list, prompt: str, timeout: float = 45.0, system_prompt: str = None, proxy_url: str = None
+) -> tuple[bool, str, float]:
     """Запрос к OpenRouter с одним контролируемым retry для временных ошибок."""
-    openrouter_token = os.getenv('OPENR_TOKEN')
+    openrouter_token = os.getenv("OPENR_TOKEN")
     if not openrouter_token:
         return False, "No OPENR_TOKEN", 0.0
 
@@ -717,6 +737,7 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
     for model in models:
         for attempt in range(2):
             try:
+
                 def sync_call(model=model):
                     # Late-running workers must keep this retry's original model ID.
                     return client.chat.completions.create(
@@ -759,9 +780,7 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
                 logger.info(f"⚠️ OpenRouter/{model}: HTTP {status_label} — {detail}")
 
                 is_timeout = (
-                    isinstance(e, asyncio.TimeoutError)
-                    or "timeout" in err_str
-                    or "timed out" in err_str
+                    isinstance(e, asyncio.TimeoutError) or "timeout" in err_str or "timed out" in err_str
                 )
                 is_not_found = (
                     status_num == 404
@@ -769,14 +788,8 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
                     or "invalid model" in err_str
                     or "not found" in err_str
                 )
-                is_rate_limit = (
-                    status_num == 429
-                    or "429" in err_str
-                    or "rate limit" in err_str
-                )
-                is_server_error = (
-                    status_num is not None and 500 <= status_num <= 599
-                )
+                is_rate_limit = status_num == 429 or "429" in err_str or "rate limit" in err_str
+                is_server_error = status_num is not None and 500 <= status_num <= 599
 
                 # 404/невалидная модель — сразу следующая модель, без ожидания.
                 if is_not_found:
@@ -786,9 +799,7 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
                 if (is_rate_limit or is_server_error) and attempt == 0:
                     delay = 2.0 if is_rate_limit else 1.0
                     reason = "429" if is_rate_limit else f"HTTP {status_label}"
-                    logger.info(
-                        f"↻ OpenRouter/{model}: один повтор после {reason}, ожидание {delay:.0f}с"
-                    )
+                    logger.info(f"↻ OpenRouter/{model}: один повтор после {reason}, ожидание {delay:.0f}с")
                     await asyncio.sleep(delay)
                     continue
 
@@ -801,21 +812,25 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
     elapsed = time.time() - start
     return False, "Все модели OpenRouter недоступны", elapsed
 
-async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
-                           system_prompt: str = None, return_model_name: bool = False) -> tuple[bool, str, float]:
+
+async def test_groq_single(
+    models: list,
+    prompt: str,
+    timeout: float = 45.0,
+    system_prompt: str = None,
+    return_model_name: bool = False,
+) -> tuple[bool, str, float]:
     """
     Запрос к Groq с ВАШИМ именем переменной GROQ_TOKEN
     """
-    groq_token = os.getenv('GROQ_TOKEN')  # ✅ ВАША переменная
+    groq_token = os.getenv("GROQ_TOKEN")  # ✅ ВАША переменная
     if not groq_token:
         return False, "No GROQ_TOKEN", 0.0
 
     if isinstance(models, str):
         models = [models]
     models = [
-        str(model).strip()
-        for model in models
-        if str(model).strip() and not is_model_excluded("Groq", model)
+        str(model).strip() for model in models if str(model).strip() and not is_model_excluded("Groq", model)
     ]
     if not models:
         return False, "Все модели Groq исключены из маршрута", 0.0
@@ -830,6 +845,7 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
 
     for model in models:
         try:
+
             def sync_call(model=model):
                 return client.chat.completions.create(
                     model=model,
@@ -837,10 +853,7 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
                     temperature=0.5,
                 )
 
-            response = await asyncio.wait_for(
-                asyncio.to_thread(sync_call),
-                timeout=timeout + 5
-            )
+            response = await asyncio.wait_for(asyncio.to_thread(sync_call), timeout=timeout + 5)
 
             if response.choices and len(response.choices) > 0:
                 elapsed = time.time() - start
@@ -880,10 +893,16 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
     return False, "Все модели Groq недоступны", elapsed
 
 
-async def route_model_request(provider: str, model: str, prompt: str, *,
-                              timeout: float = 45.0, system_prompt: str = None,
-                              proxy_url: str = None,
-                              return_model_name: bool = False) -> tuple[bool, str, float]:
+async def route_model_request(
+    provider: str,
+    model: str,
+    prompt: str,
+    *,
+    timeout: float = 45.0,
+    system_prompt: str = None,
+    proxy_url: str = None,
+    return_model_name: bool = False,
+) -> tuple[bool, str, float]:
     """Единая точка маршрутизации команд к Groq, OpenRouter и G4F."""
     provider = normalize_provider_name(provider)
     model = str(model or "").strip()
@@ -893,18 +912,27 @@ async def route_model_request(provider: str, model: str, prompt: str, *,
 
     if provider == "OpenRouter":
         return await test_openrouter_single(
-            [model], prompt, timeout=timeout,
-            system_prompt=system_prompt, proxy_url=proxy_url,
+            [model],
+            prompt,
+            timeout=timeout,
+            system_prompt=system_prompt,
+            proxy_url=proxy_url,
         )
     if provider == "Groq":
         return await test_groq_single(
-            [model], prompt, timeout=timeout,
+            [model],
+            prompt,
+            timeout=timeout,
             system_prompt=system_prompt,
             return_model_name=return_model_name,
         )
     return await make_g4f_request(
-        provider, model, prompt, timeout=timeout,
-        system_prompt=system_prompt, proxy_url=proxy_url,
+        provider,
+        model,
+        prompt,
+        timeout=timeout,
+        system_prompt=system_prompt,
+        proxy_url=proxy_url,
     )
 
 
@@ -924,6 +952,7 @@ dice_engine = DiceParser()
 # ============================================================================
 # 💬 КОМАНДЫ (СОБАЧИЙ СТИЛЬ)
 # ============================================================================
+
 
 def _queue_add(queue, seen, provider, model):
     provider = normalize_provider_name(provider)
@@ -984,10 +1013,11 @@ async def get_analysis_priority_queue():
 
 
 @bot.slash_command(name="скажи", description="Запрос к ИИ")
-async def slash_say(interaction: disnake.CommandInteraction,
-                    вопрос: str = commands.Param(min_length=1, description="Ваш вопрос или запрос"),
-                    прокси: str = commands.Param(choices=["Да", "Нет"], default="Нет",
-                                                 description="Использовать прокси")):
+async def slash_say(
+    interaction: disnake.CommandInteraction,
+    вопрос: str = commands.Param(min_length=1, description="Ваш вопрос или запрос"),
+    прокси: str = commands.Param(choices=["Да", "Нет"], default="Нет", description="Использовать прокси"),
+):
     if not await check_access(interaction):
         return
 
@@ -998,7 +1028,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
             title="🐕 ПсИИнка слушает...",
             description="*виляет хвостом* Сейчас прогавкаю ответ, хозяин! ⏳",
             color=0xFF8844,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         status_embed.add_field(name="📡 Статус", value="ПсИИнка принюхивается к нейросети...", inline=False)
         status_embed.set_footer(text="Может занять до 45 секунд 🐾")
@@ -1015,20 +1045,28 @@ async def slash_say(interaction: disnake.CommandInteraction,
         final_prov = "?"
         final_mod = "?"
         final_lat = 0.0
-        use_proxy = (прокси == "Да")
+        use_proxy = прокси == "Да"
         proxy_url = await get_random_proxy_async(use_proxy)
         proxy_display = "Да" if proxy_url else "Нет"
         used_temp_file = False
 
         for idx, (prov, mod) in enumerate(queue):
             try:
-                status_embed.description = f"*рычит на нейросети* Попытка {idx + 1}/{len(queue)}: `{prov}` / `{mod}`"
-                status_embed.set_field_at(0, name="📡 Статус", value=f"ПсИИнка лает на **{prov}**... 🐕", inline=False)
+                status_embed.description = (
+                    f"*рычит на нейросети* Попытка {idx + 1}/{len(queue)}: `{prov}` / `{mod}`"
+                )
+                status_embed.set_field_at(
+                    0, name="📡 Статус", value=f"ПсИИнка лает на **{prov}**... 🐕", inline=False
+                )
                 await msg.edit(embed=status_embed)
 
                 ok, ans, lat = await route_model_request(
-                    prov, mod, вопрос, timeout=45.0,
-                    system_prompt=system_prompt, proxy_url=proxy_url,
+                    prov,
+                    mod,
+                    вопрос,
+                    timeout=45.0,
+                    system_prompt=system_prompt,
+                    proxy_url=proxy_url,
                 )
 
                 if ok and ans and len(ans.strip()) > 0:  # ✅ Проверка на пустой ответ
@@ -1054,11 +1092,13 @@ async def slash_say(interaction: disnake.CommandInteraction,
                 title="❌ ПсИИнка устал...",
                 description="*повесил уши* Ни одна нейросеть не ответила, хозяин... 🐕",
                 color=0xFF4444,
-                timestamp=datetime.now()
+                timestamp=datetime.now(),
             )
-            error_embed.add_field(name="💡 Что делать?",
-                                  value="• Проверь токены в .env 🔑\n• Проверь интернет 🌐\n• Попробуй позже 💤",
-                                  inline=False)
+            error_embed.add_field(
+                name="💡 Что делать?",
+                value="• Проверь токены в .env 🔑\n• Проверь интернет 🌐\n• Попробуй позже 💤",
+                inline=False,
+            )
             await msg.edit(embed=error_embed)
             return
 
@@ -1074,10 +1114,10 @@ async def slash_say(interaction: disnake.CommandInteraction,
         MAX_CHUNK_SIZE = 1900
         chunks = []
 
-        first_chunk = header_text + final_response[:MAX_CHUNK_SIZE - len(header_text)]
+        first_chunk = header_text + final_response[: MAX_CHUNK_SIZE - len(header_text)]
         chunks.append(first_chunk)
 
-        remaining = final_response[MAX_CHUNK_SIZE - len(header_text):]
+        remaining = final_response[MAX_CHUNK_SIZE - len(header_text) :]
         while remaining:
             chunks.append(remaining[:MAX_CHUNK_SIZE])
             remaining = remaining[MAX_CHUNK_SIZE:]
@@ -1088,7 +1128,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
             await interaction.channel.send(chunks[i], reference=first_msg, mention_author=False)
 
     except Exception as e:
-        if 'semaphore_acquired' in locals() and semaphore_acquired:
+        if "semaphore_acquired" in locals() and semaphore_acquired:
             ai_semaphore.release()
         logger.error(f"Critical error in /say: {e}", exc_info=True)
         err_msg = f"❌ Гав! Ошибка: {str(e)[:100]}"
@@ -1099,14 +1139,19 @@ async def slash_say(interaction: disnake.CommandInteraction,
 
 
 @bot.slash_command(name="кубик", description="Бросок кубиков")
-async def slash_cube(interaction: disnake.CommandInteraction,
-                     формула: str | None = commands.Param(
-                         description="Формула броска (например: 1d6+1d4 или dndstats)", default=None)):
+async def slash_cube(
+    interaction: disnake.CommandInteraction,
+    формула: str | None = commands.Param(
+        description="Формула броска (например: 1d6+1d4 или dndstats)", default=None
+    ),
+):
     await respond_to_cube(interaction, формула, dice_engine)
+
 
 @bot.slash_command(name="погавкай", description="Проверка пинга бота")
 async def slash_bark(interaction: disnake.CommandInteraction):
     await respond_to_bark(interaction, bot)
+
 
 @bot.slash_command(name="статус", description="Статистика использования моделей")
 async def slash_status(interaction: disnake.CommandInteraction):
@@ -1117,9 +1162,15 @@ async def slash_status(interaction: disnake.CommandInteraction):
 # 🧪 ТЕСТИРОВАНИЕ (ОБНОВЛЁННОЕ — МАССОВОЕ ПО ПРОВАЙДЕРАМ)
 # ============================================================================
 
-async def test_provider_models(provider: str, models: list, prompt: str = TEST_PROMPT,
-                               timeout: float = 30.0, system_prompt: str = None,
-                               use_proxy: bool = False) -> list[dict]:
+
+async def test_provider_models(
+    provider: str,
+    models: list,
+    prompt: str = TEST_PROMPT,
+    timeout: float = 30.0,
+    system_prompt: str = None,
+    use_proxy: bool = False,
+) -> list[dict]:
     """Универсальная функция для тестирования всех моделей провайдера"""
     results = []
 
@@ -1129,16 +1180,20 @@ async def test_provider_models(provider: str, models: list, prompt: str = TEST_P
             proxy_url = get_random_proxy(use_proxy) if use_proxy else None
 
             ok, ans, lat = await route_model_request(
-                provider, model, prompt, timeout=timeout,
-                system_prompt=system_prompt, proxy_url=proxy_url,
+                provider,
+                model,
+                prompt,
+                timeout=timeout,
+                system_prompt=system_prompt,
+                proxy_url=proxy_url,
             )
 
             result = {
-                'model': model,
-                'success': ok,
-                'latency': round(lat, 2),
-                'error': ans if not ok else None,
-                'answer_preview': ans[:100] if ok and ans else None
+                "model": model,
+                "success": ok,
+                "latency": round(lat, 2),
+                "error": ans if not ok else None,
+                "answer_preview": ans[:100] if ok and ans else None,
             }
 
             # Логгируем успешные тесты
@@ -1149,13 +1204,9 @@ async def test_provider_models(provider: str, models: list, prompt: str = TEST_P
             await asyncio.sleep(0.3)  # Небольшая пауза между запросами
 
         except Exception as e:
-            results.append({
-                'model': model,
-                'success': False,
-                'latency': 0,
-                'error': str(e)[:80],
-                'answer_preview': None
-            })
+            results.append(
+                {"model": model, "success": False, "latency": 0, "error": str(e)[:80], "answer_preview": None}
+            )
 
     return results
 
@@ -1165,14 +1216,14 @@ def format_test_results(provider: str, results: list[dict], max_show: int = 10) 
     if not results:
         return "❌ Нет данных *скулит*"
 
-    successful = [r for r in results if r['success']]
-    failed = [r for r in results if not r['success']]
+    successful = [r for r in results if r["success"]]
+    failed = [r for r in results if not r["success"]]
 
     output = f"**Всего:** `{len(results)}` | ✅ Успешно: `{len(successful)}` | ❌ Ошибок: `{len(failed)}`\n\n"
 
     # Показываем топ быстрых успешных
     if successful:
-        successful_sorted = sorted(successful, key=lambda x: x['latency'] if x['latency'] else 999)
+        successful_sorted = sorted(successful, key=lambda x: x["latency"] if x["latency"] else 999)
         output += "**🏆 Топ быстрых:**\n"
         for r in successful_sorted[:max_show]:
             emoji = "🥇" if r == successful_sorted[0] else "•"
@@ -1213,7 +1264,7 @@ class TestModeView(disnake.ui.View):
             title="🔄 ПсИИнка тестирует G4F...",
             description=f"*нюхает* Всего моделей: `{len(all_combinations)}` 🐕",
             color=0xFF8844,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
         progress_embed.add_field(name="Статус", value="Запуск тестов...", inline=False)
@@ -1229,19 +1280,19 @@ class TestModeView(disnake.ui.View):
                     if ok:
                         await asyncio.to_thread(pending_test_manager.log_success, prov, mod, int(lat * 1000))
                     return {
-                        'provider': prov,
-                        'model': mod,
-                        'success': ok,
-                        'latency': round(lat, 2) if lat else 0,
-                        'error': ans if not ok else None
+                        "provider": prov,
+                        "model": mod,
+                        "success": ok,
+                        "latency": round(lat, 2) if lat else 0,
+                        "error": ans if not ok else None,
                     }
                 except Exception as e:
                     return {
-                        'provider': prov,
-                        'model': mod,
-                        'success': False,
-                        'latency': 0,
-                        'error': str(e)[:80]
+                        "provider": prov,
+                        "model": mod,
+                        "success": False,
+                        "latency": 0,
+                        "error": str(e)[:80],
                     }
 
         tasks = [test_single(p, m) for p, m in all_combinations]
@@ -1254,21 +1305,24 @@ class TestModeView(disnake.ui.View):
 
             try:
                 progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
-                succ = len([r for r in all_results if r['success']])
-                progress_embed.set_field_at(1, name="Статус",
-                                            value=f"*лает на* `{res['provider']}`/`{res['model']}` 🐕\n✅ Успешно: `{succ}`",
-                                            inline=False)
+                succ = len([r for r in all_results if r["success"]])
+                progress_embed.set_field_at(
+                    1,
+                    name="Статус",
+                    value=f"*лает на* `{res['provider']}`/`{res['model']}` 🐕\n✅ Успешно: `{succ}`",
+                    inline=False,
+                )
                 await progress_msg.edit(embed=progress_embed)
             except:
                 pass  # Игнорируем ошибки обновления сообщения
 
         elapsed = time.time() - start
-        successful = [r for r in all_results if r['success']]
+        successful = [r for r in all_results if r["success"]]
 
         # Группируем результаты по провайдерам
         by_provider = {}
         for r in all_results:
-            prov = r['provider']
+            prov = r["provider"]
             if prov not in by_provider:
                 by_provider[prov] = []
             by_provider[prov].append(r)
@@ -1277,34 +1331,34 @@ class TestModeView(disnake.ui.View):
             title="✅ ПсИИнка закончил тест G4F!",
             description=f"*виляет хвостом* Общее время: `{elapsed:.0f}с` 🐕\n📊 **Итого:** `{len(successful)}/{len(all_results)}` успешных",
             color=0x00FF88 if successful else 0xFF4444,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
 
         # Статистика по каждому провайдеру
         for prov, prov_results in sorted(by_provider.items()):
-            succ = len([r for r in prov_results if r['success']])
+            succ = len([r for r in prov_results if r["success"]])
             if succ > 0:
-                avg_lat = round(sum(r['latency'] for r in prov_results if r['success']) / succ, 2)
+                avg_lat = round(sum(r["latency"] for r in prov_results if r["success"]) / succ, 2)
                 final_embed.add_field(
                     name=f"📡 {prov} ({succ}/{len(prov_results)})",
                     value=f"⏱ Ср. время: `{avg_lat}с`",
-                    inline=True
+                    inline=True,
                 )
             else:
                 final_embed.add_field(
-                    name=f"📡 {prov} (0/{len(prov_results)})",
-                    value="❌ Все неудачны",
-                    inline=True
+                    name=f"📡 {prov} (0/{len(prov_results)})", value="❌ Все неудачны", inline=True
                 )
 
         # Топ-5 самых быстрых моделей
         if successful:
-            top_fast = sorted(successful, key=lambda x: x['latency'] if x['latency'] else 999)[:5]
-            top_text = "\n".join([f"• `{r['provider']}`/`{r['model']}` — `{r['latency']}с`" for r in top_fast])
+            top_fast = sorted(successful, key=lambda x: x["latency"] if x["latency"] else 999)[:5]
+            top_text = "\n".join(
+                [f"• `{r['provider']}`/`{r['model']}` — `{r['latency']}с`" for r in top_fast]
+            )
             final_embed.add_field(name="🏆 Топ-5 быстрых", value=top_text, inline=False)
 
         # Если есть ошибки — покажем первые 3
-        failed = [r for r in all_results if not r['success']]
+        failed = [r for r in all_results if not r["success"]]
         if failed:
             err_text = "\n".join([f"• `{r['provider']}`/`{r['model']}`: {r['error']}" for r in failed[:3]])
             if len(failed) > 3:
@@ -1331,7 +1385,7 @@ class TestModeView(disnake.ui.View):
             title="🔄 ПсИИнка тестирует Groq...",
             description=f"*нюхает* Всего моделей: `{len(all_combinations)}` 🐕",
             color=0x5865F2,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
         progress_embed.add_field(name="Статус", value="Запуск тестов...", inline=False)
@@ -1347,17 +1401,17 @@ class TestModeView(disnake.ui.View):
                     TEST_PROMPT,
                     timeout=45.0,
                     system_prompt="Ты тестовый ИИ.",
-                    return_model_name=False
+                    return_model_name=False,
                 )
 
                 if ok:
                     await asyncio.to_thread(pending_test_manager.log_success, prov, model, int(lat * 1000))
 
                 result = {
-                    'model': model,
-                    'success': ok,
-                    'latency': round(lat, 2) if lat else 0,
-                    'error': ans if not ok else None
+                    "model": model,
+                    "success": ok,
+                    "latency": round(lat, 2) if lat else 0,
+                    "error": ans if not ok else None,
                 }
                 all_results.append(result)
 
@@ -1366,47 +1420,48 @@ class TestModeView(disnake.ui.View):
                 bar = create_progress_bar(i + 1, len(all_combinations))
                 progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
                 status = "✅" if ok else "❌"
-                progress_embed.set_field_at(1, name="Статус", value=f"*лает на* `{model}` {status} 🐕", inline=False)
+                progress_embed.set_field_at(
+                    1, name="Статус", value=f"*лает на* `{model}` {status} 🐕", inline=False
+                )
                 await progress_msg.edit(embed=progress_embed)
 
                 await asyncio.sleep(0.3)  # Пауза между запросами
 
             except Exception as e:
-                all_results.append({
-                    'model': model,
-                    'success': False,
-                    'latency': 0,
-                    'error': str(e)[:80]
-                })
+                all_results.append({"model": model, "success": False, "latency": 0, "error": str(e)[:80]})
 
         elapsed = time.time() - start
-        successful = [r for r in all_results if r['success']]
+        successful = [r for r in all_results if r["success"]]
 
         final_embed = disnake.Embed(
             title="✅ ПсИИнка закончил тест Groq!",
             description=f"*виляет хвостом* Общее время: `{elapsed:.0f}с` 🐕\n📊 **Итого:** `{len(successful)}/{len(all_combinations)}` успешных",
             color=0x00FF88 if successful else 0xFF4444,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
 
         # Детали по каждой модели (сортируем: успешные с быстрым временем вверху)
         details = ""
-        for r in sorted(all_results, key=lambda x: (not x['success'], x['latency'] if x['success'] else 999)):
-            emoji = "✅" if r['success'] else "❌"
-            latency_str = f"`{r['latency']}с`" if r['success'] and r['latency'] > 0 else "—"
+        for r in sorted(all_results, key=lambda x: (not x["success"], x["latency"] if x["success"] else 999)):
+            emoji = "✅" if r["success"] else "❌"
+            latency_str = f"`{r['latency']}с`" if r["success"] and r["latency"] > 0 else "—"
             details += f"{emoji} `{r['model']}` — {latency_str}\n"
 
         final_embed.add_field(name="📋 Результаты по моделям", value=details or "❌ Нет данных", inline=False)
 
         if successful:
-            top_fast = sorted(successful, key=lambda x: x['latency'] if x['latency'] else 999)[:3]
+            top_fast = sorted(successful, key=lambda x: x["latency"] if x["latency"] else 999)[:3]
             top_text = "\n".join([f"• `{r['model']}` — `{r['latency']}с`" for r in top_fast])
             final_embed.add_field(name="🏆 Топ-3 быстрых", value=top_text, inline=True)
 
         await progress_msg.edit(embed=final_embed)
-        log_analysis(f"TEST Groq All: {len(successful)}/{len(all_combinations)} success, {elapsed:.1f}s", "INFO")
+        log_analysis(
+            f"TEST Groq All: {len(successful)}/{len(all_combinations)} success, {elapsed:.1f}s", "INFO"
+        )
 
-    @disnake.ui.button(label="🌐 Тест ВСЕ OpenRouter", style=disnake.ButtonStyle.gray, custom_id="test_all_openrouter")
+    @disnake.ui.button(
+        label="🌐 Тест ВСЕ OpenRouter", style=disnake.ButtonStyle.gray, custom_id="test_all_openrouter"
+    )
     async def all_openrouter_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
         log_analysis("TEST: All OpenRouter models started", "INFO")
@@ -1416,14 +1471,16 @@ class TestModeView(disnake.ui.View):
         all_combinations = await get_all_openrouter_combinations_live()
 
         if not all_combinations:
-            await interaction.followup.send("❌ Гав! Нет моделей OpenRouter для теста. *нюхает*", ephemeral=True)
+            await interaction.followup.send(
+                "❌ Гав! Нет моделей OpenRouter для теста. *нюхает*", ephemeral=True
+            )
             return
 
         progress_embed = disnake.Embed(
             title="🔄 ПсИИнка тестирует OpenRouter...",
             description=f"*нюхает* Всего моделей: `{len(all_combinations)}` 🐕",
             color=0x95A5A6,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
         progress_embed.add_field(name="Статус", value="Запуск тестов...", inline=False)
@@ -1435,20 +1492,17 @@ class TestModeView(disnake.ui.View):
             try:
                 # ✅ Передаём правильные заголовки: X-Title вместо X-OpenRouter-Title [[51]]
                 ok, ans, lat = await test_openrouter_single(
-                    [model],
-                    TEST_PROMPT,
-                    timeout=45.0,
-                    system_prompt="Ты тестовый ИИ."
+                    [model], TEST_PROMPT, timeout=45.0, system_prompt="Ты тестовый ИИ."
                 )
 
                 if ok:
                     await asyncio.to_thread(pending_test_manager.log_success, prov, model, int(lat * 1000))
 
                 result = {
-                    'model': model,
-                    'success': ok,
-                    'latency': round(lat, 2) if lat else 0,
-                    'error': ans if not ok else None
+                    "model": model,
+                    "success": ok,
+                    "latency": round(lat, 2) if lat else 0,
+                    "error": ans if not ok else None,
                 }
                 all_results.append(result)
 
@@ -1457,51 +1511,51 @@ class TestModeView(disnake.ui.View):
                 bar = create_progress_bar(i + 1, len(all_combinations))
                 progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
                 status = "✅" if ok else "❌"
-                progress_embed.set_field_at(1, name="Статус", value=f"*лает на* `{model}` {status} 🐕", inline=False)
+                progress_embed.set_field_at(
+                    1, name="Статус", value=f"*лает на* `{model}` {status} 🐕", inline=False
+                )
                 await progress_msg.edit(embed=progress_embed)
 
                 await asyncio.sleep(0.3)  # Пауза между запросами
 
             except Exception as e:
-                all_results.append({
-                    'model': model,
-                    'success': False,
-                    'latency': 0,
-                    'error': str(e)[:80]
-                })
+                all_results.append({"model": model, "success": False, "latency": 0, "error": str(e)[:80]})
 
         elapsed = time.time() - start
-        successful = [r for r in all_results if r['success']]
+        successful = [r for r in all_results if r["success"]]
 
         final_embed = disnake.Embed(
             title="✅ ПсИИнка закончил тест OpenRouter!",
             description=f"*виляет хвостом* Общее время: `{elapsed:.0f}с` 🐕\n📊 **Итого:** `{len(successful)}/{len(all_combinations)}` успешных",
             color=0x00FF88 if successful else 0xFF4444,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
 
         # Детали по каждой модели
         details = ""
-        for r in sorted(all_results, key=lambda x: (not x['success'], x['latency'] if x['success'] else 999)):
-            emoji = "✅" if r['success'] else "❌"
-            latency_str = f"`{r['latency']}с`" if r['success'] and r['latency'] > 0 else "—"
+        for r in sorted(all_results, key=lambda x: (not x["success"], x["latency"] if x["success"] else 999)):
+            emoji = "✅" if r["success"] else "❌"
+            latency_str = f"`{r['latency']}с`" if r["success"] and r["latency"] > 0 else "—"
             details += f"{emoji} `{r['model']}` — {latency_str}\n"
 
         final_embed.add_field(name="📋 Результаты по моделям", value=details or "❌ Нет данных", inline=False)
 
         if successful:
-            top_fast = sorted(successful, key=lambda x: x['latency'] if x['latency'] else 999)[:3]
+            top_fast = sorted(successful, key=lambda x: x["latency"] if x["latency"] else 999)[:3]
             top_text = "\n".join([f"• `{r['model']}` — `{r['latency']}с`" for r in top_fast])
             final_embed.add_field(name="🏆 Топ-3 быстрых", value=top_text, inline=True)
 
         await progress_msg.edit(embed=final_embed)
-        log_analysis(f"TEST OpenRouter All: {len(successful)}/{len(all_combinations)} success, {elapsed:.1f}s", "INFO")
+        log_analysis(
+            f"TEST OpenRouter All: {len(successful)}/{len(all_combinations)} success, {elapsed:.1f}s", "INFO"
+        )
 
     @disnake.ui.button(label="🔍 Полное сканирование", style=disnake.ButtonStyle.red, custom_id="test_full")
     async def all_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
         await interaction.response.defer()
-        await interaction.followup.send("🔄 ПсИИнка начинает полное сканирование... *нюхает* (это займёт время) 🐕",
-                                        ephemeral=True)
+        await interaction.followup.send(
+            "🔄 ПсИИнка начинает полное сканирование... *нюхает* (это займёт время) 🐕", ephemeral=True
+        )
         asyncio.create_task(run_mass_test(interaction.channel))
 
 
@@ -1541,7 +1595,7 @@ async def slash_test(interaction: disnake.CommandInteraction):
 > и поддерживают прокси для обхода ограничений.
 """,
             color=0xFF8844,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         embed.add_field(
             name="📊 Что проверяется",
@@ -1551,7 +1605,7 @@ async def slash_test(interaction: disnake.CommandInteraction):
                 "• 🤖 Работоспособность моделей\n"
                 "• 🔀 Обход блокировок (прокси)"
             ),
-            inline=False
+            inline=False,
         )
         embed.add_field(
             name="💾 Сохранение результатов",
@@ -1560,7 +1614,7 @@ async def slash_test(interaction: disnake.CommandInteraction):
                 "🔧 Команда `/записать_тест` → БД Neon\n"
                 "📈 Команда `/статус` → топ моделей"
             ),
-            inline=False
+            inline=False,
         )
         embed.set_footer(text="ПсИИнка бот | Diagnostics 🐾")
 
@@ -1580,12 +1634,13 @@ async def slash_test(interaction: disnake.CommandInteraction):
 # 📊 МАССОВОЕ ТЕСТИРОВАНИЕ (СОБАЧИЙ СТИЛЬ)
 # ============================================================================
 
+
 async def run_mass_test(channel):
     progress_embed = disnake.Embed(
         title="🔄 ПсИИнка сканирует...",
         description="*нюхает* G4F (Deep) + Groq + OpenRouter... 🐕",
         color=0xFF8844,
-        timestamp=datetime.now()
+        timestamp=datetime.now(),
     )
     progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
     progress_embed.add_field(name="📊 Статистика", value="✅ Успешно: 0\n❌ Ошибок: 0", inline=False)
@@ -1604,16 +1659,32 @@ async def run_mass_test(channel):
             start = time.time()
             try:
                 ok, ans, lat = await route_model_request(
-                    provider, model, TEST_PROMPT, timeout=45.0,
+                    provider,
+                    model,
+                    TEST_PROMPT,
+                    timeout=45.0,
                 )
 
                 if ok:
-                    await asyncio.to_thread(pending_test_manager.log_success, provider, model, int(lat * 1000))
+                    await asyncio.to_thread(
+                        pending_test_manager.log_success, provider, model, int(lat * 1000)
+                    )
 
-                return {'provider': provider, 'model': model, 'success': ok, 'time': lat,
-                        'error': ans if not ok else None}
+                return {
+                    "provider": provider,
+                    "model": model,
+                    "success": ok,
+                    "time": lat,
+                    "error": ans if not ok else None,
+                }
             except Exception as e:
-                return {'provider': provider, 'model': model, 'success': False, 'time': 0, 'error': str(e)[:50]}
+                return {
+                    "provider": provider,
+                    "model": model,
+                    "success": False,
+                    "time": 0,
+                    "error": str(e)[:50],
+                }
 
     tasks = [test_combo(p, m) for p, m in combinations]
 
@@ -1625,34 +1696,42 @@ async def run_mass_test(channel):
         bar = create_progress_bar(i + 1, total)
 
         try:
-            progress_embed.description = f"*лает на* {i + 1}/{total}: `{res['provider']}` / `{res['model']}` 🐕"
-            progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`\n⏳ Прошло: {elapsed:.0f}с",
-                                        inline=False)
+            progress_embed.description = (
+                f"*лает на* {i + 1}/{total}: `{res['provider']}` / `{res['model']}` 🐕"
+            )
+            progress_embed.set_field_at(
+                0, name="Прогресс", value=f"`[{bar}] {percent}%`\n⏳ Прошло: {elapsed:.0f}с", inline=False
+            )
 
-            success_count = len([r for r in results if r['success']])
-            progress_embed.set_field_at(1, name="📊 Статистика",
-                                        value=f"✅ Успешно: {success_count} *гав!*\n❌ Ошибок: {len(results) - success_count} *скулит*",
-                                        inline=False)
+            success_count = len([r for r in results if r["success"]])
+            progress_embed.set_field_at(
+                1,
+                name="📊 Статистика",
+                value=f"✅ Успешно: {success_count} *гав!*\n❌ Ошибок: {len(results) - success_count} *скулит*",
+                inline=False,
+            )
 
             await progress_msg.edit(embed=progress_embed)
         except:
             pass
 
     elapsed_total = time.time() - start_time
-    successful = [r for r in results if r['success']]
+    successful = [r for r in results if r["success"]]
 
     final_embed = disnake.Embed(
         title="✅ ПсИИнка закончил тест!",
         description=f"*виляет хвостом* Общее время: `{elapsed_total:.0f}с` ({elapsed_total / 60:.1f} мин) 🐕",
         color=0x00FF88,
-        timestamp=datetime.now()
+        timestamp=datetime.now(),
     )
-    final_embed.add_field(name="📊 Результаты",
-                          value=f"✅ Успешно: `{len(successful)}/{total}` *гав!*\n📈 Процент: `{int(len(successful) / total * 100)}%`",
-                          inline=False)
+    final_embed.add_field(
+        name="📊 Результаты",
+        value=f"✅ Успешно: `{len(successful)}/{total}` *гав!*\n📈 Процент: `{int(len(successful) / total * 100)}%`",
+        inline=False,
+    )
 
     if successful:
-        successful.sort(key=lambda x: x['time'] if x['time'] else 999)
+        successful.sort(key=lambda x: x["time"] if x["time"] else 999)
         top_text = ""
         for r in successful[:5]:
             top_text += f"• `{r['provider']}`/{r['model']} — `{r['time']:.2f}с`\n"
@@ -1734,9 +1813,9 @@ async def find_thread_in_archives(guild, target_id: int):
     return None
 
 
-async def resolve_analysis_target(interaction: disnake.CommandInteraction,
-                                  selected_channel=None,
-                                  ссылка: str | None = None):
+async def resolve_analysis_target(
+    interaction: disnake.CommandInteraction, selected_channel=None, ссылка: str | None = None
+):
     """
     Возвращает канал/форум/тред для анализа.
     Приоритет: ссылка/ID/упоминание → выбранный канал → текущий канал.
@@ -1748,7 +1827,10 @@ async def resolve_analysis_target(interaction: disnake.CommandInteraction,
     link_guild_id, link_channel_id = extract_channel_reference(ссылка)
 
     if ссылка and not link_channel_id:
-        return None, "❌ ПсИИнка не смог разобрать ссылку/ID канала. Дай ссылку Discord, `<#канал>` или числовой ID."
+        return (
+            None,
+            "❌ ПсИИнка не смог разобрать ссылку/ID канала. Дай ссылку Discord, `<#канал>` или числовой ID.",
+        )
 
     if link_guild_id and link_guild_id != interaction.guild.id:
         return None, "❌ Эта ссылка ведёт на другой сервер. ПсИИнка нюхает только текущий сервер."
@@ -1800,6 +1882,7 @@ def analysis_target_name(channel) -> str:
         return f"{channel.parent.name} / {channel.name}"
     return getattr(channel, "name", str(getattr(channel, "id", "unknown")))
 
+
 async def collect_all_messages_debug(channel, days_limit: int, max_per_source: int = 400):
     after_date = datetime.now(timezone.utc) - timedelta(days=days_limit)
     all_messages = []
@@ -1812,39 +1895,43 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
             async for message in channel.history(limit=max_per_source, after=after_date):
                 if message.is_system() or message.author == bot.user or not message.content.strip():
                     continue
-                all_messages.append({
-                    "id": len(all_messages) + 1,
-                    "real_id": message.id,
-                    "content": message.content[:1500],
-                    "author": str(message.author),
-                    "url": message.jump_url,
-                    "source": f"#{target_label}",
-                    "created_at": message.created_at
-                })
+                all_messages.append(
+                    {
+                        "id": len(all_messages) + 1,
+                        "real_id": message.id,
+                        "content": message.content[:1500],
+                        "author": str(message.author),
+                        "url": message.jump_url,
+                        "source": f"#{target_label}",
+                        "created_at": message.created_at,
+                    }
+                )
             log_analysis(f"✅ Main channel/thread: {len(all_messages)} msgs.", "INFO")
         except Exception as e:
             log_analysis(f"❌ Main channel/thread error: {e}", "ERROR")
     else:
         log_analysis(f"Main history skipped for {target_label}: no direct history method.", "INFO")
 
-    if hasattr(channel, 'threads'):
+    if hasattr(channel, "threads"):
         for thread in channel.threads:
-            if not hasattr(thread, 'history'):
+            if not hasattr(thread, "history"):
                 continue
             try:
                 count = 0
                 async for message in thread.history(limit=max_per_source, after=after_date):
                     if message.is_system() or message.author == bot.user or not message.content.strip():
                         continue
-                    all_messages.append({
-                        "id": len(all_messages) + 1,
-                        "real_id": message.id,
-                        "content": message.content[:1500],
-                        "author": str(message.author),
-                        "url": message.jump_url,
-                        "source": f"Thread: {thread.name}",
-                        "created_at": message.created_at
-                    })
+                    all_messages.append(
+                        {
+                            "id": len(all_messages) + 1,
+                            "real_id": message.id,
+                            "content": message.content[:1500],
+                            "author": str(message.author),
+                            "url": message.jump_url,
+                            "source": f"Thread: {thread.name}",
+                            "created_at": message.created_at,
+                        }
+                    )
                     count += 1
                 log_analysis(f"✅ Thread {thread.name}: {count} msgs.", "INFO")
                 await asyncio.sleep(0.5)
@@ -1852,28 +1939,34 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
                 pass
 
     # Архивные треды: добавлено без изменения основного механизма анализа.
-    if hasattr(channel, 'archived_threads'):
-        seen_thread_ids = {getattr(t, 'id', None) for t in getattr(channel, 'threads', [])}
+    if hasattr(channel, "archived_threads"):
+        seen_thread_ids = {getattr(t, "id", None) for t in getattr(channel, "threads", [])}
         for private_flag in (False, True):
             try:
                 async for thread in channel.archived_threads(private=private_flag, limit=100):
-                    if getattr(thread, 'id', None) in seen_thread_ids or not hasattr(thread, 'history'):
+                    if getattr(thread, "id", None) in seen_thread_ids or not hasattr(thread, "history"):
                         continue
-                    seen_thread_ids.add(getattr(thread, 'id', None))
+                    seen_thread_ids.add(getattr(thread, "id", None))
                     try:
                         count = 0
                         async for message in thread.history(limit=max_per_source, after=after_date):
-                            if message.is_system() or message.author == bot.user or not message.content.strip():
+                            if (
+                                message.is_system()
+                                or message.author == bot.user
+                                or not message.content.strip()
+                            ):
                                 continue
-                            all_messages.append({
-                                "id": len(all_messages) + 1,
-                                "real_id": message.id,
-                                "content": message.content[:1500],
-                                "author": str(message.author),
-                                "url": message.jump_url,
-                                "source": f"Archived Thread: {thread.name}",
-                                "created_at": message.created_at
-                            })
+                            all_messages.append(
+                                {
+                                    "id": len(all_messages) + 1,
+                                    "real_id": message.id,
+                                    "content": message.content[:1500],
+                                    "author": str(message.author),
+                                    "url": message.jump_url,
+                                    "source": f"Archived Thread: {thread.name}",
+                                    "created_at": message.created_at,
+                                }
+                            )
                             count += 1
                         log_analysis(f"✅ Archived thread {thread.name}: {count} msgs.", "INFO")
                         await asyncio.sleep(0.5)
@@ -1886,37 +1979,38 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
 
 
 def format_messages_for_ai(messages_list: list[dict]) -> str:
-    return "\n".join([
-        f"{msg['id']} [{msg['source']}]: {msg['content'].replace(chr(10), ' ')}"
-        for msg in messages_list
-    ])
+    return "\n".join(
+        [f"{msg['id']} [{msg['source']}]: {msg['content'].replace(chr(10), ' ')}" for msg in messages_list]
+    )
 
 
 def parse_ai_response(ai_text: str, original_data: list[dict]) -> list[dict]:
     if not ai_text or ai_text.strip().upper() == "NONE":
         return []
 
-    found_ids = [int(x) for x in re.findall(r'\d+', ai_text)]
+    found_ids = [int(x) for x in re.findall(r"\d+", ai_text)]
     found_set = set(found_ids)
-    return [msg for msg in original_data if msg['id'] in found_set]
+    return [msg for msg in original_data if msg["id"] in found_set]
 
 
 @bot.slash_command(name="анализ", description="Анализ канала, форума или треда на нарушения")
-async def slash_analyze(interaction: disnake.CommandInteraction,
-                        канал: disnake.abc.GuildChannel | None = commands.Param(
-                            default=None,
-                            description="Канал/форум/тред для анализа",
-                            channel_types=ANALYSIS_CHANNEL_TYPES,
-                        ),
-                        ссылка: str | None = commands.Param(
-                            default=None,
-                            description="Ссылка, ID или упоминание канала/форума/треда",
-                        ),
-                        период: str = commands.Param(
-                            default="За последние 7 дней",
-                            choices=["За последние 7 дней", "За последние 21 день"],
-                            description="Период анализа",
-                        )):
+async def slash_analyze(
+    interaction: disnake.CommandInteraction,
+    канал: disnake.abc.GuildChannel | None = commands.Param(
+        default=None,
+        description="Канал/форум/тред для анализа",
+        channel_types=ANALYSIS_CHANNEL_TYPES,
+    ),
+    ссылка: str | None = commands.Param(
+        default=None,
+        description="Ссылка, ID или упоминание канала/форума/треда",
+    ),
+    период: str = commands.Param(
+        default="За последние 7 дней",
+        choices=["За последние 7 дней", "За последние 21 день"],
+        description="Период анализа",
+    ),
+):
     if interaction.author.id != OWNER_ID:
         if not await check_access(interaction, allowed_role_names=["Псарь"]):
             return
@@ -1945,7 +2039,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             title="🔍 ПсИИнка нюхает канал",
             description=f"*принюхивается* Канал: `#{target_name}`\nПериод: `{days_to_check} дней` 🐕\nСообщений: `{len(messages_data)}`",
             color=0xFF8844,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
         progress_embed.add_field(name="Статус", value="ПсИИнка готовится...", inline=False)
@@ -1957,7 +2051,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
         main_queue = await get_analysis_priority_queue()
 
         for i in range(0, len(messages_data), BATCH_SIZE):
-            batch_data = messages_data[i: i + BATCH_SIZE]
+            batch_data = messages_data[i : i + BATCH_SIZE]
             current_batch = (i // BATCH_SIZE) + 1
             batch_context = format_messages_for_ai(batch_data)
             user_prompt = f"Пакет {current_batch}/{total_batches}:\n\n{batch_context}"
@@ -1970,8 +2064,12 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             async def try_request(prov, mod, use_proxy=False, user_prompt=user_prompt):
                 proxy_str = get_random_proxy(True) if use_proxy else None
                 return await route_model_request(
-                    prov, mod, user_prompt, timeout=50.0,
-                    system_prompt=ANALYSIS_SYSTEM_PROMPT, proxy_url=proxy_str,
+                    prov,
+                    mod,
+                    user_prompt,
+                    timeout=50.0,
+                    system_prompt=ANALYSIS_SYSTEM_PROMPT,
+                    proxy_url=proxy_str,
                 )
 
             for prov, mod in main_queue:
@@ -1979,8 +2077,12 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                     percent = int(((current_batch - 1) / total_batches) * 100)
                     bar = create_progress_bar(current_batch - 1, total_batches)
 
-                    progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
-                    progress_embed.set_field_at(1, name="Статус", value=f"*лает на* `{prov}`... 🐕", inline=False)
+                    progress_embed.set_field_at(
+                        0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False
+                    )
+                    progress_embed.set_field_at(
+                        1, name="Статус", value=f"*лает на* `{prov}`... 🐕", inline=False
+                    )
                     await status_msg.edit(embed=progress_embed)
 
                     ok, ans, lat = await try_request(prov, mod, False)
@@ -1999,7 +2101,9 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
 
             if not success:
                 log_analysis(f"⚠️ Batch {current_batch}: Activating PROXY MODE.", "WARNING")
-                progress_embed.set_field_at(1, name="Статус", value="⚠️ ПРОКСИ РЕЖИМ... *нюхает* 🔀", inline=False)
+                progress_embed.set_field_at(
+                    1, name="Статус", value="⚠️ ПРОКСИ РЕЖИМ... *нюхает* 🔀", inline=False
+                )
                 await status_msg.edit(embed=progress_embed)
 
                 for prov, mod in main_queue:
@@ -2025,13 +2129,19 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             percent = int((current_batch / total_batches) * 100)
             bar = create_progress_bar(current_batch, total_batches)
             progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
-            progress_embed.set_field_at(1, name="Статус", value=f"✅ Пакет #{current_batch} готов *гав!*", inline=False)
-            progress_embed.add_field(name="Найдено нарушений", value=f"`{len(all_violations)}` *рычит*", inline=False)
+            progress_embed.set_field_at(
+                1, name="Статус", value=f"✅ Пакет #{current_batch} готов *гав!*", inline=False
+            )
+            progress_embed.add_field(
+                name="Найдено нарушений", value=f"`{len(all_violations)}` *рычит*", inline=False
+            )
             await status_msg.edit(embed=progress_embed)
             await asyncio.sleep(1.0)
 
         progress_embed.color = 0x00FF88
-        progress_embed.set_field_at(1, name="Статус", value="✅ Анализ завершен! *виляет хвостом* 🐕", inline=False)
+        progress_embed.set_field_at(
+            1, name="Статус", value="✅ Анализ завершен! *виляет хвостом* 🐕", inline=False
+        )
         await status_msg.edit(embed=progress_embed)
 
         if not all_violations:
@@ -2044,7 +2154,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
         current_len = 0
 
         for i, v in enumerate(all_violations, 1):
-            clean_txt = re.sub(r'<@!?[0-9]+>', '@user', v['content'])[:400]
+            clean_txt = re.sub(r"<@!?[0-9]+>", "@user", v["content"])[:400]
             line = f"{i}) **[{v['source']}]** {clean_txt}\n🔗 [Ссылка]({v['url']})\n\n"
 
             if current_len + len(line) > 1800:
@@ -2062,7 +2172,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             title="🚨 ПсИИнка нашёл нарушения!",
             description=f"*рычит на нарушителей* Найдено **{len(all_violations)}** нарушений 🐕",
             color=0xFF4444,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         header_embed.add_field(name="Канал", value=f"#{target_name}", inline=True)
         header_embed.add_field(name="Период", value=f"{days_to_check} дней", inline=True)
@@ -2080,8 +2190,11 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
         error_trace = traceback.format_exc()
         log_analysis(f"CRITICAL ERROR: {e}\n{error_trace}", "ERROR")
         logger.error(f"Critical error in /analyze: {e}", exc_info=True)
-        await interaction.followup.send(f"❌ ПсИИнка ошибся... *повесил уши*\nЛог сохранен.\nОшибка: {str(e)[:100]} 🐕",
-                                        ephemeral=True)
+        await interaction.followup.send(
+            f"❌ ПсИИнка ошибся... *повесил уши*\nЛог сохранен.\nОшибка: {str(e)[:100]} 🐕", ephemeral=True
+        )
+
+
 # ============================================================================
 # 💰 КОМАНДА: ЦЕНЫ АУКЦИОНА
 # ============================================================================
@@ -2089,6 +2202,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
 # ============================================================================
 # 💰 КОМАНДА: ЦЕНЫ АУКЦИОНА
 # ============================================================================
+
 
 def get_auction_price_channel_types() -> list[Any]:
     wanted = ["text", "news", "public_thread", "private_thread", "news_thread"]
@@ -2232,13 +2346,15 @@ async def fetch_raw_discord_messages(
 
                     if response.status != 200:
                         text = await response.text()
-                        logs.append([
-                            "REST",
-                            "",
-                            f"Discord API вернул статус {response.status}",
-                            "",
-                            text[:3000],
-                        ])
+                        logs.append(
+                            [
+                                "REST",
+                                "",
+                                f"Discord API вернул статус {response.status}",
+                                "",
+                                text[:3000],
+                            ]
+                        )
                         break
 
                     batch = await response.json()
@@ -2371,87 +2487,109 @@ def build_auction_prices_xlsx(
     people_sheet = [new_headers]
 
     for row in sorted(people_rows, key=lambda x: x["lot"]):
-        people_sheet.append([
-            row.get("lot"),
-            row.get("item", ""),
-            row.get("price", ""),
-            row.get("start_price", ""),
-            row.get("status", ""),
-            row.get("bidder", ""),
-            "Да" if row.get("closed") else "Нет",
-            row.get("author", ""),
-            row.get("message_id", ""),
-            row.get("message_url", ""),
-        ])
+        people_sheet.append(
+            [
+                row.get("lot"),
+                row.get("item", ""),
+                row.get("price", ""),
+                row.get("start_price", ""),
+                row.get("status", ""),
+                row.get("bidder", ""),
+                "Да" if row.get("closed") else "Нет",
+                row.get("author", ""),
+                row.get("message_id", ""),
+                row.get("message_url", ""),
+            ]
+        )
 
     auctioneer_sheet = [new_headers]
 
     for row in sorted(auctioneer_rows, key=lambda x: x["lot"]):
-        auctioneer_sheet.append([
-            row.get("lot"),
-            row.get("item", ""),
-            row.get("price", ""),
-            row.get("start_price", ""),
-            row.get("status", ""),
-            row.get("bidder", ""),
-            "Да" if row.get("closed") else "Нет",
-            row.get("author", ""),
-            row.get("message_id", ""),
-            row.get("message_url", ""),
-        ])
+        auctioneer_sheet.append(
+            [
+                row.get("lot"),
+                row.get("item", ""),
+                row.get("price", ""),
+                row.get("start_price", ""),
+                row.get("status", ""),
+                row.get("bidder", ""),
+                "Да" if row.get("closed") else "Нет",
+                row.get("author", ""),
+                row.get("message_id", ""),
+                row.get("message_url", ""),
+            ]
+        )
 
-    ancient_sheet = [["№ лота", "Наименование", "Описание", "Стартовая цена", "Автор", "ID сообщения", "Ссылка на сообщение"]]
+    ancient_sheet = [
+        [
+            "№ лота",
+            "Наименование",
+            "Описание",
+            "Стартовая цена",
+            "Автор",
+            "ID сообщения",
+            "Ссылка на сообщение",
+        ]
+    ]
 
     for row in sorted(ancient_rows, key=lambda x: x["lot"]):
-        ancient_sheet.append([
-            row.get("lot"),
-            row.get("name", ""),
-            row.get("description", ""),
-            row.get("price", ""),
-            row.get("author", ""),
-            row.get("message_id", ""),
-            row.get("message_url", ""),
-        ])
+        ancient_sheet.append(
+            [
+                row.get("lot"),
+                row.get("name", ""),
+                row.get("description", ""),
+                row.get("price", ""),
+                row.get("author", ""),
+                row.get("message_id", ""),
+                row.get("message_url", ""),
+            ]
+        )
 
-    all_new_sheet = [[
-        "№ лота",
-        "Тип",
-        "Статус",
-        "Предмет",
-        "Итоговая цена",
-        "Начальная цена",
-        "Ставка от",
-        "Сообщение завершено?",
-        "Автор сообщения",
-        "ID автора",
-        "Embeds count",
-        "ID сообщения",
-        "Ссылка",
-        "Сырой текст",
-    ]]
+    all_new_sheet = [
+        [
+            "№ лота",
+            "Тип",
+            "Статус",
+            "Предмет",
+            "Итоговая цена",
+            "Начальная цена",
+            "Ставка от",
+            "Сообщение завершено?",
+            "Автор сообщения",
+            "ID автора",
+            "Embeds count",
+            "ID сообщения",
+            "Ссылка",
+            "Сырой текст",
+        ]
+    ]
 
     for row in sorted(all_new_lot_rows, key=lambda x: (x.get("lot") or 0, str(x.get("message_id", "")))):
-        all_new_sheet.append([
-            row.get("lot"),
-            row.get("type", ""),
-            row.get("status", ""),
-            row.get("item", ""),
-            row.get("price", ""),
-            row.get("start_price", ""),
-            row.get("bidder", ""),
-            "Да" if row.get("closed") else "Нет",
-            row.get("author", ""),
-            row.get("author_id", ""),
-            row.get("embeds_count", ""),
-            row.get("message_id", ""),
-            row.get("message_url", ""),
-            row.get("raw_text", ""),
-        ])
+        all_new_sheet.append(
+            [
+                row.get("lot"),
+                row.get("type", ""),
+                row.get("status", ""),
+                row.get("item", ""),
+                row.get("price", ""),
+                row.get("start_price", ""),
+                row.get("bidder", ""),
+                "Да" if row.get("closed") else "Нет",
+                row.get("author", ""),
+                row.get("author_id", ""),
+                row.get("embeds_count", ""),
+                row.get("message_id", ""),
+                row.get("message_url", ""),
+                row.get("raw_text", ""),
+            ]
+        )
 
     logs_sheet = [["Тип", "№ лота", "Причина/статус", "ID сообщения", "Ссылка", "Текст/детали"]]
     logs_sheet.extend(log_rows)
 
-    raw_embed_sheet = [["Дата", "Автор", "ID автора", "Embeds count", "ID сообщения", "Ссылка", "Сырой текст"]]
+    raw_embed_sheet = [
+        ["Дата", "Автор", "ID автора", "Embeds count", "ID сообщения", "Ссылка", "Сырой текст"]
+    ]
     raw_embed_sheet.extend(raw_embed_rows)
 
     filename = f"auction_prices_{getattr(target_channel, 'id', 'channel')}.xlsx"
@@ -2554,14 +2692,16 @@ async def slash_auction_prices(
 
             if message_id and message_id in seen_message_ids:
                 duplicate_message_ids_skipped += 1
-                log_rows.append([
-                    "MESSAGE_DUPLICATE",
-                    "",
-                    "Тот же Discord message_id уже был обработан; повтор API пропущен",
-                    message_id,
-                    info.get("message_url", ""),
-                    text,
-                ])
+                log_rows.append(
+                    [
+                        "MESSAGE_DUPLICATE",
+                        "",
+                        "Тот же Discord message_id уже был обработан; повтор API пропущен",
+                        message_id,
+                        info.get("message_url", ""),
+                        text,
+                    ]
+                )
                 continue
 
             if message_id:
@@ -2572,15 +2712,17 @@ async def slash_auction_prices(
 
             if info["embeds_count"] > 0:
                 if len(raw_embed_rows) < raw_embed_rows_limit:
-                    raw_embed_rows.append([
-                        info.get("created_at", ""),
-                        info.get("author", ""),
-                        info.get("author_id", ""),
-                        info.get("embeds_count", 0),
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    raw_embed_rows.append(
+                        [
+                            info.get("created_at", ""),
+                            info.get("author", ""),
+                            info.get("author_id", ""),
+                            info.get("embeds_count", 0),
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
                 else:
                     raw_embed_rows_truncated += 1
 
@@ -2591,52 +2733,60 @@ async def slash_auction_prices(
 
                 if lot_no in seen_new_lots:
                     repeated_lot_numbers_counted += 1
-                    log_rows.append([
-                        "NEW_REPEAT_COUNTED",
-                        lot_no,
-                        "Повторный номер нового лота: запись НЕ пропущена и будет засчитана",
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    log_rows.append(
+                        [
+                            "NEW_REPEAT_COUNTED",
+                            lot_no,
+                            "Повторный номер нового лота: запись НЕ пропущена и будет засчитана",
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
 
                 seen_new_lots.add(lot_no)
                 all_new_lot_rows.append(new_lot)
 
                 if new_lot["type"] == "returned":
                     skipped_returned += 1
-                    log_rows.append([
-                        "NEW_RETURNED",
-                        lot_no,
-                        "Предмет возвращён продавцу, не считаем",
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    log_rows.append(
+                        [
+                            "NEW_RETURNED",
+                            lot_no,
+                            "Предмет возвращён продавцу, не считаем",
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
                     continue
 
                 if new_lot["type"] == "no_bid":
                     skipped_no_bid += 1
-                    log_rows.append([
-                        "NEW_NO_BID",
-                        lot_no,
-                        new_lot.get("status", "Нет последней ставки"),
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    log_rows.append(
+                        [
+                            "NEW_NO_BID",
+                            lot_no,
+                            new_lot.get("status", "Нет последней ставки"),
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
                     continue
 
                 if new_lot.get("price") is None:
                     skipped_bad_price += 1
-                    log_rows.append([
-                        "NEW_BAD_PRICE",
-                        lot_no,
-                        "Не удалось достать итоговую цену",
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    log_rows.append(
+                        [
+                            "NEW_BAD_PRICE",
+                            lot_no,
+                            "Не удалось достать итоговую цену",
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
                     continue
 
                 if new_lot["is_auctioneer"]:
@@ -2653,14 +2803,16 @@ async def slash_auction_prices(
 
                 if lot_no in seen_ancient_lots:
                     repeated_lot_numbers_counted += 1
-                    log_rows.append([
-                        "ANCIENT_REPEAT_COUNTED",
-                        lot_no,
-                        "Повторный номер древнего лота: запись НЕ пропущена и будет засчитана",
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    log_rows.append(
+                        [
+                            "ANCIENT_REPEAT_COUNTED",
+                            lot_no,
+                            "Повторный номер древнего лота: запись НЕ пропущена и будет засчитана",
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
 
                 seen_ancient_lots.add(lot_no)
 
@@ -2668,14 +2820,16 @@ async def slash_auction_prices(
                     ancient_rows.append(ancient_lot)
                 else:
                     skipped_bad_price += 1
-                    log_rows.append([
-                        "ANCIENT_BAD_PRICE",
-                        lot_no,
-                        "Древний лот найден, но стартовая цена не распарсилась",
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    log_rows.append(
+                        [
+                            "ANCIENT_BAD_PRICE",
+                            lot_no,
+                            "Древний лот найден, но стартовая цена не распарсилась",
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
 
                 continue
 
@@ -2690,14 +2844,16 @@ async def slash_auction_prices(
             )
 
             if maybe_auction:
-                log_rows.append([
-                    "UNPARSED",
-                    "",
-                    "Сообщение похоже на аукционное, но не распарсилось",
-                    info.get("message_id", ""),
-                    info.get("message_url", ""),
-                    text,
-                ])
+                log_rows.append(
+                    [
+                        "UNPARSED",
+                        "",
+                        "Сообщение похоже на аукционное, но не распарсилось",
+                        info.get("message_id", ""),
+                        info.get("message_url", ""),
+                        text,
+                    ]
+                )
 
         people_total = sum(row["price"] for row in people_rows if row.get("price") is not None)
         auctioneer_total = sum(row["price"] for row in auctioneer_rows if row.get("price") is not None)
@@ -2754,13 +2910,16 @@ async def slash_auction_prices(
             ephemeral=True,
         )
 
+
 # ============================================================================
 # 💾 АДМИН КОМАНДЫ: СКАЧАТЬ ФАЙЛЫ
 # ============================================================================
 
+
 @bot.slash_command(name="скачать_анализ", description="Скачать лог анализа")
 async def slash_download_analysis_log(interaction: disnake.CommandInteraction):
-    if interaction.author.id != OWNER_ID: return
+    if interaction.author.id != OWNER_ID:
+        return
     await interaction.response.defer()
     for handler in analysis_logger.handlers:
         if isinstance(handler, logging.FileHandler):
@@ -2803,12 +2962,13 @@ async def slash_download_db(interaction: disnake.CommandInteraction):
     csv_data = await asyncio.to_thread(db_manager.export_to_csv)
 
     if csv_data:
-        file_obj = io.BytesIO(csv_data.encode('utf-8'))
+        file_obj = io.BytesIO(csv_data.encode("utf-8"))
         file_obj.name = "model_success_log.csv"
         await interaction.followup.send(file=disnake.File(file_obj))
     else:
-        await interaction.followup.send("❌ Гав! Не удалось экспортировать данные или БД не подключена. *скулит*",
-                                        ephemeral=True)
+        await interaction.followup.send(
+            "❌ Гав! Не удалось экспортировать данные или БД не подключена. *скулит*", ephemeral=True
+        )
 
 
 @bot.slash_command(name="очистить_бд", description="Полная очистка таблицы успехов в БД")
@@ -2848,7 +3008,9 @@ async def slash_commit_tests(interaction: disnake.CommandInteraction):
 
     records = await asyncio.to_thread(pending_test_manager.read_records)
     if not records:
-        await interaction.followup.send("ℹ️ ПсИИнка проверил временный лог — там пусто. *нюхает* 🐕", ephemeral=True)
+        await interaction.followup.send(
+            "ℹ️ ПсИИнка проверил временный лог — там пусто. *нюхает* 🐕", ephemeral=True
+        )
         return
 
     # One transaction: a failed write never destroys the pending CSV.
@@ -2881,10 +3043,12 @@ async def slash_commit_tests(interaction: disnake.CommandInteraction):
             ephemeral=True,
         )
 
+
 # ============================================================================
 # ✉️ КОМАНДА ДЛЯ ВЛАДЕЛЬЦА: НАПИСАТЬ В КАНАЛ ОТ ЛИЦА БОТА
 # /напиши канал:<канал> текст:<текст> закрепить:<Да/Нет>
 # ============================================================================
+
 
 def normalize_channel_lookup_text(text: str) -> str:
     """Нормализация для поиска каналов по названию/серверу."""
@@ -2913,10 +3077,7 @@ def parse_discord_channel_id(raw: str) -> int | None:
     if re.fullmatch(r"\d{15,25}", raw):
         return int(raw)
 
-    link_match = re.search(
-        r"discord(?:app)?\.com/channels/\d{15,25}/(\d{15,25})(?:/\d{15,25})?",
-        raw
-    )
+    link_match = re.search(r"discord(?:app)?\.com/channels/\d{15,25}/(\d{15,25})(?:/\d{15,25})?", raw)
     if link_match:
         return int(link_match.group(1))
 
@@ -3008,10 +3169,7 @@ def find_channels_by_query(query: str, limit: int = 25) -> list[disnake.TextChan
     return [item[3] for item in scored[:limit]]
 
 
-async def owner_channel_autocomplete(
-    interaction: disnake.ApplicationCommandInteraction,
-    user_input: str
-):
+async def owner_channel_autocomplete(interaction: disnake.ApplicationCommandInteraction, user_input: str):
     """
     Всплывающий список каналов для /напиши.
     Показывает каналы всех серверов, где бот может писать.
@@ -3055,7 +3213,7 @@ def replace_role_name_mentions_for_guild(text: str, guild: disnake.Guild) -> str
     roles_sorted = sorted(
         [role for role in guild.roles if role.name and role.name != "@everyone"],
         key=lambda role: len(role.name),
-        reverse=True
+        reverse=True,
     )
 
     for role in roles_sorted:
@@ -3064,14 +3222,12 @@ def replace_role_name_mentions_for_guild(text: str, guild: disnake.Guild) -> str
             continue
 
         # Ищет именно @НазваниеРоли, без замены внутри уже готовых <@&...>
-        pattern = re.compile(
-            rf"(?<![<\w])@{re.escape(role_name)}(?![\w>])",
-            flags=re.IGNORECASE
-        )
+        pattern = re.compile(rf"(?<![<\w])@{re.escape(role_name)}(?![\w>])", flags=re.IGNORECASE)
 
         result = pattern.sub(role.mention, result)
 
     return result
+
 
 async def ensure_guild_members_loaded(guild: disnake.Guild):
     """
@@ -3184,47 +3340,37 @@ async def prepare_owner_message_text(text: str, guild: disnake.Guild) -> str:
 
     return text
 
+
 def build_allowed_mentions_for_owner_message() -> disnake.AllowedMentions:
     """
     Разрешаем пинговать роли и пользователей, но не @everyone/@here.
     @everyone/@here специально выключены, чтобы случайно не снести сервер.
     """
-    return disnake.AllowedMentions(
-        everyone=False,
-        users=True,
-        roles=True,
-        replied_user=False
-    )
+    return disnake.AllowedMentions(everyone=False, users=True, roles=True, replied_user=False)
 
 
 @bot.slash_command(
     name="напиши",
     description="Отправить сообщение в выбранный канал от лица бота. Только для владельца.",
-    dm_permission=True
+    dm_permission=True,
 )
 async def slash_owner_write(
     interaction: disnake.CommandInteraction,
     канал: str = commands.Param(
         min_length=1,
         autocomplete=owner_channel_autocomplete,
-        description="Начни вводить название канала/сервера или вставь ссылку/ID"
+        description="Начни вводить название канала/сервера или вставь ссылку/ID",
     ),
-    текст: str = commands.Param(
-        min_length=1,
-        description="Текст, который бот отправит в канал"
-    ),
+    текст: str = commands.Param(min_length=1, description="Текст, который бот отправит в канал"),
     закрепить: str = commands.Param(
-        choices=["Нет", "Да"],
-        default="Нет",
-        description="Закрепить отправленное сообщение в канале?"
-    )
+        choices=["Нет", "Да"], default="Нет", description="Закрепить отправленное сообщение в канале?"
+    ),
 ):
     try:
         # Только владелец бота.
         if interaction.author.id != OWNER_ID:
             await interaction.response.send_message(
-                "❌ Гав! Эта команда доступна только владельцу бота.",
-                ephemeral=True
+                "❌ Гав! Эта команда доступна только владельцу бота.", ephemeral=True
             )
             return
 
@@ -3232,8 +3378,7 @@ async def slash_owner_write(
         # В сервере тоже не даём пользоваться, чтобы текст не светился в командном канале.
         if interaction.guild is not None:
             await interaction.response.send_message(
-                "❌ Гав! Эту команду пиши мне в ЛС, чтобы текст не светился на сервере.",
-                ephemeral=True
+                "❌ Гав! Эту команду пиши мне в ЛС, чтобы текст не светился на сервере.", ephemeral=True
             )
             return
 
@@ -3249,10 +3394,7 @@ async def slash_owner_write(
                 channel_id = matches[0].id
 
             elif len(matches) > 1:
-                variants = "\n".join(
-                    f"• `{ch.guild.name} / #{ch.name}` — `{ch.id}`"
-                    for ch in matches
-                )
+                variants = "\n".join(f"• `{ch.guild.name} / #{ch.name}` — `{ch.id}`" for ch in matches)
                 await interaction.edit_original_response(
                     "❌ Нашлось несколько похожих каналов. "
                     "Выбери точный канал из всплывающего списка или вставь ID.\n\n"
@@ -3280,23 +3422,17 @@ async def slash_owner_write(
                 return
 
         if not isinstance(target_channel, disnake.TextChannel):
-            await interaction.edit_original_response(
-                "❌ Это не обычный текстовый канал, куда я могу писать."
-            )
+            await interaction.edit_original_response("❌ Это не обычный текстовый канал, куда я могу писать.")
             return
 
         bot_member = target_channel.guild.me or target_channel.guild.get_member(bot.user.id)
         if not bot_member:
-            await interaction.edit_original_response(
-                "❌ Не смог проверить свои права на этом сервере."
-            )
+            await interaction.edit_original_response("❌ Не смог проверить свои права на этом сервере.")
             return
 
         perms = target_channel.permissions_for(bot_member)
         if not perms.view_channel or not perms.send_messages:
-            await interaction.edit_original_response(
-                "❌ У меня нет прав видеть этот канал или писать туда."
-            )
+            await interaction.edit_original_response("❌ У меня нет прав видеть этот канал или писать туда.")
             return
 
         should_pin = закрепить == "Да"
@@ -3316,10 +3452,7 @@ async def slash_owner_write(
 
         sent_messages = []
         for chunk in chunks:
-            sent_msg = await target_channel.send(
-                chunk,
-                allowed_mentions=allowed_mentions
-            )
+            sent_msg = await target_channel.send(chunk, allowed_mentions=allowed_mentions)
             sent_messages.append(sent_msg)
 
         pinned = False
@@ -3366,11 +3499,14 @@ async def slash_owner_write(
             await interaction.edit_original_response(error_text)
         else:
             await interaction.response.send_message(error_text, ephemeral=True)
-#жопажопа
+
+
+# жопажопа
 
 # ============================================================================
 # ЛС-ПЕРЕПИСКА ОТ ЛИЦА БОТА: /напиши_юзеру + пересылка ответов овнеру
 # ============================================================================
+
 
 def extract_discord_user_id(raw: str) -> int | None:
     """
@@ -3471,10 +3607,7 @@ async def find_user_for_owner_dm(raw_target: str) -> tuple[disnake.User | None, 
                 matches[member.id] = member
 
     if not matches:
-        return None, (
-            "❌ Не нашёл пользователя по такому нику.\n"
-            "Лучше укажи числовой ID пользователя."
-        )
+        return None, ("❌ Не нашёл пользователя по такому нику.\nЛучше укажи числовой ID пользователя.")
 
     if len(matches) > 1:
         variants = "\n".join(
@@ -3483,41 +3616,30 @@ async def find_user_for_owner_dm(raw_target: str) -> tuple[disnake.User | None, 
         )
 
         return None, (
-            "❌ Нашлось несколько пользователей с таким именем. "
-            "Укажи точный числовой ID.\n\n"
-            f"{variants}"
+            f"❌ Нашлось несколько пользователей с таким именем. Укажи точный числовой ID.\n\n{variants}"
         )
 
     member = next(iter(matches.values()))
     return member, None
 
+
 @bot.slash_command(
     name="напиши_юзеру",
     description="Отправить пользователю ЛС от лица бота. Только для владельца.",
-    contexts=disnake.InteractionContextTypes(bot_dm=True)
+    contexts=disnake.InteractionContextTypes(bot_dm=True),
 )
 async def slash_owner_write_user(
     interaction: disnake.CommandInteraction,
-    пользователь: str = commands.Param(
-        min_length=1,
-        description="ID пользователя, mention или @username"
-    ),
-    текст: str = commands.Param(
-        min_length=1,
-        description="Текст, который бот отправит человеку в ЛС"
-    )
+    пользователь: str = commands.Param(min_length=1, description="ID пользователя, mention или @username"),
+    текст: str = commands.Param(min_length=1, description="Текст, который бот отправит человеку в ЛС"),
 ):
     try:
         if interaction.author.id != OWNER_ID:
-            await interaction.response.send_message(
-                "❌ Эта команда доступна только владельцу бота."
-            )
+            await interaction.response.send_message("❌ Эта команда доступна только владельцу бота.")
             return
 
         if interaction.guild is not None:
-            await interaction.response.send_message(
-                "❌ Эта команда работает только в ЛС бота."
-            )
+            await interaction.response.send_message("❌ Эта команда работает только в ЛС бота.")
             return
 
         await interaction.response.defer()
@@ -3540,11 +3662,8 @@ async def slash_owner_write_user(
             await target_user.send(
                 chunk,
                 allowed_mentions=disnake.AllowedMentions(
-                    everyone=False,
-                    users=False,
-                    roles=False,
-                    replied_user=False
-                )
+                    everyone=False, users=False, roles=False, replied_user=False
+                ),
             )
             sent_count += 1
 
@@ -3575,6 +3694,7 @@ async def slash_owner_write_user(
             await interaction.edit_original_response(error_text)
         else:
             await interaction.response.send_message(error_text)
+
 
 @bot.listen("on_message")
 async def owner_dm_relay_listener(message: disnake.Message):
@@ -3607,8 +3727,7 @@ async def owner_dm_relay_listener(message: disnake.Message):
 
         if message.attachments:
             attachments_text = "\n\n**Вложения:**\n" + "\n".join(
-                f"• {attachment.filename}: {attachment.url}"
-                for attachment in message.attachments
+                f"• {attachment.filename}: {attachment.url}" for attachment in message.attachments
             )
 
         if not content.strip() and not attachments_text:
@@ -3631,15 +3750,13 @@ async def owner_dm_relay_listener(message: disnake.Message):
             await owner.send(
                 chunk,
                 allowed_mentions=disnake.AllowedMentions(
-                    everyone=False,
-                    users=False,
-                    roles=False,
-                    replied_user=False
-                )
+                    everyone=False, users=False, roles=False, replied_user=False
+                ),
             )
 
     except Exception as e:
         logger.error(f"Ошибка пересылки ЛС владельцу: {e}", exc_info=True)
+
 
 # ============================================================================
 # 📝 КОМАНДА И РЕАКЦИЯ ДЛЯ ВЛАДЕЛЬЦА: РЕДАКТИРОВАТЬ СООБЩЕНИЕ БОТА
@@ -3662,10 +3779,7 @@ def parse_discord_message_link(raw: str) -> tuple[int | None, int | None, int | 
 
     raw = raw.strip()
 
-    link_match = re.search(
-        r"discord(?:app)?\.com/channels/(\d{15,25})/(\d{15,25})/(\d{15,25})",
-        raw
-    )
+    link_match = re.search(r"discord(?:app)?\.com/channels/(\d{15,25})/(\d{15,25})/(\d{15,25})", raw)
     if link_match:
         return int(link_match.group(1)), int(link_match.group(2)), int(link_match.group(3))
 
@@ -3733,18 +3847,10 @@ def get_owner_allowed_mentions() -> disnake.AllowedMentions:
     try:
         return build_allowed_mentions_for_owner_message()
     except NameError:
-        return disnake.AllowedMentions(
-            everyone=False,
-            users=True,
-            roles=True,
-            replied_user=False
-        )
+        return disnake.AllowedMentions(everyone=False, users=True, roles=True, replied_user=False)
 
 
-async def edit_bot_message_content(
-    target_message: disnake.Message,
-    new_text: str
-) -> tuple[bool, str]:
+async def edit_bot_message_content(target_message: disnake.Message, new_text: str) -> tuple[bool, str]:
     """Редактирует сообщение бота."""
     if not bot.user or target_message.author.id != bot.user.id:
         return False, "Это сообщение написал не бот."
@@ -3755,13 +3861,13 @@ async def edit_bot_message_content(
     final_text = prepare_edited_bot_text(new_text, target_message.guild)
 
     if len(final_text) > 2000:
-        return False, f"Текст слишком длинный: `{len(final_text)}` символов. Для редактирования одного сообщения максимум `2000`."
+        return (
+            False,
+            f"Текст слишком длинный: `{len(final_text)}` символов. Для редактирования одного сообщения максимум `2000`.",
+        )
 
     try:
-        await target_message.edit(
-            content=final_text,
-            allowed_mentions=get_owner_allowed_mentions()
-        )
+        await target_message.edit(content=final_text, allowed_mentions=get_owner_allowed_mentions())
         return True, "Сообщение отредактировано."
     except disnake.Forbidden:
         return False, "У меня нет прав редактировать это сообщение."
@@ -3773,25 +3879,19 @@ async def edit_bot_message_content(
 @bot.slash_command(
     name="редактируй",
     description="Редактировать сообщение бота по ссылке. Только для владельца.",
-    dm_permission=True
+    dm_permission=True,
 )
 async def slash_owner_edit_bot_message(
     interaction: disnake.CommandInteraction,
-    сообщение: str = commands.Param(
-        min_length=1,
-        description="Ссылка на сообщение бота"
-    ),
-    текст: str = commands.Param(
-        min_length=1,
-        description="Новый текст сообщения"
-    )
+    сообщение: str = commands.Param(min_length=1, description="Ссылка на сообщение бота"),
+    текст: str = commands.Param(min_length=1, description="Новый текст сообщения"),
 ):
     try:
         # Только владелец бота.
         if interaction.author.id != OWNER_ID:
             await interaction.response.send_message(
                 "❌ Гав! Эта команда доступна только владельцу бота.",
-                ephemeral=(interaction.guild is not None)
+                ephemeral=(interaction.guild is not None),
             )
             return
 
@@ -3811,9 +3911,7 @@ async def slash_owner_edit_bot_message(
         if ok:
             jump_url = getattr(target_message, "jump_url", None)
             if jump_url:
-                await interaction.edit_original_response(
-                    f"✅ {info}\n{jump_url}"
-                )
+                await interaction.edit_original_response(f"✅ {info}\n{jump_url}")
             else:
                 await interaction.edit_original_response(f"✅ {info}")
         else:
@@ -3826,10 +3924,7 @@ async def slash_owner_edit_bot_message(
         if interaction.response.is_done():
             await interaction.edit_original_response(error_text)
         else:
-            await interaction.response.send_message(
-                error_text,
-                ephemeral=(interaction.guild is not None)
-            )
+            await interaction.response.send_message(error_text, ephemeral=(interaction.guild is not None))
 
 
 @bot.event
@@ -3885,10 +3980,7 @@ async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
         )
 
         def check(dm_message: disnake.Message) -> bool:
-            return (
-                dm_message.author.id == OWNER_ID
-                and isinstance(dm_message.channel, disnake.DMChannel)
-            )
+            return dm_message.author.id == OWNER_ID and isinstance(dm_message.channel, disnake.DMChannel)
 
         try:
             reply = await bot.wait_for("message", check=check, timeout=300)
@@ -3911,6 +4003,7 @@ async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
 
     except Exception as e:
         logger.error(f"Ошибка в on_raw_reaction_add для редактирования: {e}", exc_info=True)
+
 
 # ============================================================================
 # 🏠 КОМАНДА: !недвижка
@@ -3946,13 +4039,29 @@ REAL_ESTATE_WORLD = {
     },
     "Крорим": {
         "Республика Ивелтин": [
-            "Ромау", "Болгар", "Карталин", "Горманд", "Назлин", "Тотеншор",
-            "Вьесте", "Броивел", "Склоны Альбы", "Объятия матери", "Арзар-Дзеге",
-            "Боннар", "Карналорт", "Поселение на выбор"
+            "Ромау",
+            "Болгар",
+            "Карталин",
+            "Горманд",
+            "Назлин",
+            "Тотеншор",
+            "Вьесте",
+            "Броивел",
+            "Склоны Альбы",
+            "Объятия матери",
+            "Арзар-Дзеге",
+            "Боннар",
+            "Карналорт",
+            "Поселение на выбор",
         ],
         "Стальное Королевство": [
-            "Стальград", "Палхорн", "Аскар-Дур", "Жикарикан",
-            "Махиненбаубург", "Цванралор", "Поселение на выбор"
+            "Стальград",
+            "Палхорн",
+            "Аскар-Дур",
+            "Жикарикан",
+            "Махиненбаубург",
+            "Цванралор",
+            "Поселение на выбор",
         ],
     },
     "Брандар": {
@@ -3966,15 +4075,15 @@ REAL_ESTATE_WORLD = {
 }
 
 REAL_ESTATE_QUALITIES = [
-    "Ужасное",          # 2%
-    "Плохое",           # 5%
-    "Ниже среднего",    # 10%
-    "Приемлемое",       # 14%
-    "Нормальное",       # 34%
-    "Хорошее",          # 20%
-    "Очень хорошее",    # 10%
-    "Отличное",         # 4%
-    "Шедевр",           # 1%
+    "Ужасное",  # 2%
+    "Плохое",  # 5%
+    "Ниже среднего",  # 10%
+    "Приемлемое",  # 14%
+    "Нормальное",  # 34%
+    "Хорошее",  # 20%
+    "Очень хорошее",  # 10%
+    "Отличное",  # 4%
+    "Шедевр",  # 1%
 ]
 
 # Недвижкаролл использует ровно ту же шкалу вероятностей, что и Качестворолл.
@@ -3994,26 +4103,26 @@ def roll_real_estate():
 
     for continent, countries in REAL_ESTATE_WORLD.items():
         for country, cities in countries.items():
-            location_variants.append({
-                "type": "normal",
-                "continent": continent,
-                "country": country,
-                "cities": cities,
-            })
+            location_variants.append(
+                {
+                    "type": "normal",
+                    "continent": continent,
+                    "country": country,
+                    "cities": cities,
+                }
+            )
 
     # Один-единственный дополнительный вариант во всём пуле:
     # если выпадает он, секретарь может выбрать континент, государство и город.
-    location_variants.append({
-        "type": "full_choice",
-    })
+    location_variants.append(
+        {
+            "type": "full_choice",
+        }
+    )
 
     location = random.choice(location_variants)
 
-    quality = random.choices(
-        REAL_ESTATE_QUALITIES,
-        weights=REAL_ESTATE_QUALITY_WEIGHTS,
-        k=1
-    )[0]
+    quality = random.choices(REAL_ESTATE_QUALITIES, weights=REAL_ESTATE_QUALITY_WEIGHTS, k=1)[0]
 
     if location["type"] == "full_choice":
         return "находящаяся на континенте на выбор, в государстве на выбор и городе на выбор", quality
@@ -4065,14 +4174,14 @@ async def real_estate_message_listener(message):
         await message.reply(
             "Гав... простите, но я не могу ничего поделать — вы не мой хозяин. "
             "Эта команда слушается только **Секретариат** или **Фаеркадастр**.",
-            mention_author=False
+            mention_author=False,
         )
         return
 
     if len(parts) < 2 or not parts[1].strip():
         await message.reply(
-            '❌ Укажи недвижку после команды. Пример: `Недвижкаролл старый особняк с садом`',
-            mention_author=False
+            "❌ Укажи недвижку после команды. Пример: `Недвижкаролл старый особняк с садом`",
+            mention_author=False,
         )
         return
 
@@ -4081,9 +4190,10 @@ async def real_estate_message_listener(message):
 
     await message.reply(
         f'Недвижка "{estate_text}" определилась по запросу секретаря {message.author.mention} '
-        f'как {location_text}, итоговое качество — **{quality}**.',
-        mention_author=False
+        f"как {location_text}, итоговое качество — **{quality}**.",
+        mention_author=False,
     )
+
 
 # ============================================================================
 # 🎲 КОМАНДА: Качестворолл
@@ -4099,15 +4209,15 @@ QUALITY_ROLL_REFERENCE_TEXT = (
 )
 
 QUALITY_ROLL_QUALITIES = [
-    "Ужасное",          # 2%
-    "Плохое",           # 5%
-    "Ниже среднего",    # 10%
-    "Приемлемое",       # 14%
-    "Нормальное",       # 34%
-    "Хорошее",          # 20%
-    "Очень хорошее",    # 10%
-    "Отличное",         # 4%
-    "Шедевр",           # 1%
+    "Ужасное",  # 2%
+    "Плохое",  # 5%
+    "Ниже среднего",  # 10%
+    "Приемлемое",  # 14%
+    "Нормальное",  # 34%
+    "Хорошее",  # 20%
+    "Очень хорошее",  # 10%
+    "Отличное",  # 4%
+    "Шедевр",  # 1%
 ]
 
 QUALITY_ROLL_WEIGHTS = [
@@ -4132,11 +4242,7 @@ def has_quality_roll_access(member):
 
 
 def roll_item_quality():
-    return random.choices(
-        QUALITY_ROLL_QUALITIES,
-        weights=QUALITY_ROLL_WEIGHTS,
-        k=1
-    )[0]
+    return random.choices(QUALITY_ROLL_QUALITIES, weights=QUALITY_ROLL_WEIGHTS, k=1)[0]
 
 
 @bot.listen("on_message")
@@ -4158,14 +4264,13 @@ async def quality_roll_message_listener(message):
         await message.reply(
             "Гав... простите, но я не могу ничего поделать — эта команда слушается только "
             "**Секретариат**, **Фаеркадастр** или **Анкетолог**.",
-            mention_author=False
+            mention_author=False,
         )
         return
 
     if len(parts) < 2 or not parts[1].strip():
         await message.reply(
-            '❌ Укажи предмет после команды. Пример: `Качестворолл меч из пака`',
-            mention_author=False
+            "❌ Укажи предмет после команды. Пример: `Качестворолл меч из пака`", mention_author=False
         )
         return
 
@@ -4174,9 +4279,9 @@ async def quality_roll_message_listener(message):
 
     await message.reply(
         f'Предмет "{item_text}" определился по запросу секретаря {message.author.mention}, '
-        f'итоговое качество — **{quality}**.\n\n'
-        f'**Справка:**\n{QUALITY_ROLL_REFERENCE_TEXT}',
-        mention_author=False
+        f"итоговое качество — **{quality}**.\n\n"
+        f"**Справка:**\n{QUALITY_ROLL_REFERENCE_TEXT}",
+        mention_author=False,
     )
 
 
@@ -4215,209 +4320,271 @@ XLSX_SYNONYMS_SHEET = "08_Синонимы"
 
 # Фолбэк-словарь нужен, чтобы команда работала даже если лист 08_Синонимы случайно удалили.
 # Если лист 08_Синонимы есть в Excel, данные из него ДОБАВЛЯЮТСЯ поверх этого списка.
-DEFAULT_MERCENARY_QUERY_SYNONYMS: dict[str, list[str]] = {'актер': ['Актер', 'Актер в театре', 'Голосистый артист'],
- 'актёр': ['Актер', 'Актер в театре', 'Голосистый артист'],
- 'алхимик': ['Аптекарь', 'Провизор', 'Кудесник', 'Чернокнижник'],
- 'аркебузир': ['Стрелок', 'Картечник', 'Артиллерист'],
- 'артиллерист': ['Артиллерист', 'Канонир', 'Бомбардир', 'Картечник'],
- 'артист': ['Актер', 'Актер в театре', 'Голосистый артист', 'Певец', 'Акробат', 'Крылатый факир'],
- 'бандит': ['Сиделец', 'Наемник', 'Наймит', 'Пират', 'Пальцевщик', 'Разведчик', 'Каратель'],
- 'батрак': ['Рабочий на ферме', 'Фермер-подневольный', 'Жнец', 'Косарь', 'Сборщик ягод', 'скотник'],
- 'боец': ['Солдат', 'Пехотинец', 'Мечник', 'Копейщик', 'Лучник', 'Стрелок', 'Турнирный борец', 'Наемник'],
- 'бронник': ['Оружейник', 'Кузнец', 'Клиноковщик', 'Клепальщик'],
- 'ведьмак': ['Ведьмак', 'Охотник', 'Ловец зверей', 'Преследователь'],
- 'виноградарь': ['Винодел', 'Рабочий на винодельне', 'Раб на винодельне'],
- 'воин': ['Солдат', 'Пехотинец', 'Мечник', 'Копейщик', 'Лучник', 'Стрелок', 'Рыцарь', 'Гвардеец', 'Наемник', 'Наймит'],
- 'вокалист': ['Певец', 'Певец на королевском приеме', 'Голосистый артист', 'Бард'],
- 'вор': ['Пальцевщик', 'Сиделец', 'Разведчик', 'Пират', 'Наемник'],
- 'вояка': ['Солдат', 'Пехотинец', 'Наемник', 'Наймит', 'Гвардеец'],
- 'врач': ['Лекарь', 'Аптекарь', 'Провизор'],
- 'головорез': ['Каратель', 'Палач', 'Наемник', 'Наймит', 'Пират'],
- 'гончар': ['Гончар', 'Ремесленник'],
- 'горничная': ['Горничная', 'Слуга', 'Комнатный слуга', 'Лакеи'],
- 'горняк': ['Шахтер', 'Раб на руднике', 'Рабочий на каменоломне'],
- 'грабитель': ['Пират', 'Наемник', 'Наймит', 'Сиделец', 'Каратель'],
- 'гравер': ['Ремесленник', 'Ювелир', 'Медник', 'Оружейник'],
- 'гравёр': ['Ремесленник', 'Ювелир', 'Медник', 'Оружейник'],
- 'дворецкий': ['Дворецкий', 'Лакеи', 'Слуга', 'Комнатный слуга'],
- 'дирижер': ['Дирижер', 'Бард', 'Гулящий музыкант'],
- 'дирижёр': ['Дирижер', 'Бард', 'Гулящий музыкант'],
- 'домработница': ['Горничная', 'Слуга', 'Комнатный слуга'],
- 'дровосек': ['Дровосек', 'Лесоруб', 'Рабочий на лесопилке'],
- 'дуэлянт': ['Фехтовальщик', 'Рыцарь-дуэлянт', 'Мечник'],
- 'жрец': ['Священник', 'Служитель церкви', 'Богослов', 'Инквизитор'],
- 'заводской': ['Рабочий на стекольной фабрике',
-               'Рабочий на шоколадной фабрике',
-               'Рабочий на холодильном заводе',
-               'Рабочий на кирпичной заводе',
-               'Железнодорожный техник',
-               'Котлобойщик'],
- 'заключенный': ['Сиделец', 'Раб на руднике', 'Раб на каменоломне', 'Холоп'],
- 'заключённый': ['Сиделец', 'Раб на руднике', 'Раб на каменоломне', 'Холоп'],
- 'зверолов': ['Ловец зверей', 'Охотник', 'Сторож-охотник', 'Смотритель зоопарка'],
- 'златокузнец': ['Ювелир', 'Медник', 'Ремесленник'],
- 'илот': ['Раб на руднике', 'Раб на каменоломне', 'Холоп', 'Фермер-подневольный'],
- 'каменщик': ['Каменщик', 'Печник', 'Рабочий на каменоломне', 'Раб на каменоломне'],
- 'камердинер': ['Дворецкий', 'Комнатный слуга', 'Лакеи'],
- 'караульщик': ['Караульный', 'Страж', 'Стражник', 'Ночной сторож', 'Сторож'],
- 'картограф': ['Геодезист', 'Исследователь', 'Командир корабля'],
- 'каторжник': ['Раб на руднике', 'Раб на каменоломне', 'Надзиратель в тюрьме', 'Сиделец'],
- 'книгочей': ['Библиотекарь', 'Книгоносец', 'Писарь', 'Богослов', 'Богослов-ученый'],
- 'книжник': ['Библиотекарь', 'Книгоносец', 'Писарь', 'Богослов', 'Богослов-ученый'],
- 'коваль': ['Кузнец', 'Клепальщик', 'Клиноковщик', 'Медник', 'Оружейник'],
- 'колдун': ['Кудесник', 'Чернокнижник', 'Ведьмак'],
- 'кондотьер': ['Наемник', 'Наймит', 'Солдат', 'Пехотинец', 'Мечник', 'Рыцарь', 'Гвардеец'],
- 'контрабандист': ['Пират', 'Сиделец', 'Продавец', 'Наемник'],
- 'красильщик': ['Ткач', 'Кардер', 'Продавец тканей', 'Ремесленник'],
- 'крепостной': ['Холоп', 'Фермер-подневольный', 'Рабочий на ферме', 'Раб на саванной'],
- 'крестьянин': ['Фермер', 'Фермер-подневольный', 'Рабочий на ферме', 'Жнец', 'Косарь', 'Сборщик ягод'],
- 'кузнец': ['Кузнец', 'Клепальщик', 'Клиноковщик', 'Медник', 'Оружейник'],
- 'кулинар': ['Повар', 'Кухарь', 'Мясник', 'Рабочий на шоколадной фабрике'],
- 'купец': ['Продавец', 'Продавец тканей', 'Сиделец', 'Посланник'],
- 'кухарка': ['Кухарь', 'Повар', 'Слуга', 'Горничная'],
- 'лавочник': ['Продавец', 'Сиделец', 'Продавец тканей'],
- 'лакей': ['Лакеи', 'Слуга', 'Дворецкий', 'Комнатный слуга'],
- 'ландскнехт': ['Наемник',
-                'Наймит',
-                'Солдат',
-                'Пехотинец',
-                'Копейщик',
-                'Мечник',
-                'Рыцарь',
-                'Рыцарь-дуэлянт',
-                'Рыцарь ордена',
-                'Тевтонский рыцарь',
-                'Гвардеец'],
- 'лекарь': ['Лекарь', 'Аптекарь', 'Провизор', 'Работник местной церкви', 'Служитель церкви'],
- 'лесоруб': ['Лесоруб', 'Дровосек', 'Рабочий на лесопилке', 'Раб на лесопилке'],
- 'маг': ['Кудесник', 'Чернокнижник', 'Богослов-ученый', 'Священник'],
- 'мажордом': ['Дворецкий', 'Лакеи', 'Слуга'],
- 'мародер': ['Пират', 'Наемник', 'Наймит', 'Сиделец'],
- 'мародёр': ['Пират', 'Наемник', 'Наймит', 'Сиделец'],
- 'мастеровой': ['Ремесленник', 'Мастер', 'Подмастерье', 'Ученик'],
- 'матрос': ['Корабельник', 'Гребец', 'Пират', 'Рабочий в порту'],
- 'мельник': ['Мельник', 'Рабочий на мельнице', 'Управляющий на мельнице'],
- 'менестрель': ['Бард', 'Гулящий музыкант', 'Певец'],
- 'моряк': ['Корабельник', 'Командир корабля', 'Гребец', 'Пират', 'Рабочий в порту'],
- 'мошенник': ['Сиделец', 'Продавец', 'Посланник', 'Пальцевщик'],
- 'музыкант': ['Бард', 'Гулящий музыкант', 'Баянист', 'Фортепианщик', 'Дирижер', 'Голосистый артист'],
- 'мыловар': ['Ремесленник', 'Аптекарь', 'Провизор'],
- 'мясник': ['Мясник', 'Рабочий на мясокомбинате', 'Охотник'],
- 'налетчик': ['Пират', 'Наемник', 'Наймит', 'Разведчик', 'Каратель'],
- 'налётчик': ['Пират', 'Наемник', 'Наймит', 'Разведчик', 'Каратель'],
- 'наставник': ['Наставник', 'Обучающий наставник', 'Тренер', 'Мастер'],
- 'невольник': ['Раб на руднике',
-               'Раб на каменоломне',
-               'Раб на верфи',
-               'Раб на лесопилке',
-               'Раб на винодельне',
-               'Раб на шоколадной фабрике',
-               'Раб на стекольной фабрике',
-               'Раб на холодильном заводе',
-               'Раб на саванной',
-               'Эльф раб дварфов',
-               'Холоп',
-               'Фермер-подневольный'],
- 'оружейник': ['Оружейник', 'Кузнец', 'Клиноковщик', 'Оруженосец'],
- 'охотник': ['Охотник', 'Ловец зверей', 'Сторож-охотник', 'Ведьмак'],
- 'охранник': ['Страж', 'Стражник', 'Сторож', 'Ночной сторож', 'Караульный', 'Гвардеец', 'Городовой'],
- 'певец': ['Певец', 'Певец на королевском приеме', 'Голосистый артист', 'Бард', 'Гулящий музыкант'],
- 'певица': ['Певец', 'Певец на королевском приеме', 'Голосистый артист', 'Бард'],
- 'пекарь': ['Повар', 'Кухарь', 'Мельник'],
- 'пес войны': ['Наемник', 'Наймит', 'Солдат', 'Пехотинец', 'Разведчик', 'Мечник', 'Стрелок'],
- 'писец': ['Писарь', 'Книгоносец', 'Библиотекарь'],
- 'плотник': ['Плотник', 'Столяр', 'Тесарь', 'Рабочий на лесопилке', 'Корабельник'],
- 'повар': ['Повар', 'Кухарь', 'Мясник', 'Рабочий на шоколадной фабрике'],
- 'поденщик': ['Чернорабочий', 'Рабочий на ферме', 'Рабочий на каменоломне', 'Рабочий на кирпичной заводе'],
- 'подмастерье': ['Подмастерье', 'Ученик', 'Ремесленник'],
- 'подёнщик': ['Чернорабочий', 'Рабочий на ферме', 'Рабочий на каменоломне', 'Рабочий на кирпичной заводе'],
- 'портной': ['Ткач', 'Сапожник', 'Рабочий на ткацкой фабрике', 'Кардер'],
- 'прислуга': ['Горничная', 'Слуга', 'Комнатный слуга', 'Лакеи', 'Дворецкий'],
- 'проповедник': ['Священник', 'Богослов', 'Служитель церкви', 'Духовный чиновник'],
- 'прораб': ['Прораб', 'Мастер', 'Мастер на мануфактуре', 'Надсмотрщик за общественными работами'],
- 'псы войны': ['Наемник', 'Наймит', 'Солдат', 'Пехотинец', 'Разведчик', 'Мечник', 'Стрелок'],
- 'пушкарь': ['Канонир', 'Бомбардир', 'Артиллерист', 'Картечник'],
- 'раб': ['Раб на руднике',
-         'Раб на каменоломне',
-         'Раб на верфи',
-         'Раб на лесопилке',
-         'Раб на винодельне',
-         'Раб на шоколадной фабрике',
-         'Раб на стекольной фабрике',
-         'Раб на холодильном заводе',
-         'Раб на саванной',
-         'Эльф раб дварфов',
-         'Холоп',
-         'Фермер-подневольный'],
- 'работник': ['Работник местной церкви',
-              'Рабочий в порту',
-              'Рабочий на верфи',
-              'Рабочий на ферме',
-              'Чернорабочий',
-              'Мастер на мануфактуре',
-              'Мастер'],
- 'рабочий': ['Рабочий в порту',
-             'Рабочий на верфи',
-             'Рабочий на винодельне',
-             'Рабочий на каменоломне',
-             'Рабочий на кирпичной заводе',
-             'Рабочий на лесопилке',
-             'Рабочий на мельнице',
-             'Рабочий на мясокомбинате',
-             'Рабочий на свинарнике',
-             'Рабочий на стекольной фабрике',
-             'Рабочий на ткацкой фабрике',
-             'Рабочий на ферме',
-             'Рабочий на холодильном заводе',
-             'Рабочий на шоколадной фабрике',
-             'Чернорабочий'],
- 'разбойник': ['Сиделец', 'Наемник', 'Наймит', 'Пират', 'Пальцевщик', 'Разведчик', 'Каратель'],
- 'разнорабочий': ['Чернорабочий', 'Рабочий в порту', 'Рабочий на верфи', 'Рабочий на ферме', 'Рабочий на каменоломне'],
- 'ратник': ['Солдат', 'Пехотинец', 'Мечник', 'Копейщик', 'Рыцарь', 'Страж', 'Гвардеец'],
- 'ремесленник': ['Ремесленник', 'Мастер', 'Подмастерье', 'Ученик'],
- 'рудокоп': ['Шахтер', 'Раб на руднике'],
- 'рыбак': ['Рыбак', 'Гребец', 'Рабочий в порту'],
- 'садовник': ['Фермер', 'Сборщик ягод', 'Рабочий на ферме', 'Винодел'],
- 'сапожник': ['Сапожник', 'Ткач', 'Ремесленник'],
- 'священник': ['Священник', 'Служитель церкви', 'Работник местной церкви', 'Богослов', 'Духовный чиновник'],
- 'сипай': ['Солдат', 'Пехотинец', 'Наемник', 'Наймит', 'Страж', 'Гвардеец'],
- 'скоморох': ['Бард', 'Гулящий музыкант', 'Актер', 'Акробат', 'Крылатый факир'],
- 'следопыт': ['Разведчик', 'Преследователь', 'Охотник', 'Сторож-охотник', 'Ловец зверей'],
- 'служанка': ['Горничная', 'Слуга', 'Комнатный слуга'],
- 'служивый': ['Солдат', 'Пехотинец', 'Страж', 'Стражник', 'Гвардеец', 'Наемник'],
- 'солдат удачи': ['Наемник', 'Наймит', 'Солдат', 'Пехотинец', 'Разведчик', 'Мечник', 'Стрелок'],
- 'солдат фортуны': ['Наемник', 'Наймит', 'Солдат', 'Пехотинец', 'Разведчик', 'Мечник', 'Стрелок'],
- 'стеклодув': ['Рабочий на стекольной фабрике', 'Раб на стекольной фабрике', 'Ремесленник'],
- 'столяр': ['Столяр', 'Плотник', 'Тесарь'],
- 'стрелец': ['Стрелок', 'Лучник', 'Артиллерист', 'Картечник'],
- 'строитель': ['Каменщик', 'Плотник', 'Тесарь', 'Печник', 'Прораб', 'Чернорабочий', 'Рабочий на кирпичной заводе'],
- 'сыщик': ['Разведчик', 'Преследователь', 'Сторож-охотник', 'Охотник'],
- 'ткач': ['Ткач', 'Кардер', 'Рабочий на ткацкой фабрике', 'Продавец тканей'],
- 'торговец': ['Продавец', 'Продавец тканей', 'Сиделец', 'Посланник', 'Дворецкий'],
- 'травник': ['Аптекарь', 'Провизор', 'Табачник', 'Фермер'],
- 'тюремщик': ['Надзиратель в тюрьме', 'Каратель', 'Палач', 'Инквизитор'],
- 'уголовник': ['Сиделец', 'Пальцевщик', 'Каратель', 'Пират', 'Наемник'],
- 'узник': ['Сиделец', 'Раб на руднике', 'Раб на каменоломне', 'Холоп'],
- 'управленец': ['Мастер', 'Мастер на мануфактуре', 'Управляющий на мельнице', 'Прораб', 'Дворецкий', 'Магистрат'],
- 'ученый': ['Исследователь', 'Богослов-ученый', 'Библиотекарь', 'Геодезист'],
- 'учитель': ['Наставник', 'Обучающий наставник', 'Ученик', 'Подмастерье', 'Тренер'],
- 'учёный': ['Исследователь', 'Богослов-ученый', 'Библиотекарь', 'Геодезист'],
- 'фабричный': ['Рабочий на ткацкой фабрике',
-               'Рабочий на стекольной фабрике',
-               'Рабочий на шоколадной фабрике',
-               'Рабочий на холодильном заводе',
-               'Мастер на мануфактуре'],
- 'факир': ['Крылатый факир', 'Акробат', 'Актер'],
- 'фермер': ['Фермер', 'Фермер-подневольный', 'Рабочий на ферме', 'Жнец', 'Косарь', 'Сборщик ягод', 'скотник'],
- 'фехтовальщик': ['Фехтовальщик', 'Рыцарь-дуэлянт', 'Мечник'],
- 'холоп': ['Холоп', 'Фермер-подневольный', 'Слуга', 'Раб на руднике'],
- 'целитель': ['Лекарь', 'Священник', 'Аптекарь', 'Работник местной церкви'],
- 'циркач': ['Акробат', 'Крылатый факир', 'Актер', 'Бард'],
- 'чиновник': ['Духовный чиновник', 'Магистрат', 'Верховный лидер', 'Посланник'],
- 'шахтер': ['Шахтер', 'Раб на руднике', 'Рабочий на каменоломне', 'Раб на каменоломне'],
- 'шахтёр': ['Шахтер', 'Раб на руднике', 'Рабочий на каменоломне', 'Раб на каменоломне'],
- 'экономка': ['Горничная', 'Дворецкий', 'Слуга', 'Управляющий на мельнице'],
- 'ювелир': ['Ювелир', 'Медник', 'Ремесленник', 'Эльф раб дварфов']}
+DEFAULT_MERCENARY_QUERY_SYNONYMS: dict[str, list[str]] = {
+    "актер": ["Актер", "Актер в театре", "Голосистый артист"],
+    "актёр": ["Актер", "Актер в театре", "Голосистый артист"],
+    "алхимик": ["Аптекарь", "Провизор", "Кудесник", "Чернокнижник"],
+    "аркебузир": ["Стрелок", "Картечник", "Артиллерист"],
+    "артиллерист": ["Артиллерист", "Канонир", "Бомбардир", "Картечник"],
+    "артист": ["Актер", "Актер в театре", "Голосистый артист", "Певец", "Акробат", "Крылатый факир"],
+    "бандит": ["Сиделец", "Наемник", "Наймит", "Пират", "Пальцевщик", "Разведчик", "Каратель"],
+    "батрак": ["Рабочий на ферме", "Фермер-подневольный", "Жнец", "Косарь", "Сборщик ягод", "скотник"],
+    "боец": ["Солдат", "Пехотинец", "Мечник", "Копейщик", "Лучник", "Стрелок", "Турнирный борец", "Наемник"],
+    "бронник": ["Оружейник", "Кузнец", "Клиноковщик", "Клепальщик"],
+    "ведьмак": ["Ведьмак", "Охотник", "Ловец зверей", "Преследователь"],
+    "виноградарь": ["Винодел", "Рабочий на винодельне", "Раб на винодельне"],
+    "воин": [
+        "Солдат",
+        "Пехотинец",
+        "Мечник",
+        "Копейщик",
+        "Лучник",
+        "Стрелок",
+        "Рыцарь",
+        "Гвардеец",
+        "Наемник",
+        "Наймит",
+    ],
+    "вокалист": ["Певец", "Певец на королевском приеме", "Голосистый артист", "Бард"],
+    "вор": ["Пальцевщик", "Сиделец", "Разведчик", "Пират", "Наемник"],
+    "вояка": ["Солдат", "Пехотинец", "Наемник", "Наймит", "Гвардеец"],
+    "врач": ["Лекарь", "Аптекарь", "Провизор"],
+    "головорез": ["Каратель", "Палач", "Наемник", "Наймит", "Пират"],
+    "гончар": ["Гончар", "Ремесленник"],
+    "горничная": ["Горничная", "Слуга", "Комнатный слуга", "Лакеи"],
+    "горняк": ["Шахтер", "Раб на руднике", "Рабочий на каменоломне"],
+    "грабитель": ["Пират", "Наемник", "Наймит", "Сиделец", "Каратель"],
+    "гравер": ["Ремесленник", "Ювелир", "Медник", "Оружейник"],
+    "гравёр": ["Ремесленник", "Ювелир", "Медник", "Оружейник"],
+    "дворецкий": ["Дворецкий", "Лакеи", "Слуга", "Комнатный слуга"],
+    "дирижер": ["Дирижер", "Бард", "Гулящий музыкант"],
+    "дирижёр": ["Дирижер", "Бард", "Гулящий музыкант"],
+    "домработница": ["Горничная", "Слуга", "Комнатный слуга"],
+    "дровосек": ["Дровосек", "Лесоруб", "Рабочий на лесопилке"],
+    "дуэлянт": ["Фехтовальщик", "Рыцарь-дуэлянт", "Мечник"],
+    "жрец": ["Священник", "Служитель церкви", "Богослов", "Инквизитор"],
+    "заводской": [
+        "Рабочий на стекольной фабрике",
+        "Рабочий на шоколадной фабрике",
+        "Рабочий на холодильном заводе",
+        "Рабочий на кирпичной заводе",
+        "Железнодорожный техник",
+        "Котлобойщик",
+    ],
+    "заключенный": ["Сиделец", "Раб на руднике", "Раб на каменоломне", "Холоп"],
+    "заключённый": ["Сиделец", "Раб на руднике", "Раб на каменоломне", "Холоп"],
+    "зверолов": ["Ловец зверей", "Охотник", "Сторож-охотник", "Смотритель зоопарка"],
+    "златокузнец": ["Ювелир", "Медник", "Ремесленник"],
+    "илот": ["Раб на руднике", "Раб на каменоломне", "Холоп", "Фермер-подневольный"],
+    "каменщик": ["Каменщик", "Печник", "Рабочий на каменоломне", "Раб на каменоломне"],
+    "камердинер": ["Дворецкий", "Комнатный слуга", "Лакеи"],
+    "караульщик": ["Караульный", "Страж", "Стражник", "Ночной сторож", "Сторож"],
+    "картограф": ["Геодезист", "Исследователь", "Командир корабля"],
+    "каторжник": ["Раб на руднике", "Раб на каменоломне", "Надзиратель в тюрьме", "Сиделец"],
+    "книгочей": ["Библиотекарь", "Книгоносец", "Писарь", "Богослов", "Богослов-ученый"],
+    "книжник": ["Библиотекарь", "Книгоносец", "Писарь", "Богослов", "Богослов-ученый"],
+    "коваль": ["Кузнец", "Клепальщик", "Клиноковщик", "Медник", "Оружейник"],
+    "колдун": ["Кудесник", "Чернокнижник", "Ведьмак"],
+    "кондотьер": ["Наемник", "Наймит", "Солдат", "Пехотинец", "Мечник", "Рыцарь", "Гвардеец"],
+    "контрабандист": ["Пират", "Сиделец", "Продавец", "Наемник"],
+    "красильщик": ["Ткач", "Кардер", "Продавец тканей", "Ремесленник"],
+    "крепостной": ["Холоп", "Фермер-подневольный", "Рабочий на ферме", "Раб на саванной"],
+    "крестьянин": ["Фермер", "Фермер-подневольный", "Рабочий на ферме", "Жнец", "Косарь", "Сборщик ягод"],
+    "кузнец": ["Кузнец", "Клепальщик", "Клиноковщик", "Медник", "Оружейник"],
+    "кулинар": ["Повар", "Кухарь", "Мясник", "Рабочий на шоколадной фабрике"],
+    "купец": ["Продавец", "Продавец тканей", "Сиделец", "Посланник"],
+    "кухарка": ["Кухарь", "Повар", "Слуга", "Горничная"],
+    "лавочник": ["Продавец", "Сиделец", "Продавец тканей"],
+    "лакей": ["Лакеи", "Слуга", "Дворецкий", "Комнатный слуга"],
+    "ландскнехт": [
+        "Наемник",
+        "Наймит",
+        "Солдат",
+        "Пехотинец",
+        "Копейщик",
+        "Мечник",
+        "Рыцарь",
+        "Рыцарь-дуэлянт",
+        "Рыцарь ордена",
+        "Тевтонский рыцарь",
+        "Гвардеец",
+    ],
+    "лекарь": ["Лекарь", "Аптекарь", "Провизор", "Работник местной церкви", "Служитель церкви"],
+    "лесоруб": ["Лесоруб", "Дровосек", "Рабочий на лесопилке", "Раб на лесопилке"],
+    "маг": ["Кудесник", "Чернокнижник", "Богослов-ученый", "Священник"],
+    "мажордом": ["Дворецкий", "Лакеи", "Слуга"],
+    "мародер": ["Пират", "Наемник", "Наймит", "Сиделец"],
+    "мародёр": ["Пират", "Наемник", "Наймит", "Сиделец"],
+    "мастеровой": ["Ремесленник", "Мастер", "Подмастерье", "Ученик"],
+    "матрос": ["Корабельник", "Гребец", "Пират", "Рабочий в порту"],
+    "мельник": ["Мельник", "Рабочий на мельнице", "Управляющий на мельнице"],
+    "менестрель": ["Бард", "Гулящий музыкант", "Певец"],
+    "моряк": ["Корабельник", "Командир корабля", "Гребец", "Пират", "Рабочий в порту"],
+    "мошенник": ["Сиделец", "Продавец", "Посланник", "Пальцевщик"],
+    "музыкант": ["Бард", "Гулящий музыкант", "Баянист", "Фортепианщик", "Дирижер", "Голосистый артист"],
+    "мыловар": ["Ремесленник", "Аптекарь", "Провизор"],
+    "мясник": ["Мясник", "Рабочий на мясокомбинате", "Охотник"],
+    "налетчик": ["Пират", "Наемник", "Наймит", "Разведчик", "Каратель"],
+    "налётчик": ["Пират", "Наемник", "Наймит", "Разведчик", "Каратель"],
+    "наставник": ["Наставник", "Обучающий наставник", "Тренер", "Мастер"],
+    "невольник": [
+        "Раб на руднике",
+        "Раб на каменоломне",
+        "Раб на верфи",
+        "Раб на лесопилке",
+        "Раб на винодельне",
+        "Раб на шоколадной фабрике",
+        "Раб на стекольной фабрике",
+        "Раб на холодильном заводе",
+        "Раб на саванной",
+        "Эльф раб дварфов",
+        "Холоп",
+        "Фермер-подневольный",
+    ],
+    "оружейник": ["Оружейник", "Кузнец", "Клиноковщик", "Оруженосец"],
+    "охотник": ["Охотник", "Ловец зверей", "Сторож-охотник", "Ведьмак"],
+    "охранник": ["Страж", "Стражник", "Сторож", "Ночной сторож", "Караульный", "Гвардеец", "Городовой"],
+    "певец": ["Певец", "Певец на королевском приеме", "Голосистый артист", "Бард", "Гулящий музыкант"],
+    "певица": ["Певец", "Певец на королевском приеме", "Голосистый артист", "Бард"],
+    "пекарь": ["Повар", "Кухарь", "Мельник"],
+    "пес войны": ["Наемник", "Наймит", "Солдат", "Пехотинец", "Разведчик", "Мечник", "Стрелок"],
+    "писец": ["Писарь", "Книгоносец", "Библиотекарь"],
+    "плотник": ["Плотник", "Столяр", "Тесарь", "Рабочий на лесопилке", "Корабельник"],
+    "повар": ["Повар", "Кухарь", "Мясник", "Рабочий на шоколадной фабрике"],
+    "поденщик": ["Чернорабочий", "Рабочий на ферме", "Рабочий на каменоломне", "Рабочий на кирпичной заводе"],
+    "подмастерье": ["Подмастерье", "Ученик", "Ремесленник"],
+    "подёнщик": ["Чернорабочий", "Рабочий на ферме", "Рабочий на каменоломне", "Рабочий на кирпичной заводе"],
+    "портной": ["Ткач", "Сапожник", "Рабочий на ткацкой фабрике", "Кардер"],
+    "прислуга": ["Горничная", "Слуга", "Комнатный слуга", "Лакеи", "Дворецкий"],
+    "проповедник": ["Священник", "Богослов", "Служитель церкви", "Духовный чиновник"],
+    "прораб": ["Прораб", "Мастер", "Мастер на мануфактуре", "Надсмотрщик за общественными работами"],
+    "псы войны": ["Наемник", "Наймит", "Солдат", "Пехотинец", "Разведчик", "Мечник", "Стрелок"],
+    "пушкарь": ["Канонир", "Бомбардир", "Артиллерист", "Картечник"],
+    "раб": [
+        "Раб на руднике",
+        "Раб на каменоломне",
+        "Раб на верфи",
+        "Раб на лесопилке",
+        "Раб на винодельне",
+        "Раб на шоколадной фабрике",
+        "Раб на стекольной фабрике",
+        "Раб на холодильном заводе",
+        "Раб на саванной",
+        "Эльф раб дварфов",
+        "Холоп",
+        "Фермер-подневольный",
+    ],
+    "работник": [
+        "Работник местной церкви",
+        "Рабочий в порту",
+        "Рабочий на верфи",
+        "Рабочий на ферме",
+        "Чернорабочий",
+        "Мастер на мануфактуре",
+        "Мастер",
+    ],
+    "рабочий": [
+        "Рабочий в порту",
+        "Рабочий на верфи",
+        "Рабочий на винодельне",
+        "Рабочий на каменоломне",
+        "Рабочий на кирпичной заводе",
+        "Рабочий на лесопилке",
+        "Рабочий на мельнице",
+        "Рабочий на мясокомбинате",
+        "Рабочий на свинарнике",
+        "Рабочий на стекольной фабрике",
+        "Рабочий на ткацкой фабрике",
+        "Рабочий на ферме",
+        "Рабочий на холодильном заводе",
+        "Рабочий на шоколадной фабрике",
+        "Чернорабочий",
+    ],
+    "разбойник": ["Сиделец", "Наемник", "Наймит", "Пират", "Пальцевщик", "Разведчик", "Каратель"],
+    "разнорабочий": [
+        "Чернорабочий",
+        "Рабочий в порту",
+        "Рабочий на верфи",
+        "Рабочий на ферме",
+        "Рабочий на каменоломне",
+    ],
+    "ратник": ["Солдат", "Пехотинец", "Мечник", "Копейщик", "Рыцарь", "Страж", "Гвардеец"],
+    "ремесленник": ["Ремесленник", "Мастер", "Подмастерье", "Ученик"],
+    "рудокоп": ["Шахтер", "Раб на руднике"],
+    "рыбак": ["Рыбак", "Гребец", "Рабочий в порту"],
+    "садовник": ["Фермер", "Сборщик ягод", "Рабочий на ферме", "Винодел"],
+    "сапожник": ["Сапожник", "Ткач", "Ремесленник"],
+    "священник": [
+        "Священник",
+        "Служитель церкви",
+        "Работник местной церкви",
+        "Богослов",
+        "Духовный чиновник",
+    ],
+    "сипай": ["Солдат", "Пехотинец", "Наемник", "Наймит", "Страж", "Гвардеец"],
+    "скоморох": ["Бард", "Гулящий музыкант", "Актер", "Акробат", "Крылатый факир"],
+    "следопыт": ["Разведчик", "Преследователь", "Охотник", "Сторож-охотник", "Ловец зверей"],
+    "служанка": ["Горничная", "Слуга", "Комнатный слуга"],
+    "служивый": ["Солдат", "Пехотинец", "Страж", "Стражник", "Гвардеец", "Наемник"],
+    "солдат удачи": ["Наемник", "Наймит", "Солдат", "Пехотинец", "Разведчик", "Мечник", "Стрелок"],
+    "солдат фортуны": ["Наемник", "Наймит", "Солдат", "Пехотинец", "Разведчик", "Мечник", "Стрелок"],
+    "стеклодув": ["Рабочий на стекольной фабрике", "Раб на стекольной фабрике", "Ремесленник"],
+    "столяр": ["Столяр", "Плотник", "Тесарь"],
+    "стрелец": ["Стрелок", "Лучник", "Артиллерист", "Картечник"],
+    "строитель": [
+        "Каменщик",
+        "Плотник",
+        "Тесарь",
+        "Печник",
+        "Прораб",
+        "Чернорабочий",
+        "Рабочий на кирпичной заводе",
+    ],
+    "сыщик": ["Разведчик", "Преследователь", "Сторож-охотник", "Охотник"],
+    "ткач": ["Ткач", "Кардер", "Рабочий на ткацкой фабрике", "Продавец тканей"],
+    "торговец": ["Продавец", "Продавец тканей", "Сиделец", "Посланник", "Дворецкий"],
+    "травник": ["Аптекарь", "Провизор", "Табачник", "Фермер"],
+    "тюремщик": ["Надзиратель в тюрьме", "Каратель", "Палач", "Инквизитор"],
+    "уголовник": ["Сиделец", "Пальцевщик", "Каратель", "Пират", "Наемник"],
+    "узник": ["Сиделец", "Раб на руднике", "Раб на каменоломне", "Холоп"],
+    "управленец": [
+        "Мастер",
+        "Мастер на мануфактуре",
+        "Управляющий на мельнице",
+        "Прораб",
+        "Дворецкий",
+        "Магистрат",
+    ],
+    "ученый": ["Исследователь", "Богослов-ученый", "Библиотекарь", "Геодезист"],
+    "учитель": ["Наставник", "Обучающий наставник", "Ученик", "Подмастерье", "Тренер"],
+    "учёный": ["Исследователь", "Богослов-ученый", "Библиотекарь", "Геодезист"],
+    "фабричный": [
+        "Рабочий на ткацкой фабрике",
+        "Рабочий на стекольной фабрике",
+        "Рабочий на шоколадной фабрике",
+        "Рабочий на холодильном заводе",
+        "Мастер на мануфактуре",
+    ],
+    "факир": ["Крылатый факир", "Акробат", "Актер"],
+    "фермер": [
+        "Фермер",
+        "Фермер-подневольный",
+        "Рабочий на ферме",
+        "Жнец",
+        "Косарь",
+        "Сборщик ягод",
+        "скотник",
+    ],
+    "фехтовальщик": ["Фехтовальщик", "Рыцарь-дуэлянт", "Мечник"],
+    "холоп": ["Холоп", "Фермер-подневольный", "Слуга", "Раб на руднике"],
+    "целитель": ["Лекарь", "Священник", "Аптекарь", "Работник местной церкви"],
+    "циркач": ["Акробат", "Крылатый факир", "Актер", "Бард"],
+    "чиновник": ["Духовный чиновник", "Магистрат", "Верховный лидер", "Посланник"],
+    "шахтер": ["Шахтер", "Раб на руднике", "Рабочий на каменоломне", "Раб на каменоломне"],
+    "шахтёр": ["Шахтер", "Раб на руднике", "Рабочий на каменоломне", "Раб на каменоломне"],
+    "экономка": ["Горничная", "Дворецкий", "Слуга", "Управляющий на мельнице"],
+    "ювелир": ["Ювелир", "Медник", "Ремесленник", "Эльф раб дварфов"],
+}
 
 
 def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
@@ -4451,12 +4618,14 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
         if not profession:
             continue
 
-        base_skills = dedupe_preserve_order([
-            row.get("Базовый навык 1", ""),
-            row.get("Базовый навык 2", ""),
-            row.get("Базовый навык 3", ""),
-            row.get("Базовый навык 4", ""),
-        ])
+        base_skills = dedupe_preserve_order(
+            [
+                row.get("Базовый навык 1", ""),
+                row.get("Базовый навык 2", ""),
+                row.get("Базовый навык 3", ""),
+                row.get("Базовый навык 4", ""),
+            ]
+        )
 
         if known_skills:
             base_skills = [skill for skill in base_skills if skill in known_skills]
@@ -4496,18 +4665,22 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
         if not profession or not spec_name or profession not in mercs:
             continue
 
-        spec_skills = dedupe_preserve_order([
-            row.get("Доп. навык 1", ""),
-            row.get("Доп. навык 2", ""),
-        ])
+        spec_skills = dedupe_preserve_order(
+            [
+                row.get("Доп. навык 1", ""),
+                row.get("Доп. навык 2", ""),
+            ]
+        )
         if known_skills:
             spec_skills = [skill for skill in spec_skills if skill in known_skills]
 
-        specs.setdefault(profession, []).append({
-            "name": spec_name,
-            "skills": spec_skills,
-            "note": row.get("Заметка", ""),
-        })
+        specs.setdefault(profession, []).append(
+            {
+                "name": spec_name,
+                "skills": spec_skills,
+                "note": row.get("Заметка", ""),
+            }
+        )
 
     aliases: dict[str, str] = {}
     for row in alias_rows:
@@ -4581,9 +4754,11 @@ def normalize_mercenary_name(name: str) -> str | None:
 
 
 def get_known_skills() -> set:
-    return set(KNOWN_MERCENARY_SKILLS) if KNOWN_MERCENARY_SKILLS else {
-        skill for pool in MERCENARIES_DB.values() for skill in pool
-    }
+    return (
+        set(KNOWN_MERCENARY_SKILLS)
+        if KNOWN_MERCENARY_SKILLS
+        else {skill for pool in MERCENARIES_DB.values() for skill in pool}
+    )
 
 
 def has_specialization(profession: str) -> bool:
@@ -4667,10 +4842,7 @@ def find_mercenary_matches(query: str, limit: int = 25) -> list[str]:
         elif any(token.startswith(normalized) for token in p_tokens):
             _add_match(scored, profession, 3)
         elif all(
-            any(
-                (len(qt) >= 3 and qt in pt) or (len(pt) >= 3 and pt in qt)
-                for pt in p_tokens
-            )
+            any((len(qt) >= 3 and qt in pt) or (len(pt) >= 3 and pt in qt) for pt in p_tokens)
             for qt in query_tokens
         ):
             _add_match(scored, profession, 4)
@@ -4711,10 +4883,7 @@ def find_mercenary_matches(query: str, limit: int = 25) -> list[str]:
 
     return [
         name
-        for name, _score in sorted(
-            scored.items(),
-            key=lambda item: (item[1], normalize_lookup_text(item[0]))
-        )
+        for name, _score in sorted(scored.items(), key=lambda item: (item[1], normalize_lookup_text(item[0])))
     ][:limit]
 
 
@@ -4798,6 +4967,7 @@ jail_timers_restored = False
 # ПРОВЕРКА ДОСТУПА
 # ============================================================================
 
+
 def has_jail_access(member: disnake.Member) -> bool:
     """
     Разрешает использовать темницу:
@@ -4810,10 +4980,7 @@ def has_jail_access(member: disnake.Member) -> bool:
     if member.guild_permissions.administrator:
         return True
 
-    member_role_names = {
-        role.name.strip().casefold()
-        for role in member.roles
-    }
+    member_role_names = {role.name.strip().casefold() for role in member.roles}
 
     return bool(member_role_names & JAIL_GUARD_ROLE_NAMES)
 
@@ -4822,9 +4989,14 @@ def has_jail_access(member: disnake.Member) -> bool:
 # РАБОТА СО ВРЕМЕНЕМ И БАЗОЙ
 # ============================================================================
 
-def save_jail_sentence_db(guild_id: int, user_id: int, moderator_id: int, reason: str, expires_at: datetime) -> None:
+
+def save_jail_sentence_db(
+    guild_id: int, user_id: int, moderator_id: int, reason: str, expires_at: datetime
+) -> None:
     """Persist jail state through the repository using the configured session."""
-    jail_storage.save_jail_sentence_db(SessionLocal, JAIL_ROLE_ID, guild_id, user_id, moderator_id, reason, expires_at)
+    jail_storage.save_jail_sentence_db(
+        SessionLocal, JAIL_ROLE_ID, guild_id, user_id, moderator_id, reason, expires_at
+    )
 
 
 def delete_jail_sentence_db(guild_id: int, user_id: int) -> None:
@@ -4839,6 +5011,7 @@ def load_jail_sentences_db() -> list[tuple[int, int, datetime]]:
 
 # ПОИСК НАРУШИТЕЛЯ
 # ============================================================================
+
 
 async def get_jail_reply_target(
     message: disnake.Message,
@@ -4856,9 +5029,7 @@ async def get_jail_reply_target(
 
     if not isinstance(referenced_message, disnake.Message):
         try:
-            referenced_message = await message.channel.fetch_message(
-                reference.message_id
-            )
+            referenced_message = await message.channel.fetch_message(reference.message_id)
 
         except (
             disnake.NotFound,
@@ -4923,6 +5094,7 @@ async def get_jail_mentioned_target(
 # СНЯТИЕ РОЛИ ПОСЛЕ ОКОНЧАНИЯ СРОКА
 # ============================================================================
 
+
 async def jail_release_worker(
     guild_id: int,
     user_id: int,
@@ -4938,9 +5110,7 @@ async def jail_release_worker(
             if expires_at is None:
                 return
 
-            delay = (
-                expires_at - datetime.now(timezone.utc)
-            ).total_seconds()
+            delay = (expires_at - datetime.now(timezone.utc)).total_seconds()
 
             if delay > 0:
                 await asyncio.sleep(delay)
@@ -4953,9 +5123,7 @@ async def jail_release_worker(
             guild = bot.get_guild(guild_id)
 
             if guild is None:
-                logger.warning(
-                    f"Темница: сервер {guild_id} не найден."
-                )
+                logger.warning(f"Темница: сервер {guild_id} не найден.")
 
                 jail_deadlines.pop(key, None)
 
@@ -4970,10 +5138,7 @@ async def jail_release_worker(
             sleep_role = guild.get_role(JAIL_ROLE_ID)
 
             if sleep_role is None:
-                logger.error(
-                    f"Темница: роль {JAIL_ROLE_ID} "
-                    f"на сервере {guild_id} не найдена."
-                )
+                logger.error(f"Темница: роль {JAIL_ROLE_ID} на сервере {guild_id} не найдена.")
 
                 jail_deadlines.pop(key, None)
 
@@ -4999,8 +5164,7 @@ async def jail_release_worker(
                     disnake.HTTPException,
                 ) as e:
                     logger.error(
-                        f"Темница: не удалось получить участника "
-                        f"{user_id}: {e}",
+                        f"Темница: не удалось получить участника {user_id}: {e}",
                         exc_info=True,
                     )
 
@@ -5041,10 +5205,7 @@ async def jail_release_worker(
                 user_id,
             )
 
-            logger.info(
-                f"Темница: роль снята с участника {user_id} "
-                f"на сервере {guild_id}."
-            )
+            logger.info(f"Темница: роль снята с участника {user_id} на сервере {guild_id}.")
 
             return
 
@@ -5053,8 +5214,7 @@ async def jail_release_worker(
 
     except Exception as e:
         logger.error(
-            f"Ошибка таймера темницы для "
-            f"{guild_id}/{user_id}: {e}",
+            f"Ошибка таймера темницы для {guild_id}/{user_id}: {e}",
             exc_info=True,
         )
 
@@ -5094,6 +5254,7 @@ def schedule_jail_release(
 # ВОССТАНОВЛЕНИЕ ТАЙМЕРОВ ПОСЛЕ ПЕРЕЗАПУСКА
 # ============================================================================
 
+
 @bot.listen("on_ready")
 async def restore_jail_timers_after_restart() -> None:
     global jail_timers_restored
@@ -5105,16 +5266,11 @@ async def restore_jail_timers_after_restart() -> None:
     jail_timers_restored = True
 
     if SessionLocal is None:
-        logger.warning(
-            "⚠️ DATABASE_URL не настроен: "
-            "сроки темницы не переживут перезапуск бота."
-        )
+        logger.warning("⚠️ DATABASE_URL не настроен: сроки темницы не переживут перезапуск бота.")
         return
 
     try:
-        records = await asyncio.to_thread(
-            load_jail_sentences_db
-        )
+        records = await asyncio.to_thread(load_jail_sentences_db)
 
         for guild_id, user_id, expires_at in records:
             schedule_jail_release(
@@ -5123,9 +5279,7 @@ async def restore_jail_timers_after_restart() -> None:
                 expires_at,
             )
 
-        logger.info(
-            f"Темница: восстановлено таймеров — {len(records)}."
-        )
+        logger.info(f"Темница: восстановлено таймеров — {len(records)}.")
 
     except Exception as e:
         logger.error(
@@ -5137,6 +5291,7 @@ async def restore_jail_timers_after_restart() -> None:
 # ============================================================================
 # ОБЫЧНОЕ СООБЩЕНИЕ-КОМАНДА БЕЗ «!» И БЕЗ СЛЭША
 # ============================================================================
+
 
 @bot.listen("on_message")
 async def jail_sentence_listener(
@@ -5156,13 +5311,9 @@ async def jail_sentence_listener(
         return
 
     # Проверяем права автора команды.
-    if (
-        not isinstance(message.author, disnake.Member)
-        or not has_jail_access(message.author)
-    ):
+    if not isinstance(message.author, disnake.Member) or not has_jail_access(message.author):
         await message.reply(
-            "❌ Эту команду могут использовать только администраторы, "
-            "Гвардейцы и Старшие Гвардейцы.",
+            "❌ Эту команду могут использовать только администраторы, Гвардейцы и Старшие Гвардейцы.",
             mention_author=False,
         )
         return
@@ -5172,16 +5323,14 @@ async def jail_sentence_listener(
 
     if not 1 <= minutes <= MAX_JAIL_MINUTES:
         await message.reply(
-            f"❌ Срок должен быть от 1 до "
-            f"{MAX_JAIL_MINUTES} минут.",
+            f"❌ Срок должен быть от 1 до {MAX_JAIL_MINUTES} минут.",
             mention_author=False,
         )
         return
 
     if len(reason) > 500:
         await message.reply(
-            "❌ Примечание слишком длинное. "
-            "Максимум — 500 символов.",
+            "❌ Примечание слишком длинное. Максимум — 500 символов.",
             mention_author=False,
         )
         return
@@ -5230,10 +5379,7 @@ async def jail_sentence_listener(
 
     bot_member = message.guild.me
 
-    if (
-        bot_member is None
-        or not bot_member.guild_permissions.manage_roles
-    ):
+    if bot_member is None or not bot_member.guild_permissions.manage_roles:
         await message.reply(
             "❌ У бота нет права **Управлять ролями**.",
             mention_author=False,
@@ -5242,35 +5388,26 @@ async def jail_sentence_listener(
 
     if sleep_role.managed:
         await message.reply(
-            "❌ Роль `Спит` управляется интеграцией, "
-            "поэтому бот не может её выдавать.",
+            "❌ Роль `Спит` управляется интеграцией, поэтому бот не может её выдавать.",
             mention_author=False,
         )
         return
 
     if sleep_role >= bot_member.top_role:
         await message.reply(
-            "❌ Роль бота должна находиться выше роли `Спит` "
-            "в списке ролей сервера.",
+            "❌ Роль бота должна находиться выше роли `Спит` в списке ролей сервера.",
             mention_author=False,
         )
         return
 
-    if (
-        target.id == message.guild.owner_id
-        or target.top_role >= bot_member.top_role
-    ):
+    if target.id == message.guild.owner_id or target.top_role >= bot_member.top_role:
         await message.reply(
-            "❌ Бот не может изменять роли этого участника: "
-            "его высшая роль находится не ниже роли бота.",
+            "❌ Бот не может изменять роли этого участника: его высшая роль находится не ниже роли бота.",
             mention_author=False,
         )
         return
 
-    expires_at = (
-        datetime.now(timezone.utc)
-        + timedelta(minutes=minutes)
-    )
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=minutes)
 
     audit_reason = (
         f"Темница на {minutes} мин.; "
@@ -5301,8 +5438,7 @@ async def jail_sentence_listener(
             # Без записи в БД таймер всё равно работает,
             # но только до перезапуска процесса.
             logger.error(
-                f"Темница: не удалось сохранить срок в БД: "
-                f"{db_error}",
+                f"Темница: не удалось сохранить срок в БД: {db_error}",
                 exc_info=True,
             )
 
@@ -5346,8 +5482,7 @@ async def jail_sentence_listener(
         )
 
         await message.reply(
-            f"❌ Discord вернул ошибку при выдаче роли: "
-            f"`{str(e)[:250]}`",
+            f"❌ Discord вернул ошибку при выдаче роли: `{str(e)[:250]}`",
             mention_author=False,
         )
 
@@ -5358,10 +5493,10 @@ async def jail_sentence_listener(
         )
 
         await message.reply(
-            "❌ При выполнении команды произошла "
-            "непредвиденная ошибка.",
+            "❌ При выполнении команды произошла непредвиденная ошибка.",
             mention_author=False,
         )
+
 
 # ============================================================================
 # ДОСРОЧНОЕ ОСВОБОЖДЕНИЕ ИЗ ТЕМНИЦЫ: снимает роль «Спит» и отменяет таймер
@@ -5372,6 +5507,7 @@ async def jail_sentence_listener(
 # Через упоминание:
 # @Пользователь ты освобождаешься из темницы за наказание снято
 # ============================================================================
+
 
 @bot.listen("on_message")
 async def jail_manual_release_listener(
@@ -5386,13 +5522,9 @@ async def jail_manual_release_listener(
     if match is None:
         return
 
-    if (
-        not isinstance(message.author, disnake.Member)
-        or not has_jail_access(message.author)
-    ):
+    if not isinstance(message.author, disnake.Member) or not has_jail_access(message.author):
         await message.reply(
-            "❌ Открывать Темницу могут только администраторы, "
-            "Гвардейцы и Старшие Гвардейцы.",
+            "❌ Открывать Темницу могут только администраторы, Гвардейцы и Старшие Гвардейцы.",
             mention_author=False,
         )
         return
@@ -5438,10 +5570,7 @@ async def jail_manual_release_listener(
         return
 
     bot_member = message.guild.me
-    if (
-        bot_member is None
-        or not bot_member.guild_permissions.manage_roles
-    ):
+    if bot_member is None or not bot_member.guild_permissions.manage_roles:
         await message.reply(
             "❌ У бота нет права **Управлять ролями**.",
             mention_author=False,
@@ -5462,13 +5591,9 @@ async def jail_manual_release_listener(
         )
         return
 
-    if (
-        target.id == message.guild.owner_id
-        or target.top_role >= bot_member.top_role
-    ):
+    if target.id == message.guild.owner_id or target.top_role >= bot_member.top_role:
         await message.reply(
-            "❌ Бот не может изменить роли этого участника: "
-            "его высшая роль находится не ниже роли бота.",
+            "❌ Бот не может изменить роли этого участника: его высшая роль находится не ниже роли бота.",
             mention_author=False,
         )
         return
@@ -5510,8 +5635,7 @@ async def jail_manual_release_listener(
 
         if role_was_present:
             text = (
-                f"🔓 Ворота Темницы открыты для {target.mention}. "
-                f"Роль `Спит` снята.\n**Причина:** {reason}"
+                f"🔓 Ворота Темницы открыты для {target.mention}. Роль `Спит` снята.\n**Причина:** {reason}"
             )
         else:
             text = (
@@ -5533,8 +5657,7 @@ async def jail_manual_release_listener(
 
     except disnake.Forbidden:
         await message.reply(
-            "❌ Discord не позволил открыть Темницу. Проверь право "
-            "**Управлять ролями** и иерархию ролей.",
+            "❌ Discord не позволил открыть Темницу. Проверь право **Управлять ролями** и иерархию ролей.",
             mention_author=False,
         )
 
@@ -5683,7 +5806,9 @@ async def slash_mercenary(
             skills_with_levels.append((skill, roll_skill_level()))
 
         level_order = ["Легендарный Мастер", "Мастер", "Ветеран", "Опытный", "Новичок"]
-        skills_with_levels.sort(key=lambda item: level_order.index(item[1]) if item[1] in level_order else 999)
+        skills_with_levels.sort(
+            key=lambda item: level_order.index(item[1]) if item[1] in level_order else 999
+        )
 
         skills_text = ""
         for skill, level in skills_with_levels:
@@ -5737,7 +5862,8 @@ async def slash_mercenary(
         else:
             await interaction.response.send_message(embed=error_embed, ephemeral=True)
 
-#мяу
+
+# мяу
 # ============================================================================
 # 📊 ПОДСЧЁТ ПОСТОВ — вставить сразу после:
 # bot = commands.Bot(command_prefix="!", intents=intents)
@@ -5862,10 +5988,7 @@ async def pc_collect_archive_stream(
     except disnake.HTTPException as exc:
         errors.append(f"{source_name} {pc_channel_label(parent)}: {exc}")
     except TypeError as exc:
-        errors.append(
-            f"{source_name} {pc_channel_label(parent)}: "
-            "несовместимая сигнатура API"
-        )
+        errors.append(f"{source_name} {pc_channel_label(parent)}: несовместимая сигнатура API")
         logger.error(
             "archived_threads %s: %s",
             pc_channel_label(parent),
@@ -5892,8 +6015,7 @@ async def pc_collect_targets(
     parents = [
         channel
         for channel in channels
-        if getattr(channel, "category_id", None) in category_ids
-        and pc_supported_parent(channel)
+        if getattr(channel, "category_id", None) in category_ids and pc_supported_parent(channel)
     ]
     parent_ids = {channel.id for channel in parents}
     targets = {}
@@ -5903,34 +6025,38 @@ async def pc_collect_targets(
     for parent in parents:
         if isinstance(parent, disnake.TextChannel):
             targets[parent.id] = parent
-            archive_sources.extend((
+            archive_sources.extend(
                 (
-                    parent,
-                    parent.archived_threads(
-                        private=False,
-                        joined=False,
-                        limit=None,
+                    (
+                        parent,
+                        parent.archived_threads(
+                            private=False,
+                            joined=False,
+                            limit=None,
+                        ),
+                        "публичные архивы",
                     ),
-                    "публичные архивы",
-                ),
-                (
-                    parent,
-                    parent.archived_threads(
-                        private=True,
-                        joined=False,
-                        limit=None,
+                    (
+                        parent,
+                        parent.archived_threads(
+                            private=True,
+                            joined=False,
+                            limit=None,
+                        ),
+                        "приватные архивы",
                     ),
-                    "приватные архивы",
-                ),
-            ))
+                )
+            )
         elif isinstance(parent, disnake.ForumChannel) or (
             media_type is not None and isinstance(parent, media_type)
         ):
-            archive_sources.append((
-                parent,
-                parent.archived_threads(limit=None),
-                "архивы",
-            ))
+            archive_sources.append(
+                (
+                    parent,
+                    parent.archived_threads(limit=None),
+                    "архивы",
+                )
+            )
 
         for thread in getattr(parent, "threads", ()):
             targets[thread.id] = thread
@@ -5965,6 +6091,7 @@ async def pc_collect_targets(
             targets[thread.id] = thread
 
     return list(targets.values()), errors
+
 
 async def pc_scan_target(target, user_id, word_pattern, families, period, semaphore):
     """
@@ -6028,7 +6155,7 @@ def pc_api_timestamp(raw):
 
 def pc_chunks(values, size):
     for index in range(0, len(values), size):
-        yield values[index:index + size]
+        yield values[index : index + size]
 
 
 def pc_search_headers():
@@ -6081,11 +6208,7 @@ async def pc_search_request(session, guild_id, params, search_info):
                     return data
 
                 code = data.get("code") if isinstance(data, dict) else None
-                message = (
-                    data.get("message")
-                    if isinstance(data, dict)
-                    else str(data)
-                )
+                message = data.get("message") if isinstance(data, dict) else str(data)
                 detail = f"HTTP {response.status}"
                 if code is not None:
                     detail += f", code {code}"
@@ -6122,11 +6245,7 @@ async def pc_search_request(session, guild_id, params, search_info):
                     search_info["rate_limit_waits"] += 1
                     search_info["retry_attempts"] += 1
 
-                    retry_after = (
-                        data.get("retry_after")
-                        if isinstance(data, dict)
-                        else None
-                    )
+                    retry_after = data.get("retry_after") if isinstance(data, dict) else None
                     if retry_after is None:
                         retry_after = response.headers.get("Retry-After", 1)
                     try:
@@ -6169,9 +6288,7 @@ async def pc_search_request(session, guild_id, params, search_info):
             if http_attempts <= PC_SEARCH_HTTP_RETRIES:
                 await asyncio.sleep(min(2 ** (http_attempts - 1), 12))
                 continue
-            raise PCSearchUnavailable(
-                f"сетевая ошибка Discord Search: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise PCSearchUnavailable(f"сетевая ошибка Discord Search: {type(exc).__name__}: {exc}") from exc
 
 
 def pc_flatten_search_messages(data):
@@ -6228,10 +6345,7 @@ async def pc_search_batch(
             ("sort_order", "desc"),
             ("include_nsfw", "true"),
         ]
-        params.extend(
-            ("channel_id", str(channel_id))
-            for channel_id in target_map
-        )
+        params.extend(("channel_id", str(channel_id)) for channel_id in target_map)
 
         data = await pc_search_request(
             session,
@@ -6266,9 +6380,7 @@ async def pc_search_batch(
                 continue
 
             created_at = pc_api_timestamp(raw_message.get("timestamp"))
-            if created_at is not None and not (
-                period.start_utc <= created_at < period.end_exclusive_utc
-            ):
+            if created_at is not None and not (period.start_utc <= created_at < period.end_exclusive_utc):
                 continue
 
             pc_apply_content(
@@ -6280,10 +6392,7 @@ async def pc_search_batch(
                 channel_id=channel_id,
                 guild_id=guild_id,
                 created_at=created_at,
-                jump_url=(
-                    f"https://discord.com/channels/"
-                    f"{guild_id}/{channel_id}/{message_id}"
-                ),
+                jump_url=(f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"),
             )
 
         if on_page is not None:
@@ -6340,10 +6449,7 @@ async def pc_search_batch_adaptive(
         return results, [], []
 
     except PCSearchUnavailable as exc:
-        can_split = (
-            exc.status in PC_SEARCH_SPLIT_STATUSES
-            and len(batch_targets) > PC_SEARCH_MIN_SPLIT_BATCH
-        )
+        can_split = exc.status in PC_SEARCH_SPLIT_STATUSES and len(batch_targets) > PC_SEARCH_MIN_SPLIT_BATCH
 
         if not can_split:
             return [], list(batch_targets), [str(exc)]
@@ -6354,8 +6460,7 @@ async def pc_search_batch_adaptive(
         right = batch_targets[midpoint:]
 
         logger.warning(
-            "Discord Search отклонил пакет из %s каналов (%s). "
-            "Делю на %s и %s и пробую снова.",
+            "Discord Search отклонил пакет из %s каналов (%s). Делю на %s и %s и пробую снова.",
             len(batch_targets),
             exc,
             len(left),
@@ -6533,9 +6638,7 @@ async def pc_search_or_fallback(
     if fallback_targets:
         search_info["fallback_targets"] = len(fallback_targets)
         search_info["method"] = (
-            "history_fallback"
-            if not completed_results
-            else "discord_search+history_fallback"
+            "history_fallback" if not completed_results else "discord_search+history_fallback"
         )
 
         semaphore = asyncio.Semaphore(PC_CONCURRENCY)
@@ -6572,6 +6675,7 @@ async def pc_search_or_fallback(
 
     return completed_results, search_info
 
+
 async def pc_send_reply_chain(
     interaction,
     chunks,
@@ -6596,20 +6700,12 @@ async def pc_send_reply_chain(
     for offset, chunk in enumerate(chunks):
         part_number = start_part + offset
         report_embed = disnake.Embed(
-            title=(
-                f"📊 Подсчёт постов — продолжение "
-                f"{part_number}/{total_parts}"
-            ),
+            title=(f"📊 Подсчёт постов — продолжение {part_number}/{total_parts}"),
             description=str(chunk or "").strip() or "Продолжение отчёта.",
             color=0x5865F2,
             timestamp=datetime.now(),
         )
-        report_embed.set_footer(
-            text=(
-                f"Часть {part_number}/{total_parts} • "
-                "строки не обрезаются посередине"
-            )
-        )
+        report_embed.set_footer(text=(f"Часть {part_number}/{total_parts} • строки не обрезаются посередине"))
 
         sent = await interaction.channel.send(
             embed=report_embed,
@@ -6620,15 +6716,12 @@ async def pc_send_reply_chain(
 
     return previous_message
 
+
 def pc_record_identity(record):
     return (
         record.get("id")
         or record.get("jump_url")
-        or (
-            f"{record.get('channel_id')}:"
-            f"{record.get('created_at')}:"
-            f"{hash(record.get('content', ''))}"
-        )
+        or (f"{record.get('channel_id')}:{record.get('created_at')}:{hash(record.get('content', ''))}")
     )
 
 
@@ -6644,10 +6737,7 @@ def pc_records_for_surface(
 
     for record in records:
         for match in record.get("matches", []):
-            if (
-                match.get("family") != family
-                or match.get("payload_key") != payload_key
-            ):
+            if match.get("family") != family or match.get("payload_key") != payload_key:
                 continue
 
             if exact and match.get("exact"):
@@ -6703,8 +6793,7 @@ def pc_append_txt_message(lines, record, number, family):
 
     if length_enabled and isinstance(body_length, int):
         length_text = (
-            f"{body_length} символов — "
-            f"{'ДЛИННЫЙ' if body_length >= PC_LONG_POST_MIN_CHARS else 'КОРОТКИЙ'}"
+            f"{body_length} символов — {'ДЛИННЫЙ' if body_length >= PC_LONG_POST_MIN_CHARS else 'КОРОТКИЙ'}"
         )
     else:
         length_text = "не классифицируется для этого семейства"
@@ -6713,11 +6802,7 @@ def pc_append_txt_message(lines, record, number, family):
     for match in record.get("matches", []):
         if match.get("family") != family:
             continue
-        surfaces.append(
-            match.get("canonical")
-            if match.get("exact")
-            else match.get("surface")
-        )
+        surfaces.append(match.get("canonical") if match.get("exact") else match.get("surface"))
 
     unique_surfaces = []
     seen_surfaces = set()
@@ -6728,74 +6813,64 @@ def pc_append_txt_message(lines, record, number, family):
         seen_surfaces.add(key)
         unique_surfaces.append(key)
 
-    lines.extend([
-        f"[{number}]",
-        f"Дата: {pc_record_datetime_msk(record)}",
-        (
-            f"Канал: {record.get('channel', 'неизвестный канал')} "
-            f"(channel_id: {record.get('channel_id') or '?'})"
-        ),
-        f"ID сообщения: {record.get('id') or '?'}",
-        f"Ссылка: {record.get('jump_url') or 'нет ссылки'}",
-        f"Длина текста без найденных меток: {length_text}",
-        "Найденные написания этого семейства: "
-        + (", ".join(unique_surfaces) if unique_surfaces else "не указаны"),
-        "Текст сообщения:",
-        "-" * 72,
-        record.get("content") or "[пустой текст]",
-        "-" * 72,
-        "",
-    ])
+    lines.extend(
+        [
+            f"[{number}]",
+            f"Дата: {pc_record_datetime_msk(record)}",
+            (
+                f"Канал: {record.get('channel', 'неизвестный канал')} "
+                f"(channel_id: {record.get('channel_id') or '?'})"
+            ),
+            f"ID сообщения: {record.get('id') or '?'}",
+            f"Ссылка: {record.get('jump_url') or 'нет ссылки'}",
+            f"Длина текста без найденных меток: {length_text}",
+            "Найденные написания этого семейства: "
+            + (", ".join(unique_surfaces) if unique_surfaces else "не указаны"),
+            "Текст сообщения:",
+            "-" * 72,
+            record.get("content") or "[пустой текст]",
+            "-" * 72,
+            "",
+        ]
+    )
 
 
 def pc_append_txt_surface_messages(lines, records, family):
     records = sorted(records, key=pc_record_sort_key)
 
     if pc_length_enabled_for_family(family):
-        long_records = [
-            record for record in records
-            if record.get("length_kind") == "long"
-        ]
-        short_records = [
-            record for record in records
-            if record.get("length_kind") == "short"
-        ]
-        unclassified = [
-            record for record in records
-            if record.get("length_kind") not in {"long", "short"}
-        ]
+        long_records = [record for record in records if record.get("length_kind") == "long"]
+        short_records = [record for record in records if record.get("length_kind") == "short"]
+        unclassified = [record for record in records if record.get("length_kind") not in {"long", "short"}]
 
         sections = [
             (
-                f"ДЛИННЫЕ СООБЩЕНИЯ "
-                f"(≥{PC_LONG_POST_MIN_CHARS} символов)",
+                f"ДЛИННЫЕ СООБЩЕНИЯ (≥{PC_LONG_POST_MIN_CHARS} символов)",
                 long_records,
             ),
             (
-                f"КОРОТКИЕ СООБЩЕНИЯ "
-                f"(<{PC_LONG_POST_MIN_CHARS} символов)",
+                f"КОРОТКИЕ СООБЩЕНИЯ (<{PC_LONG_POST_MIN_CHARS} символов)",
                 short_records,
             ),
         ]
         if unclassified:
-            sections.append(
-                ("БЕЗ КЛАССИФИКАЦИИ ДЛИНЫ", unclassified)
-            )
+            sections.append(("БЕЗ КЛАССИФИКАЦИИ ДЛИНЫ", unclassified))
     else:
         sections = [
             (
-                "ВСЕ СООБЩЕНИЯ "
-                "(классификация длины для семейства отключена)",
+                "ВСЕ СООБЩЕНИЯ (классификация длины для семейства отключена)",
                 records,
             )
         ]
 
     for title, section_records in sections:
-        lines.extend([
-            title,
-            "." * 72,
-            f"Количество сообщений: {len(section_records)}",
-        ])
+        lines.extend(
+            [
+                title,
+                "." * 72,
+                f"Количество сообщений: {len(section_records)}",
+            ]
+        )
         if not section_records:
             lines.extend(["Сообщений нет.", ""])
             continue
@@ -6829,11 +6904,7 @@ def pc_full_report(
     long_count = length_stats.get("long", 0)
     short_count = length_stats.get("short", 0)
     total_lengths = long_count + short_count
-    enabled_families = [
-        PC_LABELS[family]
-        for family in families
-        if pc_length_enabled_for_family(family)
-    ]
+    enabled_families = [PC_LABELS[family] for family in families if pc_length_enabled_for_family(family)]
 
     lines = [
         "ПОЛНЫЙ ОТЧЁТ ПО ШАБЛОНАМ",
@@ -6856,18 +6927,9 @@ def pc_full_report(
         f"Целей резервного history()-обхода: {search_info.get('fallback_targets', 0)}",
         f"Ошибок поиска веток: {len(discovery_errors or [])}",
         f"Непрочитанных каналов/веток: {len(failed or [])}",
-        (
-            "Сбор каналов и архивных веток: "
-            f"{stage_timings.get('collect', '0.0')} сек."
-        ),
-        (
-            "Discord Search API: "
-            f"{stage_timings.get('search', '0.0')} сек."
-        ),
-        (
-            "Формирование статистики и TXT: "
-            f"{stage_timings.get('report', '0.0')} сек."
-        ),
+        (f"Сбор каналов и архивных веток: {stage_timings.get('collect', '0.0')} сек."),
+        (f"Discord Search API: {stage_timings.get('search', '0.0')} сек."),
+        (f"Формирование статистики и TXT: {stage_timings.get('report', '0.0')} сек."),
         f"Всего: {stage_timings.get('total', f'{elapsed:.1f}')} сек.",
         "",
         "ПОДСЧЁТ МЕТОК",
@@ -6897,102 +6959,101 @@ def pc_full_report(
     ]
 
     if search_info.get("last_error"):
-        lines.append(
-            "Последняя ошибка быстрого поиска: "
-            + str(search_info.get("last_error"))
-        )
+        lines.append("Последняя ошибка быстрого поиска: " + str(search_info.get("last_error")))
 
     search_errors = search_info.get("search_errors") or []
     if search_errors:
-        lines.extend([
-            f"Ошибок Search API, потребовавших отката: {len(search_errors)}",
-            "Причины отката:",
-        ])
+        lines.extend(
+            [
+                f"Ошибок Search API, потребовавших отката: {len(search_errors)}",
+                "Причины отката:",
+            ]
+        )
         lines.extend(f"  • {error}" for error in search_errors)
 
     if discovery_errors:
-        lines.extend([
-            "Ошибки обнаружения каналов/веток:",
-            *(f"  • {error}" for error in discovery_errors),
-        ])
+        lines.extend(
+            [
+                "Ошибки обнаружения каналов/веток:",
+                *(f"  • {error}" for error in discovery_errors),
+            ]
+        )
 
     if failed:
-        lines.extend([
-            "Ошибки чтения каналов/веток:",
-            *(
-                f"  • {item.get('label')}: {item.get('error')}"
-                for item in failed
-            ),
-        ])
+        lines.extend(
+            [
+                "Ошибки чтения каналов/веток:",
+                *(f"  • {item.get('label')}: {item.get('error')}" for item in failed),
+            ]
+        )
 
-    lines.extend([
-        "",
-        "ОБЩАЯ СВОДКА",
-        "-" * 72,
-        f"Пользователь: {user} ({user.id})",
-        (
-            f"Период МСК: {period.start_date:%d.%m.%Y} — "
-            f"{period.end_date:%d.%m.%Y} включительно"
-        ),
-        f"Сообщений хотя бы с одним шаблоном: {matched}",
-        f"Проверено сообщений пользователя: {scanned}",
-        f"Полных записей сообщений в отчёте: {len(records)}",
-        "",
-    ])
+    lines.extend(
+        [
+            "",
+            "ОБЩАЯ СВОДКА",
+            "-" * 72,
+            f"Пользователь: {user} ({user.id})",
+            (f"Период МСК: {period.start_date:%d.%m.%Y} — {period.end_date:%d.%m.%Y} включительно"),
+            f"Сообщений хотя бы с одним шаблоном: {matched}",
+            f"Проверено сообщений пользователя: {scanned}",
+            f"Полных записей сообщений в отчёте: {len(records)}",
+            "",
+        ]
+    )
 
     if enabled_families:
-        lines.extend([
-            "ОБЩАЯ СТАТИСТИКА ДЛИНЫ УЧИТЫВАЕМЫХ ПОСТОВ БЕЗ МЕТОК",
-            "-" * 72,
-            (
-                f"Длинных: {long_count} "
-                f"({pc_percent(long_count, total_lengths):.1f}%)"
-            ),
-            (
-                f"Коротких: {short_count} "
-                f"({pc_percent(short_count, total_lengths):.1f}%)"
-            ),
-            "",
-        ])
+        lines.extend(
+            [
+                "ОБЩАЯ СТАТИСТИКА ДЛИНЫ УЧИТЫВАЕМЫХ ПОСТОВ БЕЗ МЕТОК",
+                "-" * 72,
+                (f"Длинных: {long_count} ({pc_percent(long_count, total_lengths):.1f}%)"),
+                (f"Коротких: {short_count} ({pc_percent(short_count, total_lengths):.1f}%)"),
+                "",
+            ]
+        )
 
     # Основная часть TXT: только семейства и канонические шаблоны.
     # Детализация точных написаний и опечаток намеренно откладывается
     # до отдельного завершающего раздела в самом конце файла.
     for family in families:
         data = stats[family]
-        lines.extend([
-            "",
-            "#" * 72,
-            PC_LABELS[family],
-            "#" * 72,
-            f"Сообщений: {data['messages']}",
-            f"Меток: {data['occurrences']}",
-            f"Уникальных шаблонов: {len(data['groups'])}",
-            f"Каналов с совпадениями: {len(data.get('channels', {}))}",
-        ])
+        lines.extend(
+            [
+                "",
+                "#" * 72,
+                PC_LABELS[family],
+                "#" * 72,
+                f"Сообщений: {data['messages']}",
+                f"Меток: {data['occurrences']}",
+                f"Уникальных шаблонов: {len(data['groups'])}",
+                f"Каналов с совпадениями: {len(data.get('channels', {}))}",
+            ]
+        )
 
         if pc_length_enabled_for_family(family):
             family_total = data.get("long", 0) + data.get("short", 0)
-            lines.extend([
-                (
-                    f"Длинных: {data.get('long', 0)} "
-                    f"({pc_percent(data.get('long', 0), family_total):.1f}%)"
-                ),
-                (
-                    f"Коротких: {data.get('short', 0)} "
-                    f"({pc_percent(data.get('short', 0), family_total):.1f}%)"
-                ),
-            ])
-        else:
-            lines.append(
-                "Классификация длины для этого семейства отключена."
+            lines.extend(
+                [
+                    (
+                        f"Длинных: {data.get('long', 0)} "
+                        f"({pc_percent(data.get('long', 0), family_total):.1f}%)"
+                    ),
+                    (
+                        f"Коротких: {data.get('short', 0)} "
+                        f"({pc_percent(data.get('short', 0), family_total):.1f}%)"
+                    ),
+                ]
             )
+        else:
+            lines.append("Классификация длины для этого семейства отключена.")
 
-        lines.extend([
-            "",
-            "РАСПРЕДЕЛЕНИЕ ВСЕГО СЕМЕЙСТВА ПО КАНАЛАМ",
-            "-" * 72,
-        ])
+        lines.extend(
+            [
+                "",
+                "РАСПРЕДЕЛЕНИЕ ВСЕГО СЕМЕЙСТВА ПО КАНАЛАМ",
+                "-" * 72,
+            ]
+        )
         pc_append_txt_channels(lines, data.get("channels", {}))
 
         groups = sorted(
@@ -7008,53 +7069,61 @@ def pc_full_report(
             lines.extend(["Совпадений нет.", ""])
             continue
 
-        lines.extend([
-            "",
-            "КАНОНИЧЕСКИЕ ШАБЛОНЫ И ИХ КАНАЛЫ",
-            "-" * 72,
-        ])
+        lines.extend(
+            [
+                "",
+                "КАНОНИЧЕСКИЕ ШАБЛОНЫ И ИХ КАНАЛЫ",
+                "-" * 72,
+            ]
+        )
 
         for payload_key, group in groups:
-            lines.extend([
-                "",
-                "=" * 72,
-                f"ШАБЛОН: {group['canonical']}",
-                "=" * 72,
-                f"Ключ группы: {payload_key}",
-                f"Сообщений: {group['messages']}",
-                f"Меток: {group['occurrences']}",
-                f"Каналов: {len(group.get('channels', {}))}",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "=" * 72,
+                    f"ШАБЛОН: {group['canonical']}",
+                    "=" * 72,
+                    f"Ключ группы: {payload_key}",
+                    f"Сообщений: {group['messages']}",
+                    f"Меток: {group['occurrences']}",
+                    f"Каналов: {len(group.get('channels', {}))}",
+                ]
+            )
             if pc_length_enabled_for_family(family):
                 group_total = int(group.get("long", 0)) + int(group.get("short", 0))
-                lines.extend([
-                    (
-                        f"Длинных по арке: {group.get('long', 0)} "
-                        f"({pc_percent(group.get('long', 0), group_total):.1f}%)"
-                    ),
-                    (
-                        f"Коротких по арке: {group.get('short', 0)} "
-                        f"({pc_percent(group.get('short', 0), group_total):.1f}%)"
-                    ),
-                ])
+                lines.extend(
+                    [
+                        (
+                            f"Длинных по арке: {group.get('long', 0)} "
+                            f"({pc_percent(group.get('long', 0), group_total):.1f}%)"
+                        ),
+                        (
+                            f"Коротких по арке: {group.get('short', 0)} "
+                            f"({pc_percent(group.get('short', 0), group_total):.1f}%)"
+                        ),
+                    ]
+                )
             lines.append("Распределение шаблона по каналам:")
             pc_append_txt_channels(lines, group.get("channels", {}))
 
     # Самый конец TXT: точные написания, все варианты/опечатки,
     # распределение каждого написания по каналам и полные сообщения.
-    lines.extend([
-        "",
-        "",
-        "#" * 72,
-        "ДЕТАЛИЗАЦИЯ ВАРИАНТОВ НАПИСАНИЯ И ПОЛНЫХ СООБЩЕНИЙ",
-        "#" * 72,
-        (
-            "Этот раздел намеренно расположен в самом конце отчёта. "
-            "Для каждого канонического шаблона здесь перечислены точное "
-            "написание и все найденные варианты/опечатки, их каналы, "
-            "полные тексты сообщений и прямые ссылки."
-        ),
-    ])
+    lines.extend(
+        [
+            "",
+            "",
+            "#" * 72,
+            "ДЕТАЛИЗАЦИЯ ВАРИАНТОВ НАПИСАНИЯ И ПОЛНЫХ СООБЩЕНИЙ",
+            "#" * 72,
+            (
+                "Этот раздел намеренно расположен в самом конце отчёта. "
+                "Для каждого канонического шаблона здесь перечислены точное "
+                "написание и все найденные варианты/опечатки, их каналы, "
+                "полные тексты сообщений и прямые ссылки."
+            ),
+        ]
+    )
 
     any_surface_details = False
 
@@ -7072,12 +7141,14 @@ def pc_full_report(
         if not groups:
             continue
 
-        lines.extend([
-            "",
-            "=" * 72,
-            f"СЕМЕЙСТВО: {PC_LABELS[family]}",
-            "=" * 72,
-        ])
+        lines.extend(
+            [
+                "",
+                "=" * 72,
+                f"СЕМЕЙСТВО: {PC_LABELS[family]}",
+                "=" * 72,
+            ]
+        )
 
         for payload_key, group in groups:
             exact = group.get("exact", {})
@@ -7094,14 +7165,16 @@ def pc_full_report(
                 continue
 
             any_surface_details = True
-            lines.extend([
-                "",
-                "*" * 72,
-                f"КАНОНИЧЕСКИЙ ШАБЛОН: {group['canonical']}",
-                "*" * 72,
-                f"Всего сообщений шаблона: {group['messages']}",
-                f"Всего меток шаблона: {group['occurrences']}",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "*" * 72,
+                    f"КАНОНИЧЕСКИЙ ШАБЛОН: {group['canonical']}",
+                    "*" * 72,
+                    f"Всего сообщений шаблона: {group['messages']}",
+                    f"Всего меток шаблона: {group['occurrences']}",
+                ]
+            )
 
             if exact.get("occurrences", 0):
                 exact_records = pc_records_for_surface(
@@ -7110,15 +7183,17 @@ def pc_full_report(
                     payload_key,
                     exact=True,
                 )
-                lines.extend([
-                    "",
-                    "~" * 72,
-                    f"ТОЧНОЕ НАПИСАНИЕ: {group['canonical']}",
-                    "~" * 72,
-                    f"Сообщений: {exact.get('messages', 0)}",
-                    f"Меток: {exact.get('occurrences', 0)}",
-                    "Распределение по каналам:",
-                ])
+                lines.extend(
+                    [
+                        "",
+                        "~" * 72,
+                        f"ТОЧНОЕ НАПИСАНИЕ: {group['canonical']}",
+                        "~" * 72,
+                        f"Сообщений: {exact.get('messages', 0)}",
+                        f"Меток: {exact.get('occurrences', 0)}",
+                        "Распределение по каналам:",
+                    ]
+                )
                 pc_append_txt_channels(
                     lines,
                     exact.get("channels", {}),
@@ -7136,16 +7211,18 @@ def pc_full_report(
                     payload_key,
                     variant=variant,
                 )
-                lines.extend([
-                    "",
-                    "~" * 72,
-                    f"ВАРИАНТ / ОПЕЧАТКА: {variant}",
-                    "~" * 72,
-                    f"Канонический шаблон: {group['canonical']}",
-                    f"Сообщений: {variant_data.get('messages', 0)}",
-                    f"Меток: {variant_data.get('occurrences', 0)}",
-                    "Распределение по каналам:",
-                ])
+                lines.extend(
+                    [
+                        "",
+                        "~" * 72,
+                        f"ВАРИАНТ / ОПЕЧАТКА: {variant}",
+                        "~" * 72,
+                        f"Канонический шаблон: {group['canonical']}",
+                        f"Сообщений: {variant_data.get('messages', 0)}",
+                        f"Меток: {variant_data.get('occurrences', 0)}",
+                        "Распределение по каналам:",
+                    ]
+                )
                 pc_append_txt_channels(
                     lines,
                     variant_data.get("channels", {}),
@@ -7189,9 +7266,7 @@ def pc_split_txt_parts(
         if current and current_bytes + line_bytes > max_bytes:
             parts.append("".join(current))
             current = [line]
-            current_bytes = (
-                len("\ufeff".encode("utf-8")) + line_bytes
-            )
+            current_bytes = len("\ufeff".encode("utf-8")) + line_bytes
         else:
             current.append(line)
             current_bytes += line_bytes
@@ -7205,8 +7280,7 @@ def pc_split_txt_parts(
 
     return [
         (
-            f"{stem}-part-{index:0{width}d}-of-"
-            f"{len(parts):0{width}d}{extension}",
+            f"{stem}-part-{index:0{width}d}-of-{len(parts):0{width}d}{extension}",
             part,
         )
         for index, part in enumerate(parts, start=1)
@@ -7226,9 +7300,18 @@ def pc_categories_faq():
         "FAQ: /категории_подсчёта",
         "Настраивает категории, внутри которых бот ищет сообщения. Менять список может только владелец бота из `OWNER_ID`.",
         [
-            ("действие", "`добавить`, `удалить`, `показать`, `очистить`. Оставь все поля пустыми, чтобы снова увидеть FAQ."),
-            ("категория", "Нужна только для добавления и удаления. Выбирается категория Discord, а не отдельный канал."),
-            ("Что обходится", "Все текстовые и новостные каналы категории, активные и архивные публичные/приватные ветки, форумные и медиапосты. Голосовые каналы не учитываются."),
+            (
+                "действие",
+                "`добавить`, `удалить`, `показать`, `очистить`. Оставь все поля пустыми, чтобы снова увидеть FAQ.",
+            ),
+            (
+                "категория",
+                "Нужна только для добавления и удаления. Выбирается категория Discord, а не отдельный канал.",
+            ),
+            (
+                "Что обходится",
+                "Все текстовые и новостные каналы категории, активные и архивные публичные/приватные ветки, форумные и медиапосты. Голосовые каналы не учитываются.",
+            ),
         ],
     )
 
@@ -7240,7 +7323,10 @@ def pc_roles_faq():
         [
             ("действие", "`добавить`, `удалить`, `показать`, `очистить`. Пустой вызов показывает FAQ."),
             ("роль", "Нужна для добавления и удаления."),
-            ("Кто имеет доступ", "Владелец, серверные администраторы и участники хотя бы с одной добавленной ролью."),
+            (
+                "Кто имеет доступ",
+                "Владелец, серверные администраторы и участники хотя бы с одной добавленной ролью.",
+            ),
         ],
     )
 
@@ -7251,11 +7337,26 @@ def pc_posts_faq():
         "Считает сообщения выбранного пользователя во всех доступных каналах и ветках настроенных категорий. Сначала использует быстрый серверный поиск Discord по автору; при его недоступности автоматически возвращается к обычному обходу истории.",
         [
             ("пользователь", "Участник, чьи сообщения нужно считать."),
-            ("слово — обычный режим", "Слово или фраза. Регистр и оформление `||`, `**`, `__`, `~~`, обратные кавычки игнорируются. Сообщение считается один раз независимо от повторений."),
-            ("слово — шаблонный режим", "`ГМ-пост`; `ДРП-верд`/`ДРП-вердикт`; `Полит-верд`/`Полит-вердикт`; `Три-шаблона` для всех трёх сразу."),
-            ("Допуски шаблонов", "Игнорируются регистр, `#`, дефисы, подчёркивания, скобки и Discord-разметка."),
-            ("с_даты", "Начало включительно: `ДД.ММ.ГГ` или `ДД.ММ.ГГГГ`. Начальная дата обязана существовать."),
-            ("по_дату", "Конец включительно. Завышенный день заменяется последним днём месяца: `99.06.2026` → `30.06.2026`."),
+            (
+                "слово — обычный режим",
+                "Слово или фраза. Регистр и оформление `||`, `**`, `__`, `~~`, обратные кавычки игнорируются. Сообщение считается один раз независимо от повторений.",
+            ),
+            (
+                "слово — шаблонный режим",
+                "`ГМ-пост`; `ДРП-верд`/`ДРП-вердикт`; `Полит-верд`/`Полит-вердикт`; `Три-шаблона` для всех трёх сразу.",
+            ),
+            (
+                "Допуски шаблонов",
+                "Игнорируются регистр, `#`, дефисы, подчёркивания, скобки и Discord-разметка.",
+            ),
+            (
+                "с_даты",
+                "Начало включительно: `ДД.ММ.ГГ` или `ДД.ММ.ГГГГ`. Начальная дата обязана существовать.",
+            ),
+            (
+                "по_дату",
+                "Конец включительно. Завышенный день заменяется последним днём месяца: `99.06.2026` → `30.06.2026`.",
+            ),
             (
                 "Длина шаблонных постов",
                 (
@@ -7319,13 +7420,15 @@ async def slash_count_categories(
             changed = await PC_STORE.add(interaction.guild.id, "categories", категория.id)
             text = (
                 f"✅ Категория {категория.mention} добавлена."
-                if changed else f"ℹ️ Категория {категория.mention} уже была в списке; повтор не делает её доступнее."
+                if changed
+                else f"ℹ️ Категория {категория.mention} уже была в списке; повтор не делает её доступнее."
             )
         elif действие == "удалить":
             changed = await PC_STORE.remove(interaction.guild.id, "categories", категория.id)
             text = (
                 f"✅ Категория {категория.mention} удалена."
-                if changed else f"ℹ️ Категории {категория.mention} в списке не было. Удалить отсутствие ещё раз не получилось."
+                if changed
+                else f"ℹ️ Категории {категория.mention} в списке не было. Удалить отсутствие ещё раз не получилось."
             )
         elif действие == "очистить":
             count = await PC_STORE.clear(interaction.guild.id, "categories")
@@ -7398,10 +7501,18 @@ async def slash_count_roles(
     try:
         if действие == "добавить":
             changed = await PC_STORE.add(interaction.guild.id, "roles", роль.id)
-            text = f"✅ Роль {роль.mention} получила доступ." if changed else f"ℹ️ Роль {роль.mention} уже имела доступ."
+            text = (
+                f"✅ Роль {роль.mention} получила доступ."
+                if changed
+                else f"ℹ️ Роль {роль.mention} уже имела доступ."
+            )
         elif действие == "удалить":
             changed = await PC_STORE.remove(interaction.guild.id, "roles", роль.id)
-            text = f"✅ У роли {роль.mention} убран доступ." if changed else f"ℹ️ Роли {роль.mention} в списке не было."
+            text = (
+                f"✅ У роли {роль.mention} убран доступ."
+                if changed
+                else f"ℹ️ Роли {роль.mention} в списке не было."
+            )
         elif действие == "очистить":
             count = await PC_STORE.clear(interaction.guild.id, "roles")
             text = f"✅ Дополнительные роли очищены. Удалено: `{count}`. Владелец и администраторы сохранили доступ."
@@ -7456,8 +7567,7 @@ async def slash_count_posts(
 
     if not interaction.guild:
         await interaction.response.send_message(
-            "❌ Команда серверная. Искать все серверные каналы из лички — "
-            "замысел эффектный, но бесполезный.",
+            "❌ Команда серверная. Искать все серверные каналы из лички — замысел эффектный, но бесполезный.",
             ephemeral=True,
         )
         return
@@ -7486,7 +7596,7 @@ async def slash_count_posts(
             "❌ Не заполнены поля: "
             + ", ".join(f"`{name}`" for name in missing)
             + ". Discord пока не извлекает недостающие данные из силы "
-              "намерения. Пустой вызов показывает FAQ.",
+            "намерения. Пустой вызов показывает FAQ.",
             ephemeral=True,
         )
         return
@@ -7530,11 +7640,7 @@ async def slash_count_posts(
     await interaction.response.defer(ephemeral=False)
     started = time.monotonic()
 
-    mode_label = (
-        ", ".join(PC_LABELS[family] for family in families)
-        if families
-        else f"слово/фраза `{слово}`"
-    )
+    mode_label = ", ".join(PC_LABELS[family] for family in families) if families else f"слово/фраза `{слово}`"
 
     await interaction.edit_original_response(
         content=(
@@ -7561,8 +7667,7 @@ async def slash_count_posts(
         logger.error("Ошибка сбора каналов: %s", exc, exc_info=True)
         await interaction.edit_original_response(
             content=(
-                "❌ Получить каналы не удалось. Discord API внёс вклад "
-                f"в происходящее: `{str(exc)[:300]}`"
+                f"❌ Получить каналы не удалось. Discord API внёс вклад в происходящее: `{str(exc)[:300]}`"
             ),
             embed=None,
         )
@@ -7579,9 +7684,7 @@ async def slash_count_posts(
         )
         return
 
-    batches_total = (
-        len(targets) + PC_SEARCH_CHANNEL_BATCH - 1
-    ) // PC_SEARCH_CHANNEL_BATCH
+    batches_total = (len(targets) + PC_SEARCH_CHANNEL_BATCH - 1) // PC_SEARCH_CHANNEL_BATCH
 
     await interaction.edit_original_response(
         content=(
@@ -7608,26 +7711,11 @@ async def slash_count_posts(
         if not force and now - last_progress < PC_PROGRESS_SECONDS:
             return
 
-        current_scanned = sum(
-            item.get("scanned", 0)
-            for item in partial_results
-        )
-        current_matched = sum(
-            item.get("matched", 0)
-            for item in partial_results
-        )
-        current_long = sum(
-            item.get("lengths", {}).get("long", 0)
-            for item in partial_results
-        )
-        current_short = sum(
-            item.get("lengths", {}).get("short", 0)
-            for item in partial_results
-        )
-        current_failed = sum(
-            1 for item in partial_results
-            if item.get("error")
-        )
+        current_scanned = sum(item.get("scanned", 0) for item in partial_results)
+        current_matched = sum(item.get("matched", 0) for item in partial_results)
+        current_long = sum(item.get("lengths", {}).get("long", 0) for item in partial_results)
+        current_short = sum(item.get("lengths", {}).get("short", 0) for item in partial_results)
+        current_failed = sum(1 for item in partial_results if item.get("error"))
         elapsed_now = now - started
         phase = search_state.get("phase")
 
@@ -7654,9 +7742,8 @@ async def slash_count_posts(
                 f"Повторных попыток: `{search_state.get('retry_attempts', 0)}`.\n"
                 f"Делений пакетов: `{search_state.get('batch_splits', 0)}`.\n"
                 + (
-                    f"Последняя причина отката: "
-                    f"`{str(search_state.get('last_error'))[:300]}`.\n"
-                    if search_state.get('last_error')
+                    f"Последняя причина отката: `{str(search_state.get('last_error'))[:300]}`.\n"
+                    if search_state.get("last_error")
                     else ""
                 )
                 + f"Прошло времени: `{elapsed_now:.1f} сек.`"
@@ -7735,9 +7822,7 @@ async def slash_count_posts(
 
     method_labels = {
         "discord_search": "Discord Search API — фильтрация по автору",
-        "discord_search+history_fallback": (
-            "Discord Search API + резервный обход части каналов"
-        ),
+        "discord_search+history_fallback": ("Discord Search API + резервный обход части каналов"),
         "history_fallback": "Резервный обход истории каналов",
     }
     method_label = method_labels.get(
@@ -7760,14 +7845,10 @@ async def slash_count_posts(
         )
 
     if discovery_errors:
-        public_notes.append(
-            f"Ошибок при поиске веток: `{len(discovery_errors)}`."
-        )
+        public_notes.append(f"Ошибок при поиске веток: `{len(discovery_errors)}`.")
 
     if failed:
-        public_notes.append(
-            f"Не прочитано каналов/веток: `{len(failed)}`."
-        )
+        public_notes.append(f"Не прочитано каналов/веток: `{len(failed)}`.")
 
     if families:
         report_started = time.monotonic()
@@ -7775,10 +7856,7 @@ async def slash_count_posts(
         length_stats = pc_merge_lengths(results)
         template_records = pc_collect_template_records(results)
 
-        filename = (
-            f"post-templates-{пользователь.id}-"
-            f"{period.start_date:%Y%m%d}-{period.end_date:%Y%m%d}.txt"
-        )
+        filename = f"post-templates-{пользователь.id}-{period.start_date:%Y%m%d}-{period.end_date:%Y%m%d}.txt"
         stage_timings = {
             "collect": f"{collect_elapsed:.1f}",
             "search": f"{search_elapsed:.1f}",
@@ -7844,24 +7922,15 @@ async def slash_count_posts(
                 max_bytes=adjusted_part_size,
             )
 
-        txt_files = [
-            pc_txt_file(part_text, part_filename)
-            for part_filename, part_text in txt_parts[:10]
-        ]
+        txt_files = [pc_txt_file(part_text, part_filename) for part_filename, part_text in txt_parts[:10]]
 
         first_embed = disnake.Embed(
             title="📊 Подсчёт постов завершён",
-            description=(
-                public_chunks[0]
-                if public_chunks
-                else "Совпадений не найдено."
-            ),
+            description=(public_chunks[0] if public_chunks else "Совпадений не найдено."),
             color=0xFFAA00 if failed else 0x4CAF50,
             timestamp=datetime.now(),
         )
-        first_embed.set_footer(
-            text=f"Часть 1/{max(1, len(public_chunks))}"
-        )
+        first_embed.set_footer(text=f"Часть 1/{max(1, len(public_chunks))}")
 
     else:
         embed = disnake.Embed(
@@ -7881,10 +7950,7 @@ async def slash_count_posts(
         )
         embed.add_field(
             name="Период (МСК)",
-            value=(
-                f"`{period.start_date:%d.%m.%Y}` — "
-                f"`{period.end_date:%d.%m.%Y}` включительно"
-            ),
+            value=(f"`{period.start_date:%d.%m.%Y}` — `{period.end_date:%d.%m.%Y}` включительно"),
             inline=False,
         )
         embed.add_field(
@@ -7908,10 +7974,7 @@ async def slash_count_posts(
             key=lambda item: item["matched"],
             reverse=True,
         )[:10]
-        top_text = "\n".join(
-            f"• `{item['matched']}` — {item['label']}"
-            for item in top
-        ) or "Совпадений нет."
+        top_text = "\n".join(f"• `{item['matched']}` — {item['label']}" for item in top) or "Совпадений нет."
         embed.add_field(
             name="Где найдено больше всего",
             value=top_text[:1024],
@@ -7925,12 +7988,7 @@ async def slash_count_posts(
             value="\n".join(word_notes)[:1024],
             inline=False,
         )
-        embed.set_footer(
-            text=(
-                "Одно сообщение считается один раз, даже если слово "
-                "повторено несколько раз."
-            )
-        )
+        embed.set_footer(text=("Одно сообщение считается один раз, даже если слово повторено несколько раз."))
         first_embed = embed
 
     # Исходное публичное сообщение становится первым и обычно единственным
@@ -8017,17 +8075,18 @@ async def on_ready():
 
 @bot.event
 async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound): return
+    if isinstance(error, commands.CommandNotFound):
+        return
 
     logger.error(f"Command error {ctx.command}: {error}", exc_info=True)
 
     # Logging already writes through the configured file handler. Avoid
     # doing another synchronous disk write inside the Discord event loop.
 
-    if hasattr(ctx, 'author') and ctx.author.id == OWNER_ID:
+    if hasattr(ctx, "author") and ctx.author.id == OWNER_ID:
         try:
             msg = f"⚠️ Гав! Ошибка команды: {str(error)[:100]}"
-            if hasattr(ctx, 'response') and ctx.response.is_done():
+            if hasattr(ctx, "response") and ctx.response.is_done():
                 await ctx.followup.send(msg, ephemeral=True)
             else:
                 await ctx.send(msg, delete_after=10)

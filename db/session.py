@@ -23,7 +23,9 @@ def init_db(database_url: str | None) -> tuple[Engine | None, sessionmaker[Sessi
         logging.warning("⚠️ DATABASE_URL не найден. Работа с БД отключена (экономия ресурсов).")
         return None, None
     try:
-        engine = create_engine(database_url, echo=False, future=True, pool_pre_ping=True, pool_size=5, max_overflow=10)
+        engine = create_engine(
+            database_url, echo=False, future=True, pool_pre_ping=True, pool_size=5, max_overflow=10
+        )
         Base.metadata.create_all(engine)
         factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
         logging.info("✅ База данных Neon подключена.")
