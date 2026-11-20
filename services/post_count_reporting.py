@@ -24,10 +24,12 @@ class ReportUser(Protocol):
     @property
     def id(self) -> int:
         """Discord snowflake ID."""
+        raise NotImplementedError
 
     @property
     def mention(self) -> str:
         """Discord mention string."""
+        raise NotImplementedError
 
 
 def pc_merge_channel_counters(target: ChannelCounters, source: ChannelCounters) -> None:

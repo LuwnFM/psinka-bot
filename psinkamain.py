@@ -7753,7 +7753,7 @@ async def slash_count_posts(
                 f"Подходящих сообщений пока: `{current_matched}`.\n"
                 + (
                     f"Длинных пока: `{current_long}`, коротких: `{current_short}`.\n"
-                    if pc_any_length_enabled(families)
+                    if pc_any_length_enabled(families or ())
                     else ""
                 )
                 + f"Ошибок чтения пока: `{current_failed}`.\n"
@@ -7790,7 +7790,7 @@ async def slash_count_posts(
                 f"Подходящих сообщений пока: `{current_matched}`.\n"
                 + (
                     f"Длинных пока: `{current_long}`, коротких: `{current_short}`.\n"
-                    if pc_any_length_enabled(families)
+                    if pc_any_length_enabled(families or ())
                     else ""
                 )
                 + f"Прошло времени: `{elapsed_now:.1f} сек.`"
