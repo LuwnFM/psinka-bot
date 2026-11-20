@@ -1,4 +1,5 @@
 name: Bulk safe quality pass
+# Final safe formatting sweep for the current typed refactor.
 # Re-run the full safe formatting pass after the typed domain migration.
 
 on:
