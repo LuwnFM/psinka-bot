@@ -6669,8 +6669,8 @@ async def pc_search_or_fallback( guild: disnake.Guild, targets: Sequence[Any], u
 
         fallback_results = []
 
-        for completed, task in enumerate(asyncio.as_completed(fallback_tasks), start=1):
-            fallback_results.append(await task)
+        for completed, fallback_task in enumerate(asyncio.as_completed(fallback_tasks), start=1):
+            fallback_results.append(await fallback_task)
             search_info["fallback_completed"] = completed
 
             if progress_callback is not None:
@@ -6898,7 +6898,7 @@ def pc_full_report(
     search_info: Mapping[str, Any],
     method_label: str,
     elapsed: float,
-    stage_timings: Mapping[str, float],
+    stage_timings: Mapping[str, str],
     discovery_errors: Sequence[str],
     failed: Sequence[CountResult],
 ) -> str:
