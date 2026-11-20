@@ -8110,4 +8110,6 @@ if __name__ == "__main__":
         load_mercenary_database_from_xlsx()
         bot.run(discord_token)
     except Exception as e:
-        logger.critical(f"💥 Startup crash: {e}", exc_info=True)
+        logger.critical("💥 Startup crash: %s", e, exc_info=True)
+        # Tell service managers and CI that the bot did not start successfully.
+        raise SystemExit(1) from e
