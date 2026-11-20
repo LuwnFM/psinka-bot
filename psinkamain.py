@@ -126,6 +126,7 @@ from core.paths import (
     PENDING_TEST_LOG as CORE_PENDING_TEST_LOG,
     POST_COUNT_SETTINGS_FILE,
     ROOT_DIR,
+    initialize_paths,
 )
 
 try:
@@ -8080,6 +8081,7 @@ async def on_command_error(ctx, error):
 
 
 if __name__ == "__main__":
+    initialize_paths()
     configure_logging(BOT_ERROR_LOG, ANALYSIS_LOG_FILE)
     logger.info("🚀 Start PsIInka Bot v0.4.3")
     try:
