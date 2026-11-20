@@ -1,8 +1,9 @@
 """Protect AI routing against late-binding model IDs across cancelled worker threads."""
 
 import ast
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 
 def _sync_call_nodes() -> list[ast.FunctionDef]:
@@ -55,3 +56,37 @@ def test_batch_request_closure_binds_prompt_before_next_iteration() -> None:
     assert len(functions) == 1
     default_args = {arg.arg for arg in functions[0].args.args[-len(functions[0].args.defaults):]}
     assert "user_prompt" in default_args
+
+
+def test_g4f_worker_keeps_provider_and_request_after_loop_moves(monkeypatch) -> None:
+    """The synchronous g4f fallback freezes provider and request options."""
+    functions = [
+        node for node in _sync_call_nodes()
+        if any(argument.arg == "provider_class" for argument in node.args.args)
+    ]
+    assert len(functions) == 1
+
+    recorded: list[tuple[str | None, dict]] = []
+
+    class FakeClient:
+        def __init__(self, provider=None) -> None:
+            self.chat = SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **kwargs: recorded.append((provider, kwargs))
+                )
+            )
+
+    package = ModuleType("g4f")
+    package.__path__ = []
+    module = ModuleType("g4f.client")
+    module.Client = FakeClient
+    monkeypatch.setitem(sys.modules, "g4f", package)
+    monkeypatch.setitem(sys.modules, "g4f.client", module)
+
+    namespace = {"provider_class": "first-provider", "kwargs": {"model": "first-model"}}
+    target = ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[]))
+    exec(compile(target, "<isolated-g4f-worker>", "exec"), namespace)
+    namespace["provider_class"] = "next-provider"
+    namespace["kwargs"] = {"model": "next-model"}
+    namespace["sync_call"]()
+    assert recorded == [("first-provider", {"model": "first-model"})]
