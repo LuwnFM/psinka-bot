@@ -1,8 +1,8 @@
 """Formatting and Discord pagination of dice results."""
 
-from typing import List
 
 from services.dice import DiceResult, DiceTermResult
+
 
 def _dice_number(value: float) -> str:
     if value == int(value):
@@ -10,11 +10,11 @@ def _dice_number(value: float) -> str:
     return str(round(value, 2))
 
 
-def _dice_roll_list(values: List[int]) -> str:
+def _dice_roll_list(values: list[int]) -> str:
     return "[" + ", ".join(map(str, values)) + "]"
 
 
-def _dice_term_lines(term: DiceTermResult, is_first: bool = False) -> List[str]:
+def _dice_term_lines(term: DiceTermResult, is_first: bool = False) -> list[str]:
     sign_text = "" if is_first and term.sign > 0 else ("+" if term.sign > 0 else "−")
     label_prefix = f"{sign_text} " if sign_text else ""
     if term.kind == "number":
@@ -84,8 +84,8 @@ def _dice_result_block(result: DiceResult) -> str:
     return "\n".join(lines)
 
 
-def _dice_paginate(header: str, blocks: List[str], max_chars: int = 3900) -> List[str]:
-    pages: List[str] = []
+def _dice_paginate(header: str, blocks: list[str], max_chars: int = 3900) -> list[str]:
+    pages: list[str] = []
     current = header.strip()
     for block in blocks:
         candidate = f"{current}\n\n{block}" if current else block

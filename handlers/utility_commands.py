@@ -2,8 +2,8 @@
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Awaitable, Callable, Dict, List, Optional
 
 import disnake
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 async def respond_to_cube(
     interaction: disnake.CommandInteraction,
-    formula: Optional[str],
+    formula: str | None,
     dice_engine: DiceParser,
 ) -> None:
     """Render roll help/results using the unchanged original Discord embeds."""
@@ -38,7 +38,7 @@ async def respond_to_cube(
         if not results:
             raise ValueError("Не удалось разобрать формулу.")
 
-        grouped: Dict[int, List[DiceResult]] = {}
+        grouped: dict[int, list[DiceResult]] = {}
         for result in results:
             grouped.setdefault(result.formula_index, []).append(result)
 

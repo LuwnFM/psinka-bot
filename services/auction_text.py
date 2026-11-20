@@ -1,9 +1,10 @@
 """Pure text and author normalization used by auction price extraction."""
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-def auction_money_to_int(raw: Optional[str]) -> Optional[int]:
+
+def auction_money_to_int(raw: str | None) -> int | None:
     digits = re.sub(r"\D+", "", raw or "")
     return int(digits) if digits else None
 
@@ -29,7 +30,7 @@ def norm_auction_text(text: Any) -> str:
     return clean_auction_text(text).lower().replace("ё", "е")
 
 
-def append_unique_text(parts: List[str], value: Any):
+def append_unique_text(parts: list[str], value: Any):
     if value is None:
         return
 
@@ -41,7 +42,7 @@ def append_unique_text(parts: List[str], value: Any):
         parts.append(text)
 
 
-def flatten_any_strings(value: Any) -> List[str]:
+def flatten_any_strings(value: Any) -> list[str]:
     result = []
 
     if value is None:
@@ -65,7 +66,7 @@ def flatten_any_strings(value: Any) -> List[str]:
     return result
 
 
-def get_raw_author_name(raw_message: Dict[str, Any]) -> str:
+def get_raw_author_name(raw_message: dict[str, Any]) -> str:
     author = raw_message.get("author") or {}
     username = author.get("username") or ""
     global_name = author.get("global_name") or ""
@@ -80,7 +81,7 @@ def get_raw_author_name(raw_message: Dict[str, Any]) -> str:
     return username or global_name or ""
 
 
-def get_raw_author_id(raw_message: Dict[str, Any]) -> str:
+def get_raw_author_id(raw_message: dict[str, Any]) -> str:
     author = raw_message.get("author") or {}
     return str(author.get("id") or "")
 

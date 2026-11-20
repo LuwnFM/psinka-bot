@@ -1,7 +1,7 @@
 """Reusable text normalization and table parsing for mercenary catalog entries."""
 
 import re
-from typing import Dict, List, Optional
+
 
 def normalize_lookup_text(text: str) -> str:
     """
@@ -20,9 +20,9 @@ def normalize_lookup_text(text: str) -> str:
     return " ".join(text.split())
 
 
-def dedupe_preserve_order(items: List[str]) -> List[str]:
+def dedupe_preserve_order(items: list[str]) -> list[str]:
     """Убирает дубли, сохраняя первое написание."""
-    result: List[str] = []
+    result: list[str] = []
     seen = set()
     for item in items:
         item = str(item or "").strip()
@@ -33,7 +33,7 @@ def dedupe_preserve_order(items: List[str]) -> List[str]:
     return result
 
 
-def split_multi_field(value: str) -> List[str]:
+def split_multi_field(value: str) -> list[str]:
     """Разбивает поля вида 'А; Б, В\nГ'."""
     if not value:
         return []
@@ -41,7 +41,7 @@ def split_multi_field(value: str) -> List[str]:
     return dedupe_preserve_order([part.strip() for part in parts if part.strip()])
 
 
-def _rows_to_dicts(rows: List[List[str]], required_header: str) -> List[Dict[str, str]]:
+def _rows_to_dicts(rows: list[list[str]], required_header: str) -> list[dict[str, str]]:
     header_index = None
     for i, row in enumerate(rows):
         if required_header in row:
@@ -51,9 +51,9 @@ def _rows_to_dicts(rows: List[List[str]], required_header: str) -> List[Dict[str
         return []
 
     headers = [str(x or "").strip() for x in rows[header_index]]
-    data: List[Dict[str, str]] = []
+    data: list[dict[str, str]] = []
     for row in rows[header_index + 1:]:
-        item: Dict[str, str] = {}
+        item: dict[str, str] = {}
         for idx, header in enumerate(headers):
             if header:
                 item[header] = str(row[idx] if idx < len(row) else "").strip()
@@ -73,20 +73,20 @@ def _yes(value: str) -> bool:
     return normalize_lookup_text(value) in {"да", "yes", "true", "1", "есть"}
 
 
-def _resolve_existing_profession_name(name: str, mercs: Dict[str, List[str]]) -> Optional[str]:
+def _resolve_existing_profession_name(name: str, mercs: dict[str, list[str]]) -> str | None:
     """Находит профессию в базе без учёта регистра/ё/дефисов."""
     key = normalize_lookup_text(name)
     if not key:
         return None
-    for profession in mercs.keys():
+    for profession in mercs:
         if normalize_lookup_text(profession) == key:
             return profession
     return None
 
 
-def _clean_profession_targets(targets: List[str], mercs: Dict[str, List[str]]) -> List[str]:
+def _clean_profession_targets(targets: list[str], mercs: dict[str, list[str]]) -> list[str]:
     """Оставляет только профессии, которые реально есть в Excel-базе."""
-    cleaned: List[str] = []
+    cleaned: list[str] = []
     for target in targets:
         resolved = _resolve_existing_profession_name(target, mercs)
         if resolved:

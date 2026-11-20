@@ -1,7 +1,7 @@
 """Original auction lot classification and price parsing, independent of Discord."""
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from services.auction_text import (
     auction_money_to_int,
@@ -33,7 +33,7 @@ AUCTION_START_PRICE_RE = re.compile(
 )
 
 
-def raw_field_candidates(raw_message: Dict[str, Any], field_name_part: str) -> List[str]:
+def raw_field_candidates(raw_message: dict[str, Any], field_name_part: str) -> list[str]:
     result = []
     target = norm_auction_text(field_name_part)
 
@@ -55,7 +55,7 @@ def raw_field_candidates(raw_message: Dict[str, Any], field_name_part: str) -> L
     return [x for x in result if x]
 
 
-def raw_title_candidates(raw_message: Dict[str, Any]) -> List[str]:
+def raw_title_candidates(raw_message: dict[str, Any]) -> list[str]:
     result = []
 
     for embed in raw_message.get("embeds") or []:
@@ -67,7 +67,7 @@ def raw_title_candidates(raw_message: Dict[str, Any]) -> List[str]:
     return result
 
 
-def extract_new_lot_number(text: str, raw_message: Optional[Dict[str, Any]] = None) -> Optional[int]:
+def extract_new_lot_number(text: str, raw_message: dict[str, Any] | None = None) -> int | None:
     candidates = []
 
     if raw_message:
@@ -91,7 +91,7 @@ def extract_new_lot_number(text: str, raw_message: Optional[Dict[str, Any]] = No
     return None
 
 
-def extract_between_labels(text: str, start_label: str, stop_labels: List[str]) -> str:
+def extract_between_labels(text: str, start_label: str, stop_labels: list[str]) -> str:
     stop_part = "|".join(re.escape(label) for label in stop_labels)
 
     pattern = re.compile(
@@ -106,7 +106,7 @@ def extract_between_labels(text: str, start_label: str, stop_labels: List[str]) 
     return clean_auction_text(match.group(1))
 
 
-def extract_new_item_text(text: str, raw_message: Dict[str, Any]) -> str:
+def extract_new_item_text(text: str, raw_message: dict[str, Any]) -> str:
     raw_items = raw_field_candidates(raw_message, "Предмет")
 
     for item in raw_items:
@@ -145,7 +145,7 @@ def extract_ancient_description(text: str) -> str:
     )
 
 
-def extract_start_price(text: str, raw_message: Dict[str, Any]) -> Optional[int]:
+def extract_start_price(text: str, raw_message: dict[str, Any]) -> int | None:
     candidates = []
     candidates.extend(raw_field_candidates(raw_message, "Начальная стоимость"))
     candidates.append(text)
@@ -164,7 +164,7 @@ def extract_start_price(text: str, raw_message: Dict[str, Any]) -> Optional[int]
     return None
 
 
-def extract_last_bid_price_and_area(text: str, raw_message: Dict[str, Any]) -> Tuple[Optional[int], str]:
+def extract_last_bid_price_and_area(text: str, raw_message: dict[str, Any]) -> tuple[int | None, str]:
     candidates = []
     candidates.extend(raw_field_candidates(raw_message, "Последняя ставка"))
     candidates.append(text)
@@ -182,7 +182,7 @@ def extract_last_bid_price_and_area(text: str, raw_message: Dict[str, Any]) -> T
     return None, ""
 
 
-def extract_bidder(text: str, raw_message: Dict[str, Any], bid_area: str) -> str:
+def extract_bidder(text: str, raw_message: dict[str, Any], bid_area: str) -> str:
     candidates = []
 
     if bid_area:
@@ -223,7 +223,7 @@ def is_auctioneer_bidder(bidder: str, bid_area: str, text: str) -> bool:
     return any(nick.lower() in area for nick in AUCTIONEER_USERNAMES)
 
 
-def parse_new_auction_lot(info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def parse_new_auction_lot(info: dict[str, Any]) -> dict[str, Any] | None:
     text = info["text"]
     raw_message = info["raw"]
 
@@ -292,7 +292,7 @@ def parse_new_auction_lot(info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
-def parse_ancient_auction_lot(info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def parse_ancient_auction_lot(info: dict[str, Any]) -> dict[str, Any] | None:
     text = info["text"]
 
     ancient_match = ANCIENT_AUCTION_LOT_RE.search(text)

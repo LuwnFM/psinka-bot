@@ -1,133 +1,73 @@
+import asyncio
+import io
+import logging
+import math
 import os
-import g4f
-import disnake
 import random
 import re
-import logging
 import time
-import math
-import csv
-import io
-import asyncio
 import traceback
 from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
-from typing import Tuple, List, Dict, Any, Optional, Set
-from disnake.ext import commands
-from openai import OpenAI
+from typing import Any
+
 import aiohttp
+import disnake
+import g4f
+from disnake.ext import commands
 from groq import Groq
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, UniqueConstraint, func
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.exc import SQLAlchemyError
-import zipfile
-from xml.sax.saxutils import escape as xml_escape
-import json
-import xml.etree.ElementTree as ET
-import calendar as pc_calendar
-import unicodedata as pc_unicodedata
-from services.post_count_templates import (
-    PCDateError,
-    PCPeriod,
-    PCSearchUnavailable,
-    PCTemplateMatch,
-    PC_ALL_FAMILIES,
-    PC_COUNT_LENGTH_FOR_ALL_TEMPLATES,
-    PC_DATE_RE,
-    PC_DRP,
-    PC_GM,
-    PC_LABELS,
-    PC_MARKDOWN_RE,
-    PC_MODE_ALIASES,
-    PC_MOSCOW_TZ,
-    PC_OUTER_PAYLOAD,
-    PC_POLIT,
-    PC_PREFIXES,
-    PC_SEGMENT_RE,
-    PC_VARIANT_LEFT,
-    PC_VARIANT_RIGHT,
-    PC_ZERO_WIDTH_RE,
-    pc_alnum_positions,
-    pc_any_length_enabled,
-    pc_best_prefix,
-    pc_candidate_starts,
-    pc_clean_payload,
-    pc_compact,
-    pc_damerau,
-    pc_find_templates,
-    pc_is_exact_surface,
-    pc_length_enabled_for_family,
-    pc_normalize_text,
-    pc_parse_date_parts,
-    pc_parse_period,
-    pc_template_body_length,
-    pc_template_mode,
-    pc_variant,
-    pc_word_pattern,
-)
-from services.post_count_settings import pc_empty_settings, pc_normalize_settings
-from services.auction_text import (
-    auction_money_to_int,
-    clean_auction_text,
-    norm_auction_text,
-    append_unique_text,
-    flatten_any_strings,
-    get_raw_author_name,
-    get_raw_author_id,
-)
-from services.dice import DiceParser, DiceResult, DiceTermResult
-from services.dice_format import _dice_paginate, _dice_result_block
-from services.spreadsheets import clean_xlsx_value, make_xlsx_file, sanitize_sheet_name
-from core.config import BotSettings, env_bool, safe_int_env
-from services.auction_lots import (
-    raw_field_candidates,
-    raw_title_candidates,
-    extract_new_lot_number,
-    extract_between_labels,
-    extract_new_item_text,
-    extract_ancient_name,
-    extract_ancient_description,
-    extract_start_price,
-    extract_last_bid_price_and_area,
-    extract_bidder,
-    is_auctioneer_bidder,
-    parse_new_auction_lot,
-    parse_ancient_auction_lot,
-)
-from services.post_count_metrics import (
-    PC_LONG_POST_MIN_CHARS,
-    pc_channel_counter_add,
-    pc_empty_surface_stats,
-    pc_empty_group,
-    pc_empty_result,
-    pc_iso_datetime,
-    pc_apply_content,
-)
-from services.post_count_reporting import (
-    PC_PUBLIC_REPORT_CHUNK_CHARS,
-    pc_merge_channel_counters,
-    pc_merge_surface_stats,
-    pc_merge_stats,
-    pc_merge_lengths,
-    pc_collect_template_records,
-    pc_percent,
-    pc_public_clip,
-    pc_sorted_channels,
-    pc_channel_report_lines,
-    pc_template_channel_report_lines,
-    pc_template_public_report_lines,
-    pc_split_lines_for_discord,
-)
+from openai import OpenAI
+
+from core.config import BotSettings, safe_int_env
 from core.paths import (
     ANALYSIS_LOG_FILE as CORE_ANALYSIS_LOG_FILE,
     BOT_ERROR_LOG,
-    ENV_FILE,
     MERCENARY_DB_FILE as CORE_MERCENARY_DB_FILE,
     PENDING_TEST_LOG as CORE_PENDING_TEST_LOG,
     POST_COUNT_SETTINGS_FILE,
     ROOT_DIR,
     initialize_paths,
 )
+from services.auction_lots import (
+    parse_ancient_auction_lot,
+    parse_new_auction_lot,
+)
+from services.auction_text import (
+    append_unique_text,
+    clean_auction_text,
+    flatten_any_strings,
+    get_raw_author_id,
+    get_raw_author_name,
+    norm_auction_text,
+)
+from services.dice import DiceParser
+from services.post_count_metrics import (
+    PC_LONG_POST_MIN_CHARS,
+    pc_apply_content,
+    pc_empty_result,
+)
+from services.post_count_reporting import (
+    pc_collect_template_records,
+    pc_merge_lengths,
+    pc_merge_stats,
+    pc_percent,
+    pc_sorted_channels,
+    pc_split_lines_for_discord,
+    pc_template_public_report_lines,
+)
+from services.post_count_templates import (
+    PC_COUNT_LENGTH_FOR_ALL_TEMPLATES,
+    PC_LABELS,
+    PC_MOSCOW_TZ,
+    PCDateError,
+    PCPeriod,
+    PCSearchUnavailable,
+    pc_any_length_enabled,
+    pc_length_enabled_for_family,
+    pc_parse_period,
+    pc_template_mode,
+    pc_word_pattern,
+)
+from services.spreadsheets import make_xlsx_file
 
 try:
     from g4f.client import AsyncClient as G4FAsyncClient
@@ -140,7 +80,7 @@ except ImportError:
 # ============================================================================
 # В начале файла, после импортов:
 try:
-    from g4f.errors import ProviderError, ModelNotFoundError, RequestLimitError, AuthenticationError
+    from g4f.errors import AuthenticationError, ModelNotFoundError, ProviderError, RequestLimitError
 except ImportError:
     # Для совместимости со старыми версиями
     ProviderError = ModelNotFoundError = RequestLimitError = AuthenticationError = Exception
@@ -176,26 +116,25 @@ def check_tokens():
 
     return tokens
 
+from core.logging_setup import configure_logging
+from db.session import init_db
+from handlers.utility_commands import respond_to_bark, respond_to_cube, respond_to_status
+from repositories import jail as jail_storage
+from repositories.model_success import DBManager
+from repositories.pending_tests import PendingTestManager
+from repositories.post_count_settings import PCSettingsStore
+from services.jail_time import normalize_jail_datetime
 from services.mercenary_normalize import (
-    normalize_lookup_text,
-    dedupe_preserve_order,
-    split_multi_field,
+    _clean_profession_targets,
+    _resolve_existing_profession_name,
     _rows_to_dicts,
     _to_int,
     _yes,
-    _resolve_existing_profession_name,
-    _clean_profession_targets,
+    dedupe_preserve_order,
+    normalize_lookup_text,
+    split_multi_field,
 )
 from services.mercenary_workbook import read_mercenary_sheets
-from handlers.utility_commands import respond_to_bark, respond_to_cube, respond_to_status
-from core.logging_setup import configure_logging
-from repositories.pending_tests import PendingTestManager
-from repositories.post_count_settings import PCSettingsStore
-from db.models import Base, JailSentence, ModelSuccessLog
-from repositories import jail as jail_storage
-from services.jail_time import normalize_jail_datetime
-from db.session import init_db
-from repositories.model_success import DBManager
 
 # Initialized only after all mapped model classes have been declared.
 db_engine, SessionLocal = None, None
@@ -342,7 +281,7 @@ OR_ALL_MODELS = OR_PRIORITY_MODELS + [
 ]
 
 
-def get_all_g4f_combinations() -> List[Tuple[str, str]]:
+def get_all_g4f_combinations() -> list[tuple[str, str]]:
     """
     Возвращает комбинации провайдер/модель для G4F из конфигурации и БД.
     Устаревшие записи не ломают очередь: имя провайдера нормализуется, а
@@ -373,7 +312,7 @@ def get_all_g4f_combinations() -> List[Tuple[str, str]]:
     return combos
 
 
-def normalize_provider_name(provider: Optional[str]) -> str:
+def normalize_provider_name(provider: str | None) -> str:
     """Приводит имена маршрутов из БД/старых файлов к одному виду."""
     raw = str(provider or "").strip()
     folded = raw.casefold()
@@ -386,7 +325,7 @@ def normalize_provider_name(provider: Optional[str]) -> str:
     return raw
 
 
-def is_model_excluded(provider: Optional[str], model: Optional[str]) -> bool:
+def is_model_excluded(provider: str | None, model: str | None) -> bool:
     """Сохраняет все прежние исключения, но применяет их по назначению."""
     provider = normalize_provider_name(provider)
     model = str(model or "").strip()
@@ -401,17 +340,17 @@ def is_model_excluded(provider: Optional[str], model: Optional[str]) -> bool:
     return False
 
 
-def get_all_groq_combinations() -> List[Tuple[str, str]]:
+def get_all_groq_combinations() -> list[tuple[str, str]]:
     """Возвращает все известные модели Groq, сохраняя исключения проекта."""
     return [("Groq", mod) for mod in GROQ_ALL_MODELS if not is_model_excluded("Groq", mod)]
 
 
-def get_all_openrouter_combinations() -> List[Tuple[str, str]]:
+def get_all_openrouter_combinations() -> list[tuple[str, str]]:
     """Возвращает все известные модели OpenRouter, сохраняя исключения проекта."""
     return [("OpenRouter", mod) for mod in OR_ALL_MODELS if not is_model_excluded("OpenRouter", mod)]
 
 
-def dedupe_combinations(combinations: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+def dedupe_combinations(combinations: list[tuple[str, str]]) -> list[tuple[str, str]]:
     result = []
     seen = set()
     for provider, model in combinations:
@@ -426,7 +365,7 @@ def dedupe_combinations(combinations: List[Tuple[str, str]]) -> List[Tuple[str, 
     return result
 
 
-def get_db_combinations(provider: Optional[str] = None) -> List[Tuple[str, str]]:
+def get_db_combinations(provider: str | None = None) -> list[tuple[str, str]]:
     if not SessionLocal:
         return []
     combos = [(normalize_provider_name(p), m) for p, m in db_manager.get_all_models()]
@@ -436,7 +375,7 @@ def get_db_combinations(provider: Optional[str] = None) -> List[Tuple[str, str]]
     return dedupe_combinations(combos)
 
 
-async def fetch_groq_model_ids() -> List[str]:
+async def fetch_groq_model_ids() -> list[str]:
     token = os.getenv('GROQ_TOKEN')
     if not token:
         return []
@@ -454,7 +393,7 @@ async def fetch_groq_model_ids() -> List[str]:
         return []
 
 
-async def fetch_openrouter_model_ids(free_only: bool = True) -> List[str]:
+async def fetch_openrouter_model_ids(free_only: bool = True) -> list[str]:
     headers = {}
     token = os.getenv('OPENR_TOKEN')
     if token:
@@ -484,7 +423,7 @@ async def fetch_openrouter_model_ids(free_only: bool = True) -> List[str]:
         return []
 
 
-async def get_all_groq_combinations_live() -> List[Tuple[str, str]]:
+async def get_all_groq_combinations_live() -> list[tuple[str, str]]:
     live_models = await fetch_groq_model_ids()
     source_models = live_models if live_models else GROQ_ALL_MODELS
     combos = [("Groq", m) for m in GROQ_PRIORITY_MODELS]
@@ -493,7 +432,7 @@ async def get_all_groq_combinations_live() -> List[Tuple[str, str]]:
     return dedupe_combinations(combos)
 
 
-async def get_all_openrouter_combinations_live() -> List[Tuple[str, str]]:
+async def get_all_openrouter_combinations_live() -> list[tuple[str, str]]:
     live_models = await fetch_openrouter_model_ids(free_only=True)
     source_models = live_models if live_models else OR_ALL_MODELS
     combos = [("OpenRouter", m) for m in OR_PRIORITY_MODELS]
@@ -502,7 +441,7 @@ async def get_all_openrouter_combinations_live() -> List[Tuple[str, str]]:
     return dedupe_combinations(combos)
 
 
-async def get_all_test_combinations_live() -> List[Tuple[str, str]]:
+async def get_all_test_combinations_live() -> list[tuple[str, str]]:
     combos = []
     combos.extend(get_all_g4f_combinations())
     combos.extend(await get_all_groq_combinations_live())
@@ -512,7 +451,7 @@ async def get_all_test_combinations_live() -> List[Tuple[str, str]]:
 # 🛠 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================================
 
-async def fetch_free_proxies(count: int = 20) -> List[str]:
+async def fetch_free_proxies(count: int = 20) -> list[str]:
     """Загружает свежие HTTP-прокси. Не используется по умолчанию, только если /скажи прокси=Да."""
     try:
         async with aiohttp.ClientSession() as session:
@@ -548,7 +487,7 @@ proxy_lock = asyncio.Lock()
 proxy_last_refresh = 0.0
 
 
-async def ensure_proxy_list(force: bool = False) -> List[str]:
+async def ensure_proxy_list(force: bool = False) -> list[str]:
     """Обновляет глобальный список прокси по требованию, а не при обычном старте."""
     global FREE_PROXY_LIST, proxy_last_refresh
     now = time.time()
@@ -567,21 +506,21 @@ async def ensure_proxy_list(force: bool = False) -> List[str]:
         return [p for p in FREE_PROXY_LIST if validate_proxy_format(p)]
 
 
-def get_random_proxy(use_proxy: bool) -> Optional[str]:
+def get_random_proxy(use_proxy: bool) -> str | None:
     if not use_proxy:
         return None
     valid = [p for p in FREE_PROXY_LIST if validate_proxy_format(p)]
     return random.choice(valid) if valid else None
 
 
-async def get_random_proxy_async(use_proxy: bool) -> Optional[str]:
+async def get_random_proxy_async(use_proxy: bool) -> str | None:
     if not use_proxy:
         return None
     proxies = await ensure_proxy_list()
     return random.choice(proxies) if proxies else None
 
 
-async def check_access(interaction: disnake.CommandInteraction, allowed_role_names: List[str] = ["Псарь"]) -> bool:
+async def check_access(interaction: disnake.CommandInteraction, allowed_role_names: list[str] = ["Псарь"]) -> bool:
     if interaction.author.id == OWNER_ID:
         return True
 
@@ -624,7 +563,7 @@ def strip_think_content(text: str) -> str:
 
 async def make_g4f_request(provider_name: str, model: str, prompt: str,
                            timeout: float = 45.0, system_prompt: str = None,
-                           proxy_url: str = None) -> Tuple[bool, str, float]:
+                           proxy_url: str = None) -> tuple[bool, str, float]:
     """Запрос к актуальному g4f через AsyncClient с сохранением каскадного fallback."""
     start = time.time()
 
@@ -743,7 +682,7 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
 
 
 async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.0,
-                                 system_prompt: str = None, proxy_url: str = None) -> Tuple[bool, str, float]:
+                                 system_prompt: str = None, proxy_url: str = None) -> tuple[bool, str, float]:
     """Запрос к OpenRouter с одним контролируемым retry для временных ошибок."""
     openrouter_token = os.getenv('OPENR_TOKEN')
     if not openrouter_token:
@@ -861,7 +800,7 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
     return False, "Все модели OpenRouter недоступны", elapsed
 
 async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
-                           system_prompt: str = None, return_model_name: bool = False) -> Tuple[bool, str, float]:
+                           system_prompt: str = None, return_model_name: bool = False) -> tuple[bool, str, float]:
     """
     Запрос к Groq с ВАШИМ именем переменной GROQ_TOKEN
     """
@@ -942,7 +881,7 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
 async def route_model_request(provider: str, model: str, prompt: str, *,
                               timeout: float = 45.0, system_prompt: str = None,
                               proxy_url: str = None,
-                              return_model_name: bool = False) -> Tuple[bool, str, float]:
+                              return_model_name: bool = False) -> tuple[bool, str, float]:
     """Единая точка маршрутизации команд к Groq, OpenRouter и G4F."""
     provider = normalize_provider_name(provider)
     model = str(model or "").strip()
@@ -1007,7 +946,7 @@ def _pending_route_keys():
     }
 
 
-async def _build_model_queue(*, db_first: bool) -> List[Tuple[str, str]]:
+async def _build_model_queue(*, db_first: bool) -> list[tuple[str, str]]:
     """Общий конструктор очереди для /скажи и /анализ."""
     queue = []
     seen = set()
@@ -1123,8 +1062,8 @@ async def slash_say(interaction: disnake.CommandInteraction,
 
         await msg.delete()
 
-        header_text = f"🐕 **ПсИИнка прогавкал ответ!**\n"
-        header_text += f"*виляет хвостом* Держи, хозяин:\n\n"
+        header_text = "🐕 **ПсИИнка прогавкал ответ!**\n"
+        header_text += "*виляет хвостом* Держи, хозяин:\n\n"
         header_text += f"📊 **Источник:** `{final_prov}` / `{final_mod}`\n"
         header_text += f"⏱ **Время:** `{final_lat:.2f}с` | 📏 **Длина:** `{len(final_response)} симв.`\n"
         header_text += f"🔀 **Прокси:** `{proxy_display}`\n"
@@ -1159,7 +1098,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
 
 @bot.slash_command(name="кубик", description="Бросок кубиков")
 async def slash_cube(interaction: disnake.CommandInteraction,
-                     формула: Optional[str] = commands.Param(
+                     формула: str | None = commands.Param(
                          description="Формула броска (например: 1d6+1d4 или dndstats)", default=None)):
     await respond_to_cube(interaction, формула, dice_engine)
 
@@ -1178,7 +1117,7 @@ async def slash_status(interaction: disnake.CommandInteraction):
 
 async def test_provider_models(provider: str, models: list, prompt: str = TEST_PROMPT,
                                timeout: float = 30.0, system_prompt: str = None,
-                               use_proxy: bool = False) -> List[Dict]:
+                               use_proxy: bool = False) -> list[dict]:
     """Универсальная функция для тестирования всех моделей провайдера"""
     results = []
 
@@ -1219,7 +1158,7 @@ async def test_provider_models(provider: str, models: list, prompt: str = TEST_P
     return results
 
 
-def format_test_results(provider: str, results: List[Dict], max_show: int = 10) -> str:
+def format_test_results(provider: str, results: list[dict], max_show: int = 10) -> str:
     """Форматирует результаты тестов для вывода в embed"""
     if not results:
         return "❌ Нет данных *скулит*"
@@ -1731,7 +1670,7 @@ DISCORD_CHANNEL_LINK_RE = re.compile(
 DISCORD_CHANNEL_MENTION_RE = re.compile(r"^<#(?P<channel>\d+)>$")
 
 
-def get_analysis_channel_types() -> List[Any]:
+def get_analysis_channel_types() -> list[Any]:
     """Типы каналов, которые можно выбрать в UI slash-команды."""
     wanted = ["text", "news", "forum", "public_thread", "private_thread", "news_thread"]
     return [getattr(disnake.ChannelType, name) for name in wanted if hasattr(disnake.ChannelType, name)]
@@ -1740,7 +1679,7 @@ def get_analysis_channel_types() -> List[Any]:
 ANALYSIS_CHANNEL_TYPES = get_analysis_channel_types()
 
 
-def extract_channel_reference(raw: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+def extract_channel_reference(raw: str | None) -> tuple[int | None, int | None]:
     """
     Достаёт guild_id и channel/thread_id из ссылки Discord, упоминания <#id> или голого ID.
     Для message-link берётся второй ID — это канал или тред, где лежит сообщение.
@@ -1795,7 +1734,7 @@ async def find_thread_in_archives(guild, target_id: int):
 
 async def resolve_analysis_target(interaction: disnake.CommandInteraction,
                                   selected_channel=None,
-                                  ссылка: Optional[str] = None):
+                                  ссылка: str | None = None):
     """
     Возвращает канал/форум/тред для анализа.
     Приоритет: ссылка/ID/упоминание → выбранный канал → текущий канал.
@@ -1944,14 +1883,14 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
     return all_messages
 
 
-def format_messages_for_ai(messages_list: List[Dict]) -> str:
+def format_messages_for_ai(messages_list: list[dict]) -> str:
     return "\n".join([
         f"{msg['id']} [{msg['source']}]: {msg['content'].replace(chr(10), ' ')}"
         for msg in messages_list
     ])
 
 
-def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
+def parse_ai_response(ai_text: str, original_data: list[dict]) -> list[dict]:
     if not ai_text or ai_text.strip().upper() == "NONE":
         return []
 
@@ -1962,12 +1901,12 @@ def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
 
 @bot.slash_command(name="анализ", description="Анализ канала, форума или треда на нарушения")
 async def slash_analyze(interaction: disnake.CommandInteraction,
-                        канал: Optional[disnake.abc.GuildChannel] = commands.Param(
+                        канал: disnake.abc.GuildChannel | None = commands.Param(
                             default=None,
                             description="Канал/форум/тред для анализа",
                             channel_types=ANALYSIS_CHANNEL_TYPES,
                         ),
-                        ссылка: Optional[str] = commands.Param(
+                        ссылка: str | None = commands.Param(
                             default=None,
                             description="Ссылка, ID или упоминание канала/форума/треда",
                         ),
@@ -2149,7 +2088,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
 # 💰 КОМАНДА: ЦЕНЫ АУКЦИОНА
 # ============================================================================
 
-def get_auction_price_channel_types() -> List[Any]:
+def get_auction_price_channel_types() -> list[Any]:
     wanted = ["text", "news", "public_thread", "private_thread", "news_thread"]
     return [getattr(disnake.ChannelType, name) for name in wanted if hasattr(disnake.ChannelType, name)]
 
@@ -2157,12 +2096,12 @@ def get_auction_price_channel_types() -> List[Any]:
 AUCTION_PRICE_CHANNEL_TYPES = get_auction_price_channel_types()
 
 
-def raw_message_to_text(raw_message: Dict[str, Any]) -> str:
+def raw_message_to_text(raw_message: dict[str, Any]) -> str:
     """
     Собирает максимум текста из Discord raw payload:
     content, embeds, fields, footer, author, components и запасной проход по JSON.
     """
-    parts: List[str] = []
+    parts: list[str] = []
 
     append_unique_text(parts, raw_message.get("content"))
     append_unique_text(parts, raw_message.get("clean_content"))
@@ -2202,7 +2141,7 @@ def raw_message_to_text(raw_message: Dict[str, Any]) -> str:
     return clean_auction_text("\n".join(parts))
 
 
-def disnake_message_to_raw_like(message: disnake.Message) -> Dict[str, Any]:
+def disnake_message_to_raw_like(message: disnake.Message) -> dict[str, Any]:
     embeds = []
 
     for embed in getattr(message, "embeds", []) or []:
@@ -2248,12 +2187,12 @@ def make_jump_url(guild_id: int, channel_id: int, message_id: Any) -> str:
 async def fetch_raw_discord_messages(
     channel_id: int,
     limit: int,
-) -> Tuple[List[Dict[str, Any]], List[List[Any]]]:
+) -> tuple[list[dict[str, Any]], list[list[Any]]]:
     """
     Читает историю напрямую через Discord API.
     Это надёжнее, чем message.embeds, потому что мы видим сырой payload.
     """
-    logs: List[List[Any]] = []
+    logs: list[list[Any]] = []
     token = os.getenv("DISCORD_TOKEN")
 
     if not token:
@@ -2267,7 +2206,7 @@ async def fetch_raw_discord_messages(
 
     url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
 
-    all_messages: List[Dict[str, Any]] = []
+    all_messages: list[dict[str, Any]] = []
     before = None
 
     timeout = aiohttp.ClientTimeout(total=45)
@@ -2322,9 +2261,9 @@ async def fetch_history_fallback(
     target_channel,
     guild_id: int,
     limit: int,
-) -> Tuple[List[Dict[str, Any]], List[List[Any]]]:
-    logs: List[List[Any]] = []
-    result: List[Dict[str, Any]] = []
+) -> tuple[list[dict[str, Any]], list[list[Any]]]:
+    logs: list[list[Any]] = []
+    result: list[dict[str, Any]] = []
 
     if not hasattr(target_channel, "history"):
         logs.append(["HISTORY", "", "У канала нет метода history", "", ""])
@@ -2349,7 +2288,7 @@ async def fetch_history_fallback(
     return result, logs
 
 
-def raw_to_info(raw_message: Dict[str, Any], guild_id: int, channel_id: int) -> Dict[str, Any]:
+def raw_to_info(raw_message: dict[str, Any], guild_id: int, channel_id: int) -> dict[str, Any]:
     message_id = str(raw_message.get("id") or "")
     real_channel_id = int(raw_message.get("channel_id") or channel_id)
 
@@ -2370,12 +2309,12 @@ def raw_to_info(raw_message: Dict[str, Any], guild_id: int, channel_id: int) -> 
 
 
 def build_auction_prices_xlsx(
-    people_rows: List[Dict[str, Any]],
-    auctioneer_rows: List[Dict[str, Any]],
-    ancient_rows: List[Dict[str, Any]],
-    all_new_lot_rows: List[Dict[str, Any]],
-    log_rows: List[List[Any]],
-    raw_embed_rows: List[List[Any]],
+    people_rows: list[dict[str, Any]],
+    auctioneer_rows: list[dict[str, Any]],
+    ancient_rows: list[dict[str, Any]],
+    all_new_lot_rows: list[dict[str, Any]],
+    log_rows: list[list[Any]],
+    raw_embed_rows: list[list[Any]],
     target_channel,
     scanned: int,
     limit: int,
@@ -2532,7 +2471,7 @@ def build_auction_prices_xlsx(
 @bot.slash_command(name="цены", description="Посчитать цены выкупа лотов в аукционном канале")
 async def slash_auction_prices(
     interaction: disnake.CommandInteraction,
-    канал: Optional[disnake.abc.GuildChannel] = commands.Param(
+    канал: disnake.abc.GuildChannel | None = commands.Param(
         default=None,
         description="Канал или тред с лотами. Если не указать — текущий канал.",
         channel_types=AUCTION_PRICE_CHANNEL_TYPES,
@@ -2565,20 +2504,20 @@ async def slash_auction_prices(
     guild_id = int(getattr(interaction.guild, "id", 0) or 0)
     channel_id = int(getattr(target_channel, "id", 0))
 
-    people_rows: List[Dict[str, Any]] = []
-    auctioneer_rows: List[Dict[str, Any]] = []
-    ancient_rows: List[Dict[str, Any]] = []
-    all_new_lot_rows: List[Dict[str, Any]] = []
+    people_rows: list[dict[str, Any]] = []
+    auctioneer_rows: list[dict[str, Any]] = []
+    ancient_rows: list[dict[str, Any]] = []
+    all_new_lot_rows: list[dict[str, Any]] = []
 
-    log_rows: List[List[Any]] = []
-    raw_embed_rows: List[List[Any]] = []
+    log_rows: list[list[Any]] = []
+    raw_embed_rows: list[list[Any]] = []
 
     # Повторный НОМЕР лота — это не дубль сообщения и должен считаться.
     # Дедупликация нужна только если один и тот же Discord message_id
     # каким-либо образом попал в выборку повторно.
-    seen_message_ids: Set[str] = set()
-    seen_new_lots: Set[int] = set()
-    seen_ancient_lots: Set[int] = set()
+    seen_message_ids: set[str] = set()
+    seen_new_lots: set[int] = set()
+    seen_ancient_lots: set[int] = set()
 
     scanned = 0
     skipped_returned = 0
@@ -2952,7 +2891,7 @@ def normalize_channel_lookup_text(text: str) -> str:
     return " ".join(text.split())
 
 
-def parse_discord_channel_id(raw: str) -> Optional[int]:
+def parse_discord_channel_id(raw: str) -> int | None:
     """
     Достаёт ID канала из:
     - значения autocomplete: 123456789012345678
@@ -2982,7 +2921,7 @@ def parse_discord_channel_id(raw: str) -> Optional[int]:
     return None
 
 
-def split_discord_message(text: str, limit: int = 2000) -> List[str]:
+def split_discord_message(text: str, limit: int = 2000) -> list[str]:
     """Делит длинный текст на куски до лимита Discord."""
     text = text or ""
     chunks = []
@@ -3002,7 +2941,7 @@ def split_discord_message(text: str, limit: int = 2000) -> List[str]:
     return chunks or [""]
 
 
-def get_writable_text_channels() -> List[disnake.TextChannel]:
+def get_writable_text_channels() -> list[disnake.TextChannel]:
     """Все текстовые каналы, куда бот может писать."""
     result = []
 
@@ -3019,7 +2958,7 @@ def get_writable_text_channels() -> List[disnake.TextChannel]:
     return result
 
 
-def find_channels_by_query(query: str, limit: int = 25) -> List[disnake.TextChannel]:
+def find_channels_by_query(query: str, limit: int = 25) -> list[disnake.TextChannel]:
     """Ищет каналы по названию канала, названию сервера или ID."""
     query_norm = normalize_channel_lookup_text(query)
     channels = get_writable_text_channels()
@@ -3151,7 +3090,7 @@ async def ensure_guild_members_loaded(guild: disnake.Guild):
         logger.warning(f"Не удалось подгрузить участников сервера {guild.name}: {e}")
 
 
-def get_member_ping_names(member: disnake.Member) -> Set[str]:
+def get_member_ping_names(member: disnake.Member) -> set[str]:
     """
     Какие варианты имени разрешаем писать в /напиши:
     @username
@@ -3242,7 +3181,7 @@ async def prepare_owner_message_text(text: str, guild: disnake.Guild) -> str:
         text = await replace_member_name_mentions_for_guild(text, guild)
 
     return text
-    
+
 def build_allowed_mentions_for_owner_message() -> disnake.AllowedMentions:
     """
     Разрешаем пинговать роли и пользователей, но не @everyone/@here.
@@ -3424,14 +3363,14 @@ async def slash_owner_write(
         if interaction.response.is_done():
             await interaction.edit_original_response(error_text)
         else:
-            await interaction.response.send_message(error_text, ephemeral=True)    
+            await interaction.response.send_message(error_text, ephemeral=True)
 #жопажопа
 
 # ============================================================================
 # ЛС-ПЕРЕПИСКА ОТ ЛИЦА БОТА: /напиши_юзеру + пересылка ответов овнеру
 # ============================================================================
 
-def extract_discord_user_id(raw: str) -> Optional[int]:
+def extract_discord_user_id(raw: str) -> int | None:
     """
     Достаёт ID пользователя из:
     - 123456789012345678
@@ -3481,7 +3420,7 @@ def get_member_search_names(member: disnake.Member) -> set[str]:
     return names
 
 
-async def find_user_for_owner_dm(raw_target: str) -> Tuple[Optional[disnake.User], Optional[str]]:
+async def find_user_for_owner_dm(raw_target: str) -> tuple[disnake.User | None, str | None]:
     """
     Ищет пользователя по:
     - числовому ID
@@ -3549,7 +3488,7 @@ async def find_user_for_owner_dm(raw_target: str) -> Tuple[Optional[disnake.User
 
     member = next(iter(matches.values()))
     return member, None
-    
+
 @bot.slash_command(
     name="напиши_юзеру",
     description="Отправить пользователю ЛС от лица бота. Только для владельца.",
@@ -3709,7 +3648,7 @@ async def owner_dm_relay_listener(message: disnake.Message):
 PENCIL_EMOJI = "📝"
 
 
-def parse_discord_message_link(raw: str) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+def parse_discord_message_link(raw: str) -> tuple[int | None, int | None, int | None]:
     """
     Достаёт guild_id, channel_id, message_id из:
     - ссылки Discord: https://discord.com/channels/GUILD_ID/CHANNEL_ID/MESSAGE_ID
@@ -3737,7 +3676,7 @@ def parse_discord_message_link(raw: str) -> Tuple[Optional[int], Optional[int], 
     return None, None, None
 
 
-async def fetch_bot_message_from_link(message_link: str) -> Optional[disnake.Message]:
+async def fetch_bot_message_from_link(message_link: str) -> disnake.Message | None:
     """Находит сообщение по ссылке/ID и проверяет, что оно принадлежит этому боту."""
     guild_id, channel_id, message_id = parse_discord_message_link(message_link)
 
@@ -3767,7 +3706,7 @@ async def fetch_bot_message_from_link(message_link: str) -> Optional[disnake.Mes
     return message
 
 
-def prepare_edited_bot_text(text: str, guild: Optional[disnake.Guild]) -> str:
+def prepare_edited_bot_text(text: str, guild: disnake.Guild | None) -> str:
     """
     Готовит текст для отправки/редактирования:
     - заменяет @НазваниеРоли на настоящий пинг роли, если сообщение в серверном канале;
@@ -3803,7 +3742,7 @@ def get_owner_allowed_mentions() -> disnake.AllowedMentions:
 async def edit_bot_message_content(
     target_message: disnake.Message,
     new_text: str
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """Редактирует сообщение бота."""
     if not bot.user or target_message.author.id != bot.user.id:
         return False, "Это сообщение написал не бот."
@@ -4250,7 +4189,7 @@ async def quality_roll_message_listener(message):
 BASE_DIR = str(ROOT_DIR)
 MERCENARY_DB_FILE = str(CORE_MERCENARY_DB_FILE)
 
-MERCENARY_SKILL_PROBABILITIES: Dict[str, int] = {
+MERCENARY_SKILL_PROBABILITIES: dict[str, int] = {
     "Новичок": 10,
     "Опытный": 30,
     "Ветеран": 50,
@@ -4258,12 +4197,12 @@ MERCENARY_SKILL_PROBABILITIES: Dict[str, int] = {
     "Легендарный Мастер": 2,
 }
 
-MERCENARIES_DB: Dict[str, List[str]] = {}
-MERCENARY_META: Dict[str, Dict[str, Any]] = {}
-MERCENARY_SPECIALIZATIONS: Dict[str, List[Dict[str, Any]]] = {}
-MERCENARY_ALIASES: Dict[str, str] = {}
-MERCENARY_QUERY_SYNONYMS: Dict[str, List[str]] = {}
-KNOWN_MERCENARY_SKILLS: Set[str] = set()
+MERCENARIES_DB: dict[str, list[str]] = {}
+MERCENARY_META: dict[str, dict[str, Any]] = {}
+MERCENARY_SPECIALIZATIONS: dict[str, list[dict[str, Any]]] = {}
+MERCENARY_ALIASES: dict[str, str] = {}
+MERCENARY_QUERY_SYNONYMS: dict[str, list[str]] = {}
+KNOWN_MERCENARY_SKILLS: set[str] = set()
 
 XLSX_MAIN_SHEET = "01_Наёмники"
 XLSX_SPECIALIZATIONS_SHEET = "02_Специализации"
@@ -4274,7 +4213,7 @@ XLSX_SYNONYMS_SHEET = "08_Синонимы"
 
 # Фолбэк-словарь нужен, чтобы команда работала даже если лист 08_Синонимы случайно удалили.
 # Если лист 08_Синонимы есть в Excel, данные из него ДОБАВЛЯЮТСЯ поверх этого списка.
-DEFAULT_MERCENARY_QUERY_SYNONYMS: Dict[str, List[str]] = {'актер': ['Актер', 'Актер в театре', 'Голосистый артист'],
+DEFAULT_MERCENARY_QUERY_SYNONYMS: dict[str, list[str]] = {'актер': ['Актер', 'Актер в театре', 'Голосистый артист'],
  'актёр': ['Актер', 'Актер в театре', 'Голосистый артист'],
  'алхимик': ['Аптекарь', 'Провизор', 'Кудесник', 'Чернокнижник'],
  'аркебузир': ['Стрелок', 'Картечник', 'Артиллерист'],
@@ -4502,8 +4441,8 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
     settings_rows = _rows_to_dicts(sheets.get(XLSX_SETTINGS_SHEET, []), "Параметр")
     synonym_rows = _rows_to_dicts(sheets.get(XLSX_SYNONYMS_SHEET, []), "Синоним/ввод")
 
-    mercs: Dict[str, List[str]] = {}
-    meta: Dict[str, Dict[str, Any]] = {}
+    mercs: dict[str, list[str]] = {}
+    meta: dict[str, dict[str, Any]] = {}
 
     for row in main_rows:
         profession = row.get("Профессия", "").strip()
@@ -4547,7 +4486,7 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
             "note": row.get("Заметка", ""),
         }
 
-    specs: Dict[str, List[Dict[str, Any]]] = {}
+    specs: dict[str, list[dict[str, Any]]] = {}
     for row in spec_rows:
         profession = row.get("Профессия", "").strip()
         spec_name = row.get("Специализация", "").strip()
@@ -4568,7 +4507,7 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
             "note": row.get("Заметка", ""),
         })
 
-    aliases: Dict[str, str] = {}
+    aliases: dict[str, str] = {}
     for row in alias_rows:
         alias_type = normalize_lookup_text(row.get("Тип", ""))
         old_name = row.get("Ввод/старое имя", "").strip()
@@ -4578,7 +4517,7 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
             aliases[normalize_lookup_text(old_name)] = resolved
 
     # Синонимы для автокомплита и мягкого поиска.
-    synonyms: Dict[str, List[str]] = {}
+    synonyms: dict[str, list[str]] = {}
 
     # 1) сначала встроенный фолбэк
     for synonym, targets in DEFAULT_MERCENARY_QUERY_SYNONYMS.items():
@@ -4598,7 +4537,7 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
                 synonyms[synonym] = clean_targets
 
     # Настройки шансов из 05_Настройки, если там есть строки уровней.
-    chances: Dict[str, int] = {}
+    chances: dict[str, int] = {}
     for row in settings_rows:
         param = row.get("Параметр", "").strip()
         value = row.get("Значение", "").strip()
@@ -4621,7 +4560,7 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
     )
 
 
-def normalize_mercenary_name(name: str) -> Optional[str]:
+def normalize_mercenary_name(name: str) -> str | None:
     """
     Точный поиск профессии/алиаса.
     Важно: синонимы, которые дают несколько вариантов, здесь НЕ выбирают профессию сами.
@@ -4632,7 +4571,7 @@ def normalize_mercenary_name(name: str) -> Optional[str]:
     if normalized in MERCENARY_ALIASES:
         return MERCENARY_ALIASES[normalized]
 
-    for profession in MERCENARIES_DB.keys():
+    for profession in MERCENARIES_DB:
         if normalize_lookup_text(profession) == normalized:
             return profession
 
@@ -4649,12 +4588,12 @@ def has_specialization(profession: str) -> bool:
     return bool(MERCENARY_SPECIALIZATIONS.get(profession))
 
 
-def roll_specialization(profession: str) -> Optional[Dict[str, Any]]:
+def roll_specialization(profession: str) -> dict[str, Any] | None:
     specs = MERCENARY_SPECIALIZATIONS.get(profession, [])
     return random.choice(specs) if specs else None
 
 
-def build_mercenary_skill_pool(profession: str, specialization: Optional[Dict[str, Any]]) -> List[str]:
+def build_mercenary_skill_pool(profession: str, specialization: dict[str, Any] | None) -> list[str]:
     """
     Возвращает итоговый пул навыков:
     - без спецы: 4 базовых навыка;
@@ -4681,7 +4620,7 @@ def build_mercenary_skill_pool(profession: str, specialization: Optional[Dict[st
     return final_pool[:max_skills]
 
 
-def _add_match(scored: Dict[str, int], profession: str, score: int) -> None:
+def _add_match(scored: dict[str, int], profession: str, score: int) -> None:
     if profession not in MERCENARIES_DB:
         return
     old = scored.get(profession)
@@ -4689,7 +4628,7 @@ def _add_match(scored: Dict[str, int], profession: str, score: int) -> None:
         scored[profession] = score
 
 
-def find_mercenary_matches(query: str, limit: int = 25) -> List[str]:
+def find_mercenary_matches(query: str, limit: int = 25) -> list[str]:
     """
     Мягкий поиск для autocomplete:
     - точные совпадения выше;
@@ -4704,7 +4643,7 @@ def find_mercenary_matches(query: str, limit: int = 25) -> List[str]:
     if not normalized:
         return sorted(MERCENARIES_DB.keys(), key=lambda x: normalize_lookup_text(x))[:limit]
 
-    scored: Dict[str, int] = {}
+    scored: dict[str, int] = {}
 
     # 1) точный алиас/точное имя
     exact = normalize_mercenary_name(normalized)
@@ -4713,7 +4652,7 @@ def find_mercenary_matches(query: str, limit: int = 25) -> List[str]:
 
     # 2) прямое совпадение с профессиями по подстроке/началу слов
     query_tokens = normalized.split()
-    for profession in MERCENARIES_DB.keys():
+    for profession in MERCENARIES_DB:
         p_norm = normalize_lookup_text(profession)
         p_tokens = p_norm.split()
 
@@ -4777,7 +4716,7 @@ def find_mercenary_matches(query: str, limit: int = 25) -> List[str]:
     ][:limit]
 
 
-def resolve_mercenary_query(query: str) -> Tuple[Optional[str], List[str]]:
+def resolve_mercenary_query(query: str) -> tuple[str | None, list[str]]:
     """
     Возвращает:
     - (профессия, []) если ввод точный или нашёлся один-единственный вариант;
@@ -4847,8 +4786,8 @@ JAIL_RELEASE_PATTERN = re.compile(
 
 # Активные таймеры:
 # ключ — (ID сервера, ID участника)
-jail_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
-jail_deadlines: Dict[Tuple[int, int], datetime] = {}
+jail_tasks: dict[tuple[int, int], asyncio.Task] = {}
+jail_deadlines: dict[tuple[int, int], datetime] = {}
 
 jail_timers_restored = False
 
@@ -4891,7 +4830,7 @@ def delete_jail_sentence_db(guild_id: int, user_id: int) -> None:
     jail_storage.delete_jail_sentence_db(SessionLocal, guild_id, user_id)
 
 
-def load_jail_sentences_db() -> List[Tuple[int, int, datetime]]:
+def load_jail_sentences_db() -> list[tuple[int, int, datetime]]:
     """Read jail terms through the repository for restart recovery."""
     return jail_storage.load_jail_sentences_db(SessionLocal)
 
@@ -4901,7 +4840,7 @@ def load_jail_sentences_db() -> List[Tuple[int, int, datetime]]:
 
 async def get_jail_reply_target(
     message: disnake.Message,
-) -> Optional[disnake.Member]:
+) -> disnake.Member | None:
     """
     Получает автора сообщения, на которое ответил модератор.
     """
@@ -4946,8 +4885,8 @@ async def get_jail_reply_target(
 
 async def get_jail_mentioned_target(
     message: disnake.Message,
-    mention_text: Optional[str],
-) -> Optional[disnake.Member]:
+    mention_text: str | None,
+) -> disnake.Member | None:
     """
     Получает участника из упоминания перед фразой.
     """
@@ -5667,7 +5606,7 @@ def get_skill_level_emoji(level: str) -> str:
     return emojis.get(level, "•")
 
 
-def build_match_list_text(matches: List[str], max_items: int = 20) -> str:
+def build_match_list_text(matches: list[str], max_items: int = 20) -> str:
     if not matches:
         return "—"
     shown = matches[:max_items]
@@ -5867,7 +5806,7 @@ def pc_admin(member) -> bool:
     return isinstance(member, disnake.Member) and bool(member.guild_permissions.administrator)
 
 
-def pc_can_count(interaction, roles: Set[int]) -> bool:
+def pc_can_count(interaction, roles: set[int]) -> bool:
     if pc_owner(interaction.author.id) or pc_admin(interaction.author):
         return True
     return isinstance(interaction.author, disnake.Member) and any(
@@ -5936,7 +5875,7 @@ async def pc_collect_archive_stream(
 
 async def pc_collect_targets(
     guild: disnake.Guild,
-    category_ids: Set[int],
+    category_ids: set[int],
     period: PCPeriod,
 ):
     errors = []
@@ -7334,12 +7273,12 @@ def pc_posts_faq():
 )
 async def slash_count_categories(
     interaction: disnake.CommandInteraction,
-    действие: Optional[str] = commands.Param(
+    действие: str | None = commands.Param(
         default=None,
         choices=["добавить", "удалить", "показать", "очистить"],
         description="Действие; оставь пустым для FAQ",
     ),
-    категория: Optional[disnake.abc.GuildChannel] = commands.Param(
+    категория: disnake.abc.GuildChannel | None = commands.Param(
         default=None,
         channel_types=[disnake.ChannelType.category],
         description="Категория для добавления или удаления",
@@ -7416,12 +7355,12 @@ async def slash_count_categories(
 )
 async def slash_count_roles(
     interaction: disnake.CommandInteraction,
-    действие: Optional[str] = commands.Param(
+    действие: str | None = commands.Param(
         default=None,
         choices=["добавить", "удалить", "показать", "очистить"],
         description="Действие; оставь пустым для FAQ",
     ),
-    роль: Optional[disnake.Role] = commands.Param(
+    роль: disnake.Role | None = commands.Param(
         default=None,
         description="Роль для добавления или удаления",
     ),
@@ -7487,20 +7426,20 @@ async def slash_count_roles(
 )
 async def slash_count_posts(
     interaction: disnake.CommandInteraction,
-    пользователь: Optional[disnake.Member] = commands.Param(
+    пользователь: disnake.Member | None = commands.Param(
         default=None,
         description="Чьи сообщения считать",
     ),
-    слово: Optional[str] = commands.Param(
+    слово: str | None = commands.Param(
         default=None,
         max_length=200,
         description="Слово, фраза или шаблонный режим",
     ),
-    с_даты: Optional[str] = commands.Param(
+    с_даты: str | None = commands.Param(
         default=None,
         description="Начало: ДД.ММ.ГГ или ДД.ММ.ГГГГ",
     ),
-    по_дату: Optional[str] = commands.Param(
+    по_дату: str | None = commands.Param(
         default=None,
         description="Конец включительно: ДД.ММ.ГГ или ДД.ММ.ГГГГ",
     ),

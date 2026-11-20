@@ -2,7 +2,7 @@
 
 import random
 import re
-from typing import Dict, List, Optional, Tuple
+
 
 class DiceTermResult:
     def __init__(self, source: str, sign: int = 1):
@@ -11,39 +11,39 @@ class DiceTermResult:
         self.kind = "dice"
         self.num_dice = 0
         self.num_sides = 0
-        self.base_rolls: List[int] = []
-        self.final_rolls: List[int] = []
-        self.all_rolls: List[int] = []
-        self.exploded_rolls: List[int] = []
-        self.kept_dice: List[int] = []
-        self.dropped_dice: List[int] = []
-        self.reroll_sequences: List[Tuple[int, List[int]]] = []
-        self.details: List[str] = []
-        self.warnings: List[str] = []
+        self.base_rolls: list[int] = []
+        self.final_rolls: list[int] = []
+        self.all_rolls: list[int] = []
+        self.exploded_rolls: list[int] = []
+        self.kept_dice: list[int] = []
+        self.dropped_dice: list[int] = []
+        self.reroll_sequences: list[tuple[int, list[int]]] = []
+        self.details: list[str] = []
+        self.warnings: list[str] = []
         self.successes = 0
         self.failures = 0
         self.botches = 0
-        self.target: Optional[int] = None
+        self.target: int | None = None
         self.subtotal = 0.0
-        self.number_value: Optional[float] = None
+        self.number_value: float | None = None
 
 
 class DiceResult:
     def __init__(self):
         self.total = 0.0
-        self.dice_rolls: List[int] = []
-        self.all_rolls: List[int] = []
-        self.details: List[str] = []
+        self.dice_rolls: list[int] = []
+        self.all_rolls: list[int] = []
+        self.details: list[str] = []
         self.comment = ""
-        self.exploded_rolls: List[int] = []
-        self.kept_dice: List[int] = []
-        self.dropped_dice: List[int] = []
+        self.exploded_rolls: list[int] = []
+        self.kept_dice: list[int] = []
+        self.dropped_dice: list[int] = []
         self.rerolled = False
         self.successes: int = 0
         self.failures: int = 0
         self.botches: int = 0
-        self.terms: List[DiceTermResult] = []
-        self.warnings: List[str] = []
+        self.terms: list[DiceTermResult] = []
+        self.warnings: list[str] = []
         self.expression = ""
         self.formula_raw = ""
         self.formula_expanded = ""
@@ -51,7 +51,7 @@ class DiceResult:
         self.formula_count = 1
         self.set_index = 0
         self.set_count = 1
-        self.global_modifier: Optional[Tuple[str, float, float]] = None
+        self.global_modifier: tuple[str, float, float] | None = None
 
 
 class DiceParser:
@@ -73,7 +73,7 @@ class DiceParser:
             "save": "1d20 + 5",
         }
 
-    def parse(self, command_str: str) -> List[DiceResult]:
+    def parse(self, command_str: str) -> list[DiceResult]:
         if not command_str or not command_str.strip():
             return []
         if len(command_str) > self.MAX_INPUT_LENGTH:
@@ -85,7 +85,7 @@ class DiceParser:
         if len(formulas) > self.MAX_FORMULAS:
             raise ValueError(f"Можно указать максимум {self.MAX_FORMULAS} отдельные формулы через `;`.")
 
-        results: List[DiceResult] = []
+        results: list[DiceResult] = []
         formula_count = len(formulas)
         for formula_index, raw_formula in enumerate(formulas):
             parsed = self._parse_expression(raw_formula)
@@ -107,7 +107,7 @@ class DiceParser:
         tail = parts[1] if len(parts) > 1 else ""
         return (self.aliases[alias] + (" " + tail if tail else "")).strip()
 
-    def _parse_expression(self, expression: str) -> List[DiceResult]:
+    def _parse_expression(self, expression: str) -> list[DiceResult]:
         comment = ""
         if '!' in expression:
             expression, comment = expression.split('!', 1)
@@ -132,7 +132,7 @@ class DiceParser:
                 num_sets = possible_sets
                 expanded = self._expand_alias(remainder)
 
-        results: List[DiceResult] = []
+        results: list[DiceResult] = []
         for set_index in range(num_sets):
             result = self._roll_once(expanded)
             result.comment = comment
@@ -142,7 +142,7 @@ class DiceParser:
             results.append(result)
         return results
 
-    def _extract_global_modifier(self, expression: str) -> Tuple[str, Optional[Tuple[str, float]]]:
+    def _extract_global_modifier(self, expression: str) -> tuple[str, tuple[str, float] | None]:
         match = re.search(r'\s*([*/])\s*(-?\d+(?:\.\d+)?)\s*$', expression)
         if not match:
             return expression.strip(), None
@@ -151,12 +151,12 @@ class DiceParser:
             raise ValueError("Перед `*` или `/` должна быть формула.")
         return core, (match.group(1), float(match.group(2)))
 
-    def _split_additive_terms(self, expression: str) -> List[Tuple[int, str]]:
+    def _split_additive_terms(self, expression: str) -> list[tuple[int, str]]:
         if not expression.strip():
             raise ValueError("Пустая формула броска.")
 
-        terms: List[Tuple[int, str]] = []
-        current: List[str] = []
+        terms: list[tuple[int, str]] = []
+        current: list[str] = []
         sign = 1
         saw_content = False
 
@@ -184,8 +184,8 @@ class DiceParser:
         terms.append((sign, text))
         return terms
 
-    def _parse_flags(self, tail: str, num_sides: int) -> Dict[str, Tuple[str, int]]:
-        flags: Dict[str, Tuple[str, int]] = {}
+    def _parse_flags(self, tail: str, num_sides: int) -> dict[str, tuple[str, int]]:
+        flags: dict[str, tuple[str, int]] = {}
         pos = 0
         pattern = re.compile(r'(ie|ir|kh|kl|dh|dl|e|r|k|d|t)\s*(\d+)?', re.IGNORECASE)
         category_for = {
@@ -264,7 +264,7 @@ class DiceParser:
             for index, original in enumerate(list(working_rolls)):
                 if original > threshold or budget <= 0:
                     continue
-                sequence: List[int] = []
+                sequence: list[int] = []
                 while working_rolls[index] <= threshold and budget > 0:
                     new_value = random.randint(1, num_sides)
                     working_rolls[index] = new_value
@@ -362,7 +362,7 @@ class DiceParser:
         core_expression, global_modifier = self._extract_global_modifier(res.expression)
         additive_terms = self._split_additive_terms(core_expression)
 
-        parsed_terms: List[DiceTermResult] = []
+        parsed_terms: list[DiceTermResult] = []
         total_base_dice = 0
         for sign, text in additive_terms:
             term = self._parse_term(text, sign)

@@ -1,10 +1,10 @@
 """Persistence operations for the jail mechanic, independent from Discord."""
 
 from datetime import datetime
-from typing import List, Tuple
 
 from db.models import JailSentence
 from services.jail_time import normalize_jail_datetime
+
 
 def save_jail_sentence_db(
     session_factory,
@@ -92,7 +92,7 @@ def delete_jail_sentence_db(
         session.close()
 
 
-def load_jail_sentences_db(session_factory) -> List[Tuple[int, int, datetime]]:
+def load_jail_sentences_db(session_factory) -> list[tuple[int, int, datetime]]:
     """Загружает действующие сроки после перезапуска бота."""
 
     if session_factory is None:
