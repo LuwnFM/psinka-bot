@@ -42,3 +42,16 @@ GitHub Actions regression and full audit workflows remain authoritative for subs
 ## Release-candidate gate decision — 21 November 2026
 
 At commit 98b724a the complete mypy run passed on 31 active source files, while full regressions passed on Python 3.10 and 3.12 and the credential-free startup smoke passed. Strict Ruff emitted 92 remaining diagnostics. Per owner priority, non-functional lint and complexity diagnostics are advisory, not merge blockers. The full-audit workflow now keeps compilation, mypy and full pytest strict; it still executes and shows all Ruff issues, but marks those steps advisory. This is NOT a claim that the remaining broad catch blocks have been verified safe in production. Live Discord, PostgreSQL and real AI provider integration were not exercised. Do not describe this as a fully staging-validated production release.
+
+## Final exception remediation and lint policy — 21 November 2026
+
+The owner explicitly accepted legacy function complexity (C901) and pseudorandom gameplay/proxy selection (S311). The project therefore excludes **only those two Ruff rule groups** in `pyproject.toml`, while all other Ruff checks are now blocking again. Neither complexity nor random behavior was modified.
+
+- Before this pass: 92 Ruff findings (24 C901, 11 S311, 57 other findings).
+- After coordinated exception safety, logs, compatibility restoration and tested Ruff formatting: 35 findings, **all** in accepted C901/S311 rule groups. The whitespace warning was fixed by the final automated formatter sweep.
+- Former bare catches, silent pass/continue cases and poorly bounded exceptions now use specific catches or documented local intentional boundary handling; diagnostics preserve failed thread and AI-proxy context.
+- When the final public post-count report cannot be published, an error is logged and an ephemeral message is attempted so the user is not silently abandoned.
+- The exact original behavior of the extracted mercenary integer parser is intentionally retained because the AST equivalence regression tests require it; its catch is documented locally, not silently removed.
+- The full suite had 91 passing tests on the automated formatter run, and strict mypy remained clean across 31 source files before the final policy-only commit.
+
+**Important:** Full CI verifies code and test behavior, not live Discord/PostgreSQL/provider integration. Do not claim production staging has been exercised.
