@@ -1,0 +1,68 @@
+name: One-time reviewed safe Ruff fixes
+
+on:
+  push:
+    branches:
+      - refactor/modularization-ci-2026-11-19
+    paths:
+      - '.github/workflows/ruff-safe-fixes.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  safe-fixes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: one-time-safe-ruff-fixes
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install lint and regression dependencies
+        run: python -m pip install 'ruff==0.17.6' pytest pytest-asyncio disnake==2.12.0 openpyxl python-dotenv sqlalchemy
+      - name: Count safe Ruff findings before changes
+        shell: bash
+        run: |
+          ruff check . > /tmp/ruff-before.txt 2>&1 || true
+          tail -n 3 /tmp/ruff-before.txt
+      - name: Apply only safe autofixes (never --unsafe-fixes)
+        run: |
+          ruff check --fix . > /tmp/ruff-after.txt 2>&1 || true
+          tail -n 5 /tmp/ruff-after.txt
+          git diff --stat
+      - name: Validate Python syntax and original behavior
+        run: |
+          python -m compileall -q psinkamain.py core cogs services db repositories handlers
+          python -m pytest -q
+      - name: Verify runtime imports and unchanged Discord registration
+        env:
+          DATABASE_URL: ''
+          DISCORD_TOKEN: ''
+          GROQ_TOKEN: ''
+          OPENR_TOKEN: ''
+        run: |
+          python - <<'PY'
+          import psinkamain as app
+          assert len(app.bot.slash_commands) == 19, len(app.bot.slash_commands)
+          assert app.db_manager.SessionLocal is None
+          print('19 slash commands and dependency-free startup import retained')
+          PY
+      - name: Commit reviewed safe fixes only after all checks succeed
+        run: |
+          if test -z "$(git status --porcelain)"; then
+            echo "No changes needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- '*.py'
+          git diff --cached --check
+          git commit -m "style: apply Ruff safe autofixes without changing command behavior"
+          git push origin HEAD:refactor/modularization-ci-2026-11-19
