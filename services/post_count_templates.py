@@ -358,5 +358,5 @@ def pc_length_enabled_for_family(family: str) -> bool:
     return bool(PC_COUNT_LENGTH_FOR_ALL_TEMPLATES or family == PC_GM)
 
 
-def pc_any_length_enabled(families: Iterable[str]) -> bool:
+def pc_any_length_enabled(families: Iterable[str] | None) -> bool:
     return bool(families) and any(pc_length_enabled_for_family(family) for family in families)

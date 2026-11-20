@@ -3807,11 +3807,12 @@ async def fetch_bot_message_from_link(message_link: str) -> disnake.Message | No
             logger.error(f"Не удалось получить канал {channel_id}: {e}", exc_info=True)
             return None
 
-    if not hasattr(channel, "fetch_message"):
+    fetch_message = getattr(channel, "fetch_message", None)
+    if fetch_message is None:
         return None
 
     try:
-        message = await channel.fetch_message(message_id)
+        message = await fetch_message(message_id)
     except Exception as e:
         logger.error(f"Не удалось получить сообщение {message_id}: {e}", exc_info=True)
         return None
@@ -3949,11 +3950,12 @@ async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
                 logger.error(f"Не удалось получить канал реакции {payload.channel_id}: {e}", exc_info=True)
                 return
 
-        if not hasattr(channel, "fetch_message"):
+        fetch_message = getattr(channel, "fetch_message", None)
+        if fetch_message is None:
             return
 
         try:
-            target_message = await channel.fetch_message(payload.message_id)
+            target_message = await fetch_message(payload.message_id)
         except Exception as e:
             logger.error(f"Не удалось получить сообщение реакции {payload.message_id}: {e}", exc_info=True)
             return
@@ -5020,6 +5022,9 @@ async def get_jail_reply_target(
     Получает автора сообщения, на которое ответил модератор.
     """
 
+    if message.guild is None:
+        return None
+
     reference = message.reference
 
     if reference is None or reference.message_id is None:
@@ -5064,7 +5069,7 @@ async def get_jail_mentioned_target(
     Получает участника из упоминания перед фразой.
     """
 
-    if not mention_text:
+    if not mention_text or message.guild is None:
         return None
 
     user_id_match = re.search(r"\d{15,25}", mention_text)
@@ -7416,14 +7421,14 @@ async def slash_count_categories(
         return
 
     try:
-        if действие == "добавить":
+        if действие == "добавить" and isinstance(категория, disnake.CategoryChannel):
             changed = await PC_STORE.add(interaction.guild.id, "categories", категория.id)
             text = (
                 f"✅ Категория {категория.mention} добавлена."
                 if changed
                 else f"ℹ️ Категория {категория.mention} уже была в списке; повтор не делает её доступнее."
             )
-        elif действие == "удалить":
+        elif действие == "удалить" and isinstance(категория, disnake.CategoryChannel):
             changed = await PC_STORE.remove(interaction.guild.id, "categories", категория.id)
             text = (
                 f"✅ Категория {категория.mention} удалена."
@@ -7499,14 +7504,14 @@ async def slash_count_roles(
         return
 
     try:
-        if действие == "добавить":
+        if действие == "добавить" and роль is not None:
             changed = await PC_STORE.add(interaction.guild.id, "roles", роль.id)
             text = (
                 f"✅ Роль {роль.mention} получила доступ."
                 if changed
                 else f"ℹ️ Роль {роль.mention} уже имела доступ."
             )
-        elif действие == "удалить":
+        elif действие == "удалить" and роль is not None:
             changed = await PC_STORE.remove(interaction.guild.id, "roles", роль.id)
             text = (
                 f"✅ У роли {роль.mention} убран доступ."
@@ -7600,6 +7605,12 @@ async def slash_count_posts(
             ephemeral=True,
         )
         return
+
+    # The missing-fields branch returned above; retain this invariant for typed code.
+    assert пользователь is not None
+    assert слово is not None
+    assert с_даты is not None
+    assert по_дату is not None
 
     try:
         period = pc_parse_period(с_даты, по_дату)
