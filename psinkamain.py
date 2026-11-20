@@ -68,6 +68,25 @@ from services.post_count_templates import (
     pc_word_pattern,
 )
 from services.spreadsheets import make_xlsx_file
+from core.logging_setup import configure_logging
+from db.session import init_db
+from handlers.utility_commands import respond_to_bark, respond_to_cube, respond_to_status
+from repositories import jail as jail_storage
+from repositories.model_success import DBManager
+from repositories.pending_tests import PendingTestManager
+from repositories.post_count_settings import PCSettingsStore
+from services.jail_time import normalize_jail_datetime
+from services.mercenary_normalize import (
+    _clean_profession_targets,
+    _resolve_existing_profession_name,
+    _rows_to_dicts,
+    _to_int,
+    _yes,
+    dedupe_preserve_order,
+    normalize_lookup_text,
+    split_multi_field,
+)
+from services.mercenary_workbook import read_mercenary_sheets
 
 try:
     from g4f.client import AsyncClient as G4FAsyncClient
@@ -116,25 +135,6 @@ def check_tokens():
 
     return tokens
 
-from core.logging_setup import configure_logging
-from db.session import init_db
-from handlers.utility_commands import respond_to_bark, respond_to_cube, respond_to_status
-from repositories import jail as jail_storage
-from repositories.model_success import DBManager
-from repositories.pending_tests import PendingTestManager
-from repositories.post_count_settings import PCSettingsStore
-from services.jail_time import normalize_jail_datetime
-from services.mercenary_normalize import (
-    _clean_profession_targets,
-    _resolve_existing_profession_name,
-    _rows_to_dicts,
-    _to_int,
-    _yes,
-    dedupe_preserve_order,
-    normalize_lookup_text,
-    split_multi_field,
-)
-from services.mercenary_workbook import read_mercenary_sheets
 
 # Initialized only after all mapped model classes have been declared.
 db_engine, SessionLocal = None, None
