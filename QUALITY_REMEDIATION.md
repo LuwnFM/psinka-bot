@@ -21,3 +21,20 @@ Categories recovered from job logs (Python 3.12): mypy no-untyped-def 143, name-
 6. Final acceptance: Ruff, Ruff format and mypy clean on entire active project; regression CI green on Python 3.10 and 3.12, followed by staging Discord and PostgreSQL validation.
 
 Bulk workflow: `.github/workflows/bulk-quality-pass.yml`. It commits to the refactor branch only after successful unit tests and writes diagnostic artifacts for the full project. This pass is not a release and does not imply the project is fully type-safe.
+
+## Consolidated refactoring progress — 21 November 2026
+
+- Restored the user-supplied AGENTS.md development requirements from the previous chat.
+- Applied all safe Ruff autofixes and whole-project formatting in one tested CI pass (commit 1f475aed).
+- Modernized SQLAlchemy declarative model typing, settings and jail repositories, auction normalization, dice rendering, and template parsing.
+- Replaced dynamic post-counting structures with TypedDict models shared by metrics and reporting.
+- Corrected missing initialization for the periodic settings flush task.
+- Imported concrete Disnake interaction types; added access validation for DM users and nullable guilds.
+- Fixed three progress-message edit paths to ask Discord for the sent message (wait=True).
+- Added explicit return types to 36 command and lifecycle functions.
+- Preserved all 19 slash-command definitions and kept the branch as a draft.
+- Full mypy improved from 283 errors to 133 in the 3db5ab2 audit; later changes require a fresh audit.
+- Full Ruff was still 95 findings at that audit; broad exception handling and complex legacy functions remain.
+- Do not merge: live Discord and PostgreSQL staging checks have not been run.
+
+GitHub Actions regression and full audit workflows remain authoritative for subsequent commits.

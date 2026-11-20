@@ -1,4 +1,5 @@
 name: Bulk safe quality pass
+# Re-run the full safe formatting pass after the typed domain migration.
 
 on:
   push:
