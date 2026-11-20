@@ -3,7 +3,8 @@
 import calendar as pc_calendar
 import re
 import unicodedata as pc_unicodedata
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterable, Iterator, Sequence
+from datetime import date, datetime, timedelta, timezone
 
 PC_MOSCOW_TZ = timezone(timedelta(hours=3), name="MSK")
 PC_COUNT_LENGTH_FOR_ALL_TEMPLATES = False
@@ -47,7 +48,7 @@ class PCDateError(ValueError):
 class PCSearchUnavailable(RuntimeError):
     """Быстрый поиск Discord недоступен; нужно повторить, делить пакет или перейти на history()."""
 
-    def __init__(self, message, status=None, code=None):
+    def __init__(self, message: str, status: int | None = None, code: int | None = None) -> None:
         super().__init__(message)
         self.status = status
         self.code = code
@@ -56,14 +57,14 @@ class PCSearchUnavailable(RuntimeError):
 class PCPeriod:
     def __init__(
         self,
-        start_local,
-        end_exclusive_local,
-        start_utc,
-        end_exclusive_utc,
-        end_was_clamped,
-        requested_end_day,
-        actual_end_day,
-    ):
+        start_local: datetime,
+        end_exclusive_local: datetime,
+        start_utc: datetime,
+        end_exclusive_utc: datetime,
+        end_was_clamped: bool,
+        requested_end_day: int,
+        actual_end_day: int,
+    ) -> None:
         self.start_local = start_local
         self.end_exclusive_local = end_exclusive_local
         self.start_utc = start_utc
@@ -73,25 +74,25 @@ class PCPeriod:
         self.actual_end_day = actual_end_day
 
     @property
-    def start_date(self):
+    def start_date(self) -> date:
         return self.start_local.date()
 
     @property
-    def end_date(self):
+    def end_date(self) -> date:
         return (self.end_exclusive_local - timedelta(microseconds=1)).date()
 
 
 class PCTemplateMatch:
     def __init__(
         self,
-        family,
-        payload_key,
-        canonical,
-        raw_variant,
-        exact_surface,
-        span_start,
-        span_end,
-    ):
+        family: str,
+        payload_key: str,
+        canonical: str,
+        raw_variant: str,
+        exact_surface: bool,
+        span_start: int,
+        span_end: int,
+    ) -> None:
         self.family = family
         self.payload_key = payload_key
         self.canonical = canonical
@@ -102,7 +103,7 @@ class PCTemplateMatch:
         self.span_end = span_end
 
 
-def pc_parse_date_parts(raw: str):
+def pc_parse_date_parts(raw: str) -> tuple[int, int, int]:
     match = PC_DATE_RE.fullmatch(raw or "")
     if not match:
         raise PCDateError("нечитаемый формат")
@@ -154,7 +155,7 @@ def pc_normalize_text(value: str) -> str:
     return text.casefold()
 
 
-def pc_word_pattern(value: str):
+def pc_word_pattern(value: str) -> re.Pattern[str]:
     normalized = pc_normalize_text(value).strip()
     if not normalized:
         raise ValueError("пустое значение")
@@ -165,7 +166,7 @@ def pc_compact(value: str) -> str:
     return "".join(ch for ch in pc_normalize_text(value) if ch.isalnum())
 
 
-def pc_template_mode(value: str):
+def pc_template_mode(value: str) -> tuple[str, ...] | None:
     return PC_MODE_ALIASES.get(pc_compact(value))
 
 
@@ -194,7 +195,7 @@ def pc_damerau(left: str, right: str) -> int:
     return matrix[-1][-1]
 
 
-def pc_alnum_positions(value: str, start: int):
+def pc_alnum_positions(value: str, start: int) -> tuple[str, list[int]]:
     chars, positions = [], []
     for index in range(start, len(value)):
         if value[index].isalnum():
@@ -203,13 +204,15 @@ def pc_alnum_positions(value: str, start: int):
     return "".join(chars), positions
 
 
-def pc_candidate_starts(segment: str):
+def pc_candidate_starts(segment: str) -> Iterator[int]:
     for index, char in enumerate(segment):
         if char.isalnum() and (index == 0 or not segment[index - 1].isalnum()):
             yield index
 
 
-def pc_best_prefix(compact: str, positions, families):
+def pc_best_prefix(
+    compact: str, positions: Sequence[int], families: Iterable[str]
+) -> tuple[str, int] | None:
     best = None
     for family in families:
         for canonical in PC_PREFIXES[family]:
@@ -235,7 +238,7 @@ def pc_best_prefix(compact: str, positions, families):
     return best[5], best[4]
 
 
-def pc_clean_payload(raw: str):
+def pc_clean_payload(raw: str) -> tuple[str, str]:
     value = pc_unicodedata.normalize("NFKC", raw or "")
     value = PC_ZERO_WIDTH_RE.sub("", value)
     value = PC_MARKDOWN_RE.sub("", value).strip(PC_OUTER_PAYLOAD)
@@ -264,7 +267,7 @@ def pc_is_exact_surface(raw_variant: str, canonical: str) -> bool:
     return value.casefold() == canonical.casefold()
 
 
-def pc_find_templates(content: str, families):
+def pc_find_templates(content: str, families: Iterable[str]) -> list[PCTemplateMatch]:
     selected = tuple(f for f in families if f in PC_ALL_FAMILIES)
     if not selected:
         return []
@@ -313,7 +316,7 @@ def pc_find_templates(content: str, families):
     return found
 
 
-def pc_template_body_length(content: str, matches) -> int:
+def pc_template_body_length(content: str, matches: Sequence[PCTemplateMatch]) -> int:
     """
     Считает длину сообщения после удаления всех найденных шаблонных меток.
     Оставшиеся пробелы, переносы, пунктуация и Discord-разметка считаются
@@ -355,5 +358,5 @@ def pc_length_enabled_for_family(family: str) -> bool:
     return bool(PC_COUNT_LENGTH_FOR_ALL_TEMPLATES or family == PC_GM)
 
 
-def pc_any_length_enabled(families) -> bool:
+def pc_any_length_enabled(families: Iterable[str]) -> bool:
     return bool(families) and any(pc_length_enabled_for_family(family) for family in families)
