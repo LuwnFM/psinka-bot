@@ -128,6 +128,51 @@ class DBManager:
                 logger.exception("Ошибка экспорта статистики в CSV")
                 return None
 
+    def import_pending_records(self, records: list[tuple[str, str, int]]) -> bool:
+        """Commit the entire temporary model log in one transaction.
+
+        The owner command must not delete its CSV unless every observation
+        reaches the database. Duplicate model names are expected; success
+        counts and integer average latencies follow the original algorithm.
+        """
+        if self.SessionLocal is None:
+            return False
+        with self.SessionLocal() as session:
+            try:
+                for provider, model, latency_ms in records:
+                    record = session.query(ModelSuccessLog).filter_by(
+                        provider=provider, model_name=model
+                    ).first()
+                    if record is None:
+                        session.add(
+                            ModelSuccessLog(
+                                provider=provider,
+                                model_name=model,
+                                success_count=1,
+                                last_success_at=datetime.now(timezone.utc),
+                                avg_latency_ms=latency_ms,
+                            )
+                        )
+                    else:
+                        record.success_count += 1
+                        record.avg_latency_ms = int(
+                            (record.avg_latency_ms * (record.success_count - 1) + latency_ms)
+                            / record.success_count
+                        )
+                        record.last_success_at = datetime.now(timezone.utc)
+
+                    # The production factory sets autoflush=False; flush is needed
+                    # so the next duplicate provider/model finds the new row.
+                    session.flush()
+
+                session.commit()
+                self._cleanup_old_records(session)
+                return True
+            except (SQLAlchemyError, TypeError, ValueError):
+                session.rollback()
+                logger.exception("Ошибка переноса временных результатов моделей в БД")
+                return False
+
     def clear_all(self) -> int | None:
         """Delete all success records and report the deleted count.
 
