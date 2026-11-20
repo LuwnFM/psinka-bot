@@ -1,6 +1,6 @@
 name: Bulk safe quality pass
-# Final safe formatting sweep for the current typed refactor.
-# Re-run the full safe formatting pass after the typed domain migration.
+# Release-candidate formatting sweep after exception-safety remediation.
+# Keep all C901 complexity and S311 game-randomness diagnostics advisory.
 
 on:
   push:
