@@ -14,6 +14,23 @@ from services.dice_format import _dice_paginate, _dice_result_block
 logger = logging.getLogger(__name__)
 
 
+async def _send_ephemeral_error(
+    interaction: disnake.CommandInteraction, message: str
+) -> None:
+    """Send errors via the correct Disnake response path.
+
+    A slash interaction has exactly one initial response. After a defer or
+    initial send, subsequent messages must use the follow-up webhook.
+    """
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except disnake.HTTPException:
+        logger.exception("Не удалось сообщить об ошибке в Discord")
+
+
 async def respond_to_cube(
     interaction: disnake.CommandInteraction,
     formula: str | None,
@@ -112,8 +129,8 @@ async def respond_to_bark(interaction: disnake.CommandInteraction, bot: disnake.
 
         await interaction.response.send_message(embed=embed)
     except Exception as e:
-        logger.error(f"Error in /bark: {e}", exc_info=True)
-        await interaction.response.send_message(f"❌ Гав! Ошибка: {str(e)[:100]}", ephemeral=True)
+        logger.error("Error in /bark: %s", e, exc_info=True)
+        await _send_ephemeral_error(interaction, f"❌ Гав! Ошибка: {str(e)[:100]}")
 
 
 async def respond_to_status(
@@ -123,7 +140,8 @@ async def respond_to_status(
 ) -> None:
     """Render the original AI model health summary without blocking the event loop."""
     try:
-        if not await check_access(interaction): return
+        if not await check_access(interaction):
+            return
         await interaction.response.defer()
 
         top = await asyncio.to_thread(db_manager.get_top_models, 10)
@@ -154,5 +172,5 @@ async def respond_to_status(
         await interaction.edit_original_response(embed=embed)
 
     except Exception as e:
-        logger.error(f"Error in /status: {e}", exc_info=True)
-        await interaction.followup.send(f"❌ Гав! Ошибка: {str(e)[:100]}", ephemeral=True)
+        logger.error("Error in /status: %s", e, exc_info=True)
+        await _send_ephemeral_error(interaction, f"❌ Гав! Ошибка: {str(e)[:100]}")
