@@ -2920,10 +2920,10 @@ async def slash_commit_tests(interaction: disnake.CommandInteraction):
             )
             return
 
-        cleared = await asyncio.to_thread(pending_test_manager.clear)
+        cleared = await asyncio.to_thread(pending_test_manager.acknowledge_records, records)
         if not cleared:
             await interaction.followup.send(
-                "⚠️ Записи сохранены в БД, но временный CSV не удалось очистить. "
+                "⚠️ Записи сохранены в БД, но временный CSV не удалось обновить. "
                 "Не повторяйте перенос до проверки файла, чтобы избежать дублей.",
                 ephemeral=True,
             )
