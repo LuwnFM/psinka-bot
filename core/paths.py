@@ -36,11 +36,17 @@ def _migrate_legacy_file(source_name: str, destination: Path) -> None:
         pass
 
 
-_ensure_dirs()
-for _legacy_name, _destination in (
-    ("bot_errors.log", BOT_ERROR_LOG),
-    ("analysis_debug.log", ANALYSIS_LOG_FILE),
-    ("test_pending.csv", PENDING_TEST_LOG),
-    ("post_count_settings.json", POST_COUNT_SETTINGS_FILE),
-):
-    _migrate_legacy_file(_legacy_name, _destination)
+def initialize_paths() -> None:
+    """Prepare runtime directories and migrate existing state only on startup.
+
+    Importing configuration must remain read-only. The original migration
+    order is retained to avoid losing pre-refactor JSON/CSV/log files.
+    """
+    _ensure_dirs()
+    for legacy_name, destination in (
+        ("bot_errors.log", BOT_ERROR_LOG),
+        ("analysis_debug.log", ANALYSIS_LOG_FILE),
+        ("test_pending.csv", PENDING_TEST_LOG),
+        ("post_count_settings.json", POST_COUNT_SETTINGS_FILE),
+    ):
+        _migrate_legacy_file(legacy_name, destination)
