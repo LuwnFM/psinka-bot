@@ -46,3 +46,18 @@ Current live audit workflow: `.github/workflows/full-audit.yml`; original regres
 - Startup smoke now loads the real bundled mercenary workbook and validates search behavior without production credentials.
 
 No full CI green status is claimed: only the regression workflow and selected-module quality gate currently pass. The intentionally strict full-project quality checks still fail.
+
+
+## Ruff safe-fix pass — 20 November 2026
+
+- Full-audit baseline for the pass: **527 Ruff findings, 394 marked safe-fixable**, plus **8 unsafe suggestions**.
+- Executed pinned **Ruff 0.17.6** with **`ruff check --fix .`**, and **never** passed `--unsafe-fixes`.
+- Ruff reported **422 applied edits** after cascading corrections, affecting 10 Python files. The exact code commit is [ffda147](https://github.com/LuwnFM/psinka-bot/commit/ffda147).
+- Structural compatibility tests were strengthened to normalize only equivalent type-annotation spellings and dictionary-key iteration. Function bodies remain compared, and separate tests prove that changed argument defaults or logic still fail these checks.
+- The one-time write-enabled workflow was deleted after successful use, avoiding unexpected repeated automatic commits.
+- New full audit: **112 remaining Ruff findings**, **283 mypy errors in 13 files**, and **28 files requiring Ruff formatting**.
+- All **83 pytest tests pass on Python 3.10 and 3.12**, and the credential-free runtime import validates all 19 slash commands.
+- Full audit: https://github.com/LuwnFM/psinka-bot/actions/runs/44816966055
+- Passing regression and selected-module quality checks: https://github.com/LuwnFM/psinka-bot/actions/runs/44816966000
+
+These automatic edits do not prove all live Discord/provider/PostgreSQL paths work. The remaining warnings require a separate manual review, especially any changes that could alter game behavior. The PR must stay a draft.
