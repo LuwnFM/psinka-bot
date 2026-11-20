@@ -7,8 +7,9 @@ import random
 import re
 import time
 import traceback
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, TypeVar
 
 import aiohttp
 import disnake
@@ -61,6 +62,7 @@ from services.mercenary_normalize import (
     split_multi_field,
 )
 from services.mercenary_workbook import read_mercenary_sheets
+from services.post_count_types import ChannelCounters, CountResult, FamilyStats, TemplateMessage
 from services.post_count_metrics import (
     PC_LONG_POST_MIN_CHARS,
     pc_apply_content,
@@ -89,6 +91,8 @@ from services.post_count_templates import (
     pc_word_pattern,
 )
 from services.spreadsheets import make_xlsx_file
+
+_T = TypeVar("_T")
 
 try:
     from g4f.client import AsyncClient as G4FAsyncClient
@@ -966,7 +970,7 @@ dice_engine = DiceParser()
 # ============================================================================
 
 
-def _queue_add(queue, seen, provider, model):
+def _queue_add( queue: list[tuple[str, str]], seen: set[tuple[str, str]], provider: str | None, model: str | None) -> None:
     provider = normalize_provider_name(provider)
     model = str(model or "").strip()
     if not provider or is_model_excluded(provider, model):
@@ -977,12 +981,12 @@ def _queue_add(queue, seen, provider, model):
         seen.add(key)
 
 
-def _queue_extend(queue, seen, combinations):
+def _queue_extend( queue: list[tuple[str, str]], seen: set[tuple[str, str]], combinations: Iterable[tuple[str, str]]) -> None:
     for provider, model in combinations:
         _queue_add(queue, seen, provider, model)
 
 
-def _pending_route_keys():
+def _pending_route_keys() -> set[tuple[str, str]]:
     return {
         (normalize_provider_name(provider), str(model or "").strip())
         for provider, model in pending_test_manager.get_pending_models()
@@ -991,8 +995,8 @@ def _pending_route_keys():
 
 async def _build_model_queue(*, db_first: bool) -> list[tuple[str, str]]:
     """Общий конструктор очереди для /скажи и /анализ."""
-    queue = []
-    seen = set()
+    queue: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     pending = await asyncio.to_thread(pending_test_manager.get_pending_models)
     db_models = await asyncio.to_thread(db_manager.get_all_models) if SessionLocal else []
 
@@ -1014,12 +1018,12 @@ async def _build_model_queue(*, db_first: bool) -> list[tuple[str, str]]:
     return queue
 
 
-async def get_priority_queue():
+async def get_priority_queue() -> list[tuple[str, str]]:
     """Очередь /скажи: временные успехи → актуальные API → БД → G4F."""
     return await _build_model_queue(db_first=False)
 
 
-async def get_analysis_priority_queue():
+async def get_analysis_priority_queue() -> list[tuple[str, str]]:
     """Очередь /анализ: БД → временные успехи → актуальные API → G4F."""
     return await _build_model_queue(db_first=True)
 
@@ -1381,7 +1385,7 @@ class TestModeView(disnake.ui.View):
         log_analysis(f"TEST G4F All: {len(successful)}/{len(all_results)} success, {elapsed:.1f}s", "INFO")
 
     @disnake.ui.button(label="🦅 Тест ВСЕ Groq", style=disnake.ButtonStyle.blurple, custom_id="test_all_groq")
-    async def all_groq_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
+    async def all_groq_button(self, button: disnake.ui.Button, interaction: MessageInteraction) -> None:
         await interaction.response.defer()
         log_analysis("TEST: All Groq models started", "INFO")
         start = time.time()
@@ -1474,7 +1478,7 @@ class TestModeView(disnake.ui.View):
     @disnake.ui.button(
         label="🌐 Тест ВСЕ OpenRouter", style=disnake.ButtonStyle.gray, custom_id="test_all_openrouter"
     )
-    async def all_openrouter_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
+    async def all_openrouter_button(self, button: disnake.ui.Button, interaction: MessageInteraction) -> None:
         await interaction.response.defer()
         log_analysis("TEST: All OpenRouter models started", "INFO")
         start = time.time()
@@ -1563,7 +1567,7 @@ class TestModeView(disnake.ui.View):
         )
 
     @disnake.ui.button(label="🔍 Полное сканирование", style=disnake.ButtonStyle.red, custom_id="test_full")
-    async def all_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
+    async def all_button(self, button: disnake.ui.Button, interaction: MessageInteraction) -> None:
         await interaction.response.defer()
         await interaction.followup.send(
             "🔄 ПсИИнка начинает полное сканирование... *нюхает* (это займёт время) 🐕", ephemeral=True
@@ -1647,7 +1651,7 @@ async def slash_test(interaction: ApplicationCommandInteraction) -> None:
 # ============================================================================
 
 
-async def run_mass_test(channel):
+async def run_mass_test( channel: disnake.abc.Messageable) -> None:
     progress_embed = disnake.Embed(
         title="🔄 ПсИИнка сканирует...",
         description="*нюхает* G4F (Deep) + Groq + OpenRouter... 🐕",
@@ -1666,7 +1670,7 @@ async def run_mass_test(channel):
     total = len(combinations)
     semaphore = asyncio.Semaphore(5)
 
-    async def test_combo(provider, model):
+    async def test_combo( provider: str, model: str) -> dict[str, Any]:
         async with semaphore:
             start = time.time()
             try:
@@ -1797,7 +1801,7 @@ def extract_channel_reference(raw: str | None) -> tuple[int | None, int | None]:
     return None, None
 
 
-async def find_thread_in_archives(guild, target_id: int):
+async def find_thread_in_archives( guild: disnake.Guild | None, target_id: int) -> disnake.Thread | None:
     """Fallback для старых/архивных тредов, если cache/fetch_channel их не нашли."""
     if not guild:
         return None
@@ -1826,8 +1830,8 @@ async def find_thread_in_archives(guild, target_id: int):
 
 
 async def resolve_analysis_target(
-    interaction: ApplicationCommandInteraction, selected_channel=None, ссылка: str | None = None
-):
+    interaction: ApplicationCommandInteraction, selected_channel: disnake.abc.GuildChannel | disnake.Thread | None=None, ссылка: str | None = None
+) -> tuple[Any, str | None]:
     """
     Возвращает канал/форум/тред для анализа.
     Приоритет: ссылка/ID/упоминание → выбранный канал → текущий канал.
@@ -1889,13 +1893,13 @@ async def resolve_analysis_target(
     return target, None
 
 
-def analysis_target_name(channel) -> str:
+def analysis_target_name( channel: Any) -> str:
     if hasattr(channel, "parent") and getattr(channel, "parent", None):
         return f"{channel.parent.name} / {channel.name}"
     return getattr(channel, "name", str(getattr(channel, "id", "unknown")))
 
 
-async def collect_all_messages_debug(channel, days_limit: int, max_per_source: int = 400):
+async def collect_all_messages_debug( channel: Any, days_limit: int, max_per_source: int = 400) -> tuple[list[disnake.Message], list[str]]:
     after_date = datetime.now(timezone.utc) - timedelta(days=days_limit)
     all_messages = []
     target_label = analysis_target_name(channel)
@@ -2387,8 +2391,7 @@ async def fetch_raw_discord_messages(
     return all_messages, logs
 
 
-async def fetch_history_fallback(
-    target_channel,
+async def fetch_history_fallback( target_channel: Any,
     guild_id: int,
     limit: int,
 ) -> tuple[list[dict[str, Any]], list[list[Any]]]:
@@ -3181,7 +3184,7 @@ def find_channels_by_query(query: str, limit: int = 25) -> list[disnake.TextChan
     return [item[3] for item in scored[:limit]]
 
 
-async def owner_channel_autocomplete(interaction: ApplicationCommandInteraction, user_input: str):
+async def owner_channel_autocomplete(interaction: ApplicationCommandInteraction, user_input: str) -> dict[str, str] | list[str]:
     """
     Всплывающий список каналов для /напиши.
     Показывает каналы всех серверов, где бот может писать.
@@ -4104,7 +4107,7 @@ REAL_ESTATE_QUALITIES = [
 REAL_ESTATE_QUALITY_WEIGHTS = [2, 5, 10, 14, 34, 20, 10, 4, 1]
 
 
-def has_real_estate_access(member):
+def has_real_estate_access( member: disnake.Member) -> bool:
     member_roles = getattr(member, "roles", [])
     member_role_names = {role.name.strip().lower() for role in member_roles}
     allowed_role_names = {role_name.strip().lower() for role_name in REAL_ESTATE_ALLOWED_ROLES}
@@ -4112,7 +4115,7 @@ def has_real_estate_access(member):
     return bool(member_role_names & allowed_role_names)
 
 
-def roll_real_estate():
+def roll_real_estate() -> tuple[str, str]:
     location_variants = []
 
     for continent, countries in REAL_ESTATE_WORLD.items():
@@ -4148,7 +4151,7 @@ def roll_real_estate():
     return f"находящаяся в городе **{city}**, государство **{country}**, континент **{continent}**", quality
 
 
-def clean_real_estate_text(text):
+def clean_real_estate_text( text: str) -> str:
     text = text.strip()
 
     quote_pairs = [
@@ -4170,7 +4173,7 @@ REAL_ESTATE_TRIGGER = "недвижкаролл"
 
 
 @bot.listen("on_message")
-async def real_estate_message_listener(message) -> None:
+async def real_estate_message_listener( message: disnake.Message) -> None:
     if message.author.bot:
         return
 
@@ -4247,7 +4250,7 @@ QUALITY_ROLL_WEIGHTS = [
 ]
 
 
-def has_quality_roll_access(member):
+def has_quality_roll_access( member: disnake.Member) -> bool:
     member_roles = getattr(member, "roles", [])
     member_role_names = {role.name.strip().lower() for role in member_roles}
     allowed_role_names = {role_name.strip().lower() for role_name in QUALITY_ROLL_ALLOWED_ROLES}
@@ -4255,12 +4258,12 @@ def has_quality_roll_access(member):
     return bool(member_role_names & allowed_role_names)
 
 
-def roll_item_quality():
+def roll_item_quality() -> str:
     return random.choices(QUALITY_ROLL_QUALITIES, weights=QUALITY_ROLL_WEIGHTS, k=1)[0]
 
 
 @bot.listen("on_message")
-async def quality_roll_message_listener(message) -> None:
+async def quality_roll_message_listener( message: disnake.Message) -> None:
     if message.author.bot:
         return
 
@@ -5708,7 +5711,7 @@ async def jail_manual_release_listener(
 ALLOWED_MERCENARY_ROLE_NAMES = {"Фаеркадастр", "Секретариат", "Анкетолог"}
 
 
-def user_has_mercenary_access(member) -> bool:
+def user_has_mercenary_access( member: disnake.Member | disnake.User) -> bool:
     """Доступ к /наёмник только по ИМЕНАМ ролей, без role_id."""
     roles = getattr(member, "roles", []) or []
     return any(getattr(role, "name", "") in ALLOWED_MERCENARY_ROLE_NAMES for role in roles)
@@ -5717,7 +5720,7 @@ def user_has_mercenary_access(member) -> bool:
 async def mercenary_name_autocomplete(
     interaction: ApplicationCommandInteraction,
     user_input: str,
-):
+) -> list[str]:
     """Всплывающий список Discord для параметра 'имя'."""
     # Чтобы команда не светила подсказки тем, у кого нет нужных ролей.
     if not user_has_mercenary_access(interaction.user):
@@ -5948,11 +5951,11 @@ def pc_owner(user_id: int) -> bool:
     return bool(OWNER_ID and user_id == OWNER_ID)
 
 
-def pc_admin(member) -> bool:
+def pc_admin( member: disnake.Member | disnake.User) -> bool:
     return isinstance(member, disnake.Member) and bool(member.guild_permissions.administrator)
 
 
-def pc_can_count(interaction, roles: set[int]) -> bool:
+def pc_can_count( interaction: ApplicationCommandInteraction, roles: set[int]) -> bool:
     if pc_owner(interaction.author.id) or pc_admin(interaction.author):
         return True
     return isinstance(interaction.author, disnake.Member) and any(
@@ -5960,22 +5963,23 @@ def pc_can_count(interaction, roles: set[int]) -> bool:
     )
 
 
-def pc_channel_label(channel) -> str:
+def pc_channel_label( channel: Any) -> str:
     name = getattr(channel, "name", None) or str(getattr(channel, "id", "?"))
-    if isinstance(channel, disnake.Thread) and getattr(channel, "parent", None):
-        return f"{channel.parent.name} / {name}"
+    parent = getattr(channel, "parent", None) if isinstance(channel, disnake.Thread) else None
+    if parent is not None:
+        return f"{parent.name} / {name}"
     return name
 
 
-def pc_supported_parent(channel) -> bool:
-    types = (disnake.TextChannel, disnake.ForumChannel)
+def pc_supported_parent( channel: object) -> bool:
+    types: tuple[type[Any], ...] = (disnake.TextChannel, disnake.ForumChannel)
     media_type = getattr(disnake, "MediaChannel", None)
     if media_type is not None:
         types += (media_type,)
     return isinstance(channel, types)
 
 
-def pc_archive_in_period(thread, period: PCPeriod) -> bool:
+def pc_archive_in_period( thread: disnake.Thread, period: PCPeriod) -> bool:
     value = getattr(thread, "archive_timestamp", None)
     if not isinstance(value, datetime):
         return True
@@ -5984,13 +5988,8 @@ def pc_archive_in_period(thread, period: PCPeriod) -> bool:
     return value.astimezone(timezone.utc) >= period.start_utc
 
 
-async def pc_collect_archive_stream(
-    parent,
-    iterator,
-    source_name,
-    period,
-    semaphore,
-):
+async def pc_collect_archive_stream( parent: Any, iterator: AsyncIterator[disnake.Thread], source_name: str, period: PCPeriod, semaphore: asyncio.Semaphore,
+) -> tuple[list[disnake.Thread], list[str]]:
     found = []
     errors = []
     try:
@@ -6020,7 +6019,7 @@ async def pc_collect_targets(
     guild: disnake.Guild,
     category_ids: set[int],
     period: PCPeriod,
-):
+) -> tuple[list[Any], list[str]]:
     errors = []
     channels = list(getattr(guild, "channels", ()) or ())
     if not channels:
@@ -6111,7 +6110,7 @@ async def pc_collect_targets(
     return list(targets.values()), errors
 
 
-async def pc_scan_target(target, user_id, word_pattern, families, period, semaphore):
+async def pc_scan_target( target: Any, user_id: int, word_pattern: re.Pattern[str] | None, families: Sequence[str] | None, period: PCPeriod, semaphore: asyncio.Semaphore) -> CountResult:
     """
     Резервный медленный путь через history().
     В отличие от старой версии, scanned считает только сообщения нужного автора,
@@ -6154,7 +6153,7 @@ async def pc_scan_target(target, user_id, word_pattern, families, period, semaph
     return result
 
 
-def pc_datetime_to_snowflake(value):
+def pc_datetime_to_snowflake( value: datetime) -> int:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     value = value.astimezone(timezone.utc)
@@ -6162,7 +6161,7 @@ def pc_datetime_to_snowflake(value):
     return max(0, milliseconds - PC_DISCORD_EPOCH_MS) << 22
 
 
-def pc_api_timestamp(raw):
+def pc_api_timestamp( raw: object) -> datetime | None:
     if not raw:
         return None
     try:
@@ -6171,7 +6170,7 @@ def pc_api_timestamp(raw):
         return None
 
 
-def pc_chunks(values, size):
+def pc_chunks( values: list[_T], size: int) -> Iterator[list[_T]]:
     for index in range(0, len(values), size):
         yield values[index : index + size]
 
@@ -6189,7 +6188,7 @@ def pc_search_headers() -> dict[str, str]:
     }
 
 
-async def pc_search_request(session, guild_id, params, search_info):
+async def pc_search_request( session: aiohttp.ClientSession, guild_id: int, params: list[tuple[str, str]], search_info: dict[str, Any]) -> dict[str, Any]:
     """
     Один HTTP-запрос к Search Guild Messages.
 
@@ -6309,7 +6308,7 @@ async def pc_search_request(session, guild_id, params, search_info):
             raise PCSearchUnavailable(f"сетевая ошибка Discord Search: {type(exc).__name__}: {exc}") from exc
 
 
-def pc_flatten_search_messages(data):
+def pc_flatten_search_messages( data: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Discord возвращает nested array: [[message], [message], ...].
     На случай изменения/старого формата поддерживаем и плоский массив.
@@ -6329,17 +6328,8 @@ def pc_flatten_search_messages(data):
     return flattened
 
 
-async def pc_search_batch(
-    session,
-    guild_id,
-    batch_targets,
-    user_id,
-    word_pattern,
-    families,
-    period,
-    search_info,
-    on_page=None,
-):
+async def pc_search_batch( session: aiohttp.ClientSession, guild_id: int, batch_targets: Sequence[Any], user_id: int, word_pattern: re.Pattern[str] | None, families: Sequence[str] | None, period: PCPeriod, search_info: dict[str, Any], on_page: Any=None,
+) -> list[CountResult]:
     """Ищет сообщения автора в одном пакете каналов и полностью пагинирует его."""
     target_map = {int(target.id): target for target in batch_targets}
     local_results = {
@@ -6437,17 +6427,8 @@ async def pc_search_batch(
     return list(local_results.values())
 
 
-async def pc_search_batch_adaptive(
-    session,
-    guild_id,
-    batch_targets,
-    user_id,
-    word_pattern,
-    families,
-    period,
-    search_info,
-    on_page=None,
-):
+async def pc_search_batch_adaptive( session: aiohttp.ClientSession, guild_id: int, batch_targets: Sequence[Any], user_id: int, word_pattern: re.Pattern[str] | None, families: Sequence[str] | None, period: PCPeriod, search_info: dict[str, Any], on_page: Any=None,
+) -> tuple[Any, Any]:
     """
     Пробует пакет целиком. Если URL/запрос слишком велик, делит пакет
     пополам и повторяет. В history() уйдёт только минимальный неудачный кусок.
@@ -6515,15 +6496,8 @@ async def pc_search_batch_adaptive(
         )
 
 
-async def pc_search_or_fallback(
-    guild,
-    targets,
-    user_id,
-    word_pattern,
-    families,
-    period,
-    progress_callback=None,
-):
+async def pc_search_or_fallback( guild: disnake.Guild, targets: Sequence[Any], user_id: int, word_pattern: re.Pattern[str] | None, families: Sequence[str] | None, period: PCPeriod, progress_callback: Any=None,
+) -> tuple[list[CountResult], dict[str, Any]]:
     """
     Гибридный механизм:
     1. Каналы делятся на безопасные пакеты (по умолчанию 100, не 500).
@@ -6694,14 +6668,9 @@ async def pc_search_or_fallback(
     return completed_results, search_info
 
 
-async def pc_send_reply_chain(
-    interaction,
-    chunks,
-    previous_message=None,
-    *,
-    start_part=2,
-    total_parts=None,
-):
+async def pc_send_reply_chain( interaction: ApplicationCommandInteraction, chunks: Sequence[str], previous_message: disnake.Message | None=None,
+    *, start_part: int=2, total_parts: int | None=None,
+) -> disnake.Message | None:
     """
     Отправляет только продолжения отчёта цепочкой embed-сообщений.
     Первая часть уже находится в исходном сообщении команды.
@@ -6735,7 +6704,7 @@ async def pc_send_reply_chain(
     return previous_message
 
 
-def pc_record_identity(record):
+def pc_record_identity( record: Mapping[str, Any]) -> str:
     return (
         record.get("id")
         or record.get("jump_url")
@@ -6743,14 +6712,9 @@ def pc_record_identity(record):
     )
 
 
-def pc_records_for_surface(
-    records,
-    family,
-    payload_key,
-    *,
-    exact=False,
-    variant=None,
-):
+def pc_records_for_surface( records: Sequence[TemplateMessage], family: str, payload_key: str,
+    *, exact: bool=False, variant: str | None=None,
+) -> list[TemplateMessage]:
     selected = {}
 
     for record in records:
@@ -6774,14 +6738,14 @@ def pc_records_for_surface(
     return list(selected.values())
 
 
-def pc_record_datetime_msk(record):
+def pc_record_datetime_msk( record: Mapping[str, Any]) -> str:
     value = pc_api_timestamp(record.get("created_at"))
     if value is None:
         return record.get("created_at") or "неизвестно"
     return value.astimezone(PC_MOSCOW_TZ).strftime("%d.%m.%Y %H:%M:%S МСК")
 
 
-def pc_record_sort_key(record):
+def pc_record_sort_key( record: Mapping[str, Any]) -> tuple[str, int, str, str]:
     body_length = record.get("body_length")
     if not isinstance(body_length, int):
         body_length = -1
@@ -6793,7 +6757,7 @@ def pc_record_sort_key(record):
     )
 
 
-def pc_append_txt_channels(lines, channels, indent="  "):
+def pc_append_txt_channels( lines: list[str], channels: ChannelCounters, indent: str="  ") -> None:
     for item in pc_sorted_channels(channels):
         channel_id = item.get("id") or "?"
         lines.append(
@@ -6805,7 +6769,7 @@ def pc_append_txt_channels(lines, channels, indent="  "):
         lines.append(f"{indent}• Совпадений нет.")
 
 
-def pc_append_txt_message(lines, record, number, family):
+def pc_append_txt_message( lines: list[str], record: TemplateMessage, number: int, family: str) -> None:
     length_enabled = pc_length_enabled_for_family(family)
     body_length = record.get("body_length")
 
@@ -6853,7 +6817,7 @@ def pc_append_txt_message(lines, record, number, family):
     )
 
 
-def pc_append_txt_surface_messages(lines, records, family):
+def pc_append_txt_surface_messages( lines: list[str], records: Sequence[TemplateMessage], family: str) -> None:
     records = sorted(records, key=pc_record_sort_key)
 
     if pc_length_enabled_for_family(family):
@@ -7266,9 +7230,8 @@ def pc_txt_file(text: str, filename: str) -> disnake.File:
 
 def pc_split_txt_parts(
     text: str,
-    filename: str,
-    max_bytes=PC_TXT_PART_MAX_BYTES,
-):
+    filename: str, max_bytes: int=PC_TXT_PART_MAX_BYTES,
+) -> list[tuple[str, str]]:
     encoded = text.encode("utf-8-sig")
     if len(encoded) <= max_bytes:
         return [(filename, text)]
@@ -8094,7 +8057,7 @@ async def on_ready() -> None:
 
 
 @bot.event
-async def on_command_error(ctx, error) -> None:
+async def on_command_error( ctx: commands.Context[Any], error: commands.CommandError) -> None:
     if isinstance(error, commands.CommandNotFound):
         return
 
