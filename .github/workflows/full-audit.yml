@@ -94,3 +94,28 @@ jobs:
           assert Path('pending_test_log.csv').exists() == before
           print('Bot imported, 19 slash commands registered; no live credentials needed')
           PY
+      - name: Fail visibly when Discord token is missing
+        env:
+          DATABASE_URL: ''
+          DISCORD_TOKEN: ''
+          GROQ_TOKEN: ''
+          OPENR_TOKEN: ''
+        run: |
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+
+          result = subprocess.run(
+              [sys.executable, 'psinkamain.py'],
+              env={**os.environ, 'DISCORD_TOKEN': ''},
+              text=True,
+              capture_output=True,
+              timeout=35,
+              check=False,
+          )
+          combined_output = result.stdout + result.stderr
+          assert result.returncode == 1, f'Expected failed startup, got {result.returncode}'
+          assert 'DISCORD_TOKEN' in combined_output, 'Missing-token failure was not reported'
+          print('Missing-token startup error was visible and returned exit status 1')
+          PY
