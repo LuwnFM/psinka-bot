@@ -627,7 +627,8 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
             else:
                 # Совместимость со старой установкой: requirements уже фиксирует
                 # Синхронный Client оставлен намеренно как резервный путь совместимости.
-                def sync_call():
+                def sync_call(provider_class=provider_class, kwargs=kwargs):
+                    # Freeze the provider/request for worker threads that may outlive a timeout.
                     from g4f.client import Client as G4FClient
                     client = G4FClient(provider=provider_class) if provider_class else G4FClient()
                     return client.chat.completions.create(**kwargs)
@@ -716,7 +717,8 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
     for model in models:
         for attempt in range(2):
             try:
-                def sync_call():
+                def sync_call(model=model):
+                    # Late-running workers must keep this retry's original model ID.
                     return client.chat.completions.create(
                         model=model,
                         messages=messages,
@@ -828,7 +830,7 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
 
     for model in models:
         try:
-            def sync_call():
+            def sync_call(model=model):
                 return client.chat.completions.create(
                     model=model,
                     messages=messages,
@@ -1965,7 +1967,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             used_provider = "Unknown"
             used_temp_file = False
 
-            async def try_request(prov, mod, use_proxy=False):
+            async def try_request(prov, mod, use_proxy=False, user_prompt=user_prompt):
                 proxy_str = get_random_proxy(True) if use_proxy else None
                 return await route_model_request(
                     prov, mod, user_prompt, timeout=50.0,
