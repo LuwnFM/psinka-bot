@@ -69,6 +69,18 @@ def _canonical_ast(original: ast.AST) -> str:
                 descendant.returns = normalizer.visit(descendant.returns)
         elif isinstance(descendant, ast.AnnAssign):
             descendant.annotation = normalizer.visit(descendant.annotation)
+        elif isinstance(descendant, (ast.For, ast.AsyncFor, ast.comprehension)):
+            # Ruff SIM118: iterating a dictionary equals iterating its .keys()
+            # method. Normalize only iteration targets, never arbitrary calls.
+            iterator = descendant.iter
+            if (
+                isinstance(iterator, ast.Call)
+                and isinstance(iterator.func, ast.Attribute)
+                and iterator.func.attr == "keys"
+                and not iterator.args
+                and not iterator.keywords
+            ):
+                descendant.iter = iterator.func.value
     return ast.dump(node, include_attributes=False)
 
 
