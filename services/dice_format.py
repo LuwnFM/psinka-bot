@@ -67,9 +67,9 @@ def _dice_result_block(result: DiceResult) -> str:
         lines.extend(_dice_term_lines(term, is_first=(term_index == 0)))
 
     if result.global_modifier:
-        op, value, before = result.global_modifier
+        op, modifier_value, before = result.global_modifier
         lines.append(
-            f"🧮 итог до `{op}`: {_dice_number(before)} {op} {_dice_number(value)} = **{_dice_number(result.total)}**"
+            f"🧮 итог до `{op}`: {_dice_number(before)} {op} {_dice_number(modifier_value)} = **{_dice_number(result.total)}**"
         )
 
     for warning in result.warnings:

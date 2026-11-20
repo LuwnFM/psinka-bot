@@ -2,12 +2,14 @@
 
 from datetime import datetime
 
+from sqlalchemy.orm import Session, sessionmaker
+
 from db.models import JailSentence
 from services.jail_time import normalize_jail_datetime
 
 
 def save_jail_sentence_db(
-    session_factory,
+    session_factory: sessionmaker[Session] | None,
     jail_role_id: int,
     guild_id: int,
     user_id: int,
@@ -61,7 +63,7 @@ def save_jail_sentence_db(
 
 
 def delete_jail_sentence_db(
-    session_factory,
+    session_factory: sessionmaker[Session] | None,
     guild_id: int,
     user_id: int,
 ) -> None:
@@ -92,7 +94,7 @@ def delete_jail_sentence_db(
         session.close()
 
 
-def load_jail_sentences_db(session_factory) -> list[tuple[int, int, datetime]]:
+def load_jail_sentences_db(session_factory: sessionmaker[Session] | None) -> list[tuple[int, int, datetime]]:
     """Загружает действующие сроки после перезапуска бота."""
 
     if session_factory is None:

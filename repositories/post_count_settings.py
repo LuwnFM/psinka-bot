@@ -6,12 +6,17 @@ import logging
 import os
 from pathlib import Path
 
-from services.post_count_settings import pc_empty_settings, pc_normalize_settings
+from services.post_count_settings import (
+    GuildPostCountSettings,
+    PostCountSettings,
+    pc_empty_settings,
+    pc_normalize_settings,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def load_settings(path: str | Path) -> dict:
+def load_settings(path: str | Path) -> PostCountSettings:
     """Return validated settings, falling back to an empty document on I/O errors."""
     file = Path(path)
     if not file.exists():
@@ -24,7 +29,7 @@ def load_settings(path: str | Path) -> dict:
         return pc_empty_settings()
 
 
-def write_settings(path: str | Path, data: dict) -> None:
+def write_settings(path: str | Path, data: PostCountSettings) -> None:
     """Atomically replace settings file after flushing and syncing the temp file."""
     filename = Path(path)
     filename.parent.mkdir(parents=True, exist_ok=True)
@@ -51,7 +56,7 @@ class PCSettingsStore:
         self.data = load_settings(self.filename)
         self.dirty = False
 
-    def _guild_data(self, guild_id: int) -> dict:
+    def _guild_data(self, guild_id: int) -> GuildPostCountSettings:
         guilds = self.data.setdefault("guilds", {})
         return guilds.setdefault(str(guild_id), {"categories": [], "roles": []})
 

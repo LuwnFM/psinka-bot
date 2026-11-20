@@ -5,7 +5,7 @@ import re
 
 
 class DiceTermResult:
-    def __init__(self, source: str, sign: int = 1):
+    def __init__(self, source: str, sign: int = 1) -> None:
         self.source = source.strip()
         self.sign = 1 if sign >= 0 else -1
         self.kind = "dice"
@@ -29,7 +29,7 @@ class DiceTermResult:
 
 
 class DiceResult:
-    def __init__(self):
+    def __init__(self) -> None:
         self.total = 0.0
         self.dice_rolls: list[int] = []
         self.all_rolls: list[int] = []
@@ -63,7 +63,7 @@ class DiceParser:
     MAX_INPUT_LENGTH = 2000
     MAX_COMMENT_LENGTH = 500
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.aliases = {
             "dndstats": "6 4d6 k3",
             "attack": "1d20",

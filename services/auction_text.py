@@ -10,27 +10,27 @@ def auction_money_to_int(raw: str | None) -> int | None:
 
 
 def clean_auction_text(text: Any) -> str:
-    text = "" if text is None else str(text)
+    cleaned: str = "" if text is None else str(text)
 
     # Убираем невидимые символы, которые часто ломают regex.
-    text = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]", "", text)
+    cleaned = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]", "", cleaned)
 
-    text = text.replace("\u00a0", " ")
-    text = text.replace("Ｎ", "N")
-    text = text.replace("ｏ", "o")
-    text = text.replace("О", "О")
+    cleaned = cleaned.replace("\u00a0", " ")
+    cleaned = cleaned.replace("Ｎ", "N")
+    cleaned = cleaned.replace("ｏ", "o")
+    cleaned = cleaned.replace("О", "О")
 
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
 
-    return text.strip()
+    return cleaned.strip()
 
 
 def norm_auction_text(text: Any) -> str:
     return clean_auction_text(text).lower().replace("ё", "е")
 
 
-def append_unique_text(parts: list[str], value: Any):
+def append_unique_text(parts: list[str], value: Any) -> None:
     if value is None:
         return
 
@@ -43,7 +43,7 @@ def append_unique_text(parts: list[str], value: Any):
 
 
 def flatten_any_strings(value: Any) -> list[str]:
-    result = []
+    result: list[str] = []
 
     if value is None:
         return result
