@@ -2882,19 +2882,15 @@ async def slash_clear_db(interaction: disnake.CommandInteraction):
         await interaction.followup.send("❌ Гав! БД не подключена.", ephemeral=True)
         return
 
-    session = SessionLocal()
-    try:
-        count = session.query(ModelSuccessLog).count()
-        session.query(ModelSuccessLog).delete()
-        session.commit()
-        await interaction.followup.send(f"✅ ПсИИнка очистил БД! Удалено записей: `{count}` *виляет хвостом* 🐕",
-                                        ephemeral=True)
-    except Exception as e:
-        session.rollback()
-        logger.error(f"Error clearing DB: {e}")
-        await interaction.followup.send(f"❌ Ошибка очистки: {str(e)[:100]}", ephemeral=True)
-    finally:
-        session.close()
+    count = await asyncio.to_thread(db_manager.clear_all)
+    if count is None:
+        await interaction.followup.send("❌ Ошибка очистки БД. Подробности записаны в лог.", ephemeral=True)
+        return
+
+    await interaction.followup.send(
+        f"✅ ПсИИнка очистил БД! Удалено записей: `{count}` *виляет хвостом* 🐕",
+        ephemeral=True,
+    )
 
 
 @bot.slash_command(name="записать_тест", description="Перенос данных из временного лога тестов в БД")
