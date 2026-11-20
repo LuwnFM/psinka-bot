@@ -1,0 +1,57 @@
+# Ruff and mypy: comprehensive remediation ledger
+
+Branch: `refactor/modularization-ci-2026-11-19` (draft PR #6; do not merge until all gates pass).
+
+CI baseline (20 November 2026, run 44816966055):
+- Ruff: 112 remaining findings after the previous 422 safe edits.
+- mypy: 283 errors in 13 files. Largest concentration: psinkamain.py (209).
+- Formatter: 28 Python files.
+- Tests: 83/83 passed on Python 3.10 and 3.12.
+- Runtime smoke: 19 slash commands registered.
+
+Categories recovered from job logs (Python 3.12): mypy no-untyped-def 143, name-defined 33, union-attr 27, assignment 21, var-annotated 17, arg-type 15, no-any-return 6; Ruff BLE001 31, C901 24, S311 11, E402 10, B023 6, S110 5, E701 4, E722 4.
+
+## Bulk remediation procedure
+
+1. Capture entire Ruff/mypy output before modifications.
+2. Run safe Ruff fixes (never use `--unsafe-fixes`) and one full-project formatter pass.
+3. Capture complete after-output; run full pytest, compile, and slash registration checks prior to committing any autochanges.
+4. Address remaining mypy type defects by causes, especially nullable Discord entities, missing types, and incorrectly inferred collections; avoid blanket suppressions.
+5. Address behavioral Ruff diagnostics (broad exception handling, random security checks, complexity, loop captures) with tests.
+6. Final acceptance: Ruff, Ruff format and mypy clean on entire active project; regression CI green on Python 3.10 and 3.12, followed by staging Discord and PostgreSQL validation.
+
+Bulk workflow: `.github/workflows/bulk-quality-pass.yml`. It commits to the refactor branch only after successful unit tests and writes diagnostic artifacts for the full project. This pass is not a release and does not imply the project is fully type-safe.
+
+## Consolidated refactoring progress — 21 November 2026
+
+- Restored the user-supplied AGENTS.md development requirements from the previous chat.
+- Applied all safe Ruff autofixes and whole-project formatting in one tested CI pass (commit 1f475aed).
+- Modernized SQLAlchemy declarative model typing, settings and jail repositories, auction normalization, dice rendering, and template parsing.
+- Replaced dynamic post-counting structures with TypedDict models shared by metrics and reporting.
+- Corrected missing initialization for the periodic settings flush task.
+- Imported concrete Disnake interaction types; added access validation for DM users and nullable guilds.
+- Fixed three progress-message edit paths to ask Discord for the sent message (wait=True).
+- Added explicit return types to 36 command and lifecycle functions.
+- Preserved all 19 slash-command definitions and kept the branch as a draft.
+- Full mypy improved from 283 errors to 133 in the 3db5ab2 audit; later changes require a fresh audit.
+- Full Ruff was still 95 findings at that audit; broad exception handling and complex legacy functions remain.
+- Do not merge: live Discord and PostgreSQL staging checks have not been run.
+
+GitHub Actions regression and full audit workflows remain authoritative for subsequent commits.
+
+## Release-candidate gate decision — 21 November 2026
+
+At commit 98b724a the complete mypy run passed on 31 active source files, while full regressions passed on Python 3.10 and 3.12 and the credential-free startup smoke passed. Strict Ruff emitted 92 remaining diagnostics. Per owner priority, non-functional lint and complexity diagnostics are advisory, not merge blockers. The full-audit workflow now keeps compilation, mypy and full pytest strict; it still executes and shows all Ruff issues, but marks those steps advisory. This is NOT a claim that the remaining broad catch blocks have been verified safe in production. Live Discord, PostgreSQL and real AI provider integration were not exercised. Do not describe this as a fully staging-validated production release.
+
+## Final exception remediation and lint policy — 21 November 2026
+
+The owner explicitly accepted legacy function complexity (C901) and pseudorandom gameplay/proxy selection (S311). The project therefore excludes **only those two Ruff rule groups** in `pyproject.toml`, while all other Ruff checks are now blocking again. Neither complexity nor random behavior was modified.
+
+- Before this pass: 92 Ruff findings (24 C901, 11 S311, 57 other findings).
+- After coordinated exception safety, logs, compatibility restoration and tested Ruff formatting: 35 findings, **all** in accepted C901/S311 rule groups. The whitespace warning was fixed by the final automated formatter sweep.
+- Former bare catches, silent pass/continue cases and poorly bounded exceptions now use specific catches or documented local intentional boundary handling; diagnostics preserve failed thread and AI-proxy context.
+- When the final public post-count report cannot be published, an error is logged and an ephemeral message is attempted so the user is not silently abandoned.
+- The exact original behavior of the extracted mercenary integer parser is intentionally retained because the AST equivalence regression tests require it; its catch is documented locally, not silently removed.
+- The full suite had 91 passing tests on the automated formatter run, and strict mypy remained clean across 31 source files before the final policy-only commit.
+
+**Important:** Full CI verifies code and test behavior, not live Discord/PostgreSQL/provider integration. Do not claim production staging has been exercised.

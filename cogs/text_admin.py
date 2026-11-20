@@ -11,7 +11,6 @@ from __future__ import annotations
 import logging
 import re
 from datetime import timedelta
-from typing import Optional, Tuple
 
 import disnake
 from disnake.ext import commands
@@ -98,7 +97,7 @@ ROLE_REMOVE_RE = re.compile(
 HELP_TRIGGER = "огласи устав гвардии"
 
 
-def _reason(value: Optional[str]) -> str:
+def _reason(value: str | None) -> str:
     value = (value or "").strip()
     return value[:450] if value else DEFAULT_REASON
 
@@ -130,7 +129,7 @@ def _has_help_access(member: object) -> bool:
     return _is_admin(member) or _has_named_role(member, STAFF_HELP_ROLE_NAMES)
 
 
-def _bot_member(guild: disnake.Guild, bot: commands.Bot) -> Optional[disnake.Member]:
+def _bot_member(guild: disnake.Guild, bot: commands.Bot) -> disnake.Member | None:
     if guild.me is not None:
         return guild.me
     if bot.user is None:
@@ -138,7 +137,7 @@ def _bot_member(guild: disnake.Guild, bot: commands.Bot) -> Optional[disnake.Mem
     return guild.get_member(bot.user.id)
 
 
-def _member_by_mention(guild: disnake.Guild, mention: Optional[str]) -> Optional[disnake.Member]:
+def _member_by_mention(guild: disnake.Guild, mention: str | None) -> disnake.Member | None:
     if not mention:
         return None
     match = USER_MENTION_RE.fullmatch(mention.strip())
@@ -149,8 +148,8 @@ def _member_by_mention(guild: disnake.Guild, mention: Optional[str]) -> Optional
 
 def _role_by_name(
     guild: disnake.Guild,
-    role_name: Optional[str],
-) -> Tuple[Optional[disnake.Role], Optional[str]]:
+    role_name: str | None,
+) -> tuple[disnake.Role | None, str | None]:
     """Ищет роль по точному названию без Discord-упоминания."""
     raw_name = (role_name or "").strip()
     if not raw_name:
@@ -165,7 +164,7 @@ def _role_by_name(
     return matches[0], None
 
 
-async def _reply_target(message: disnake.Message) -> Optional[disnake.Member]:
+async def _reply_target(message: disnake.Message) -> disnake.Member | None:
     ref = message.reference
     if ref is None:
         return None
@@ -186,7 +185,7 @@ async def _reply_target(message: disnake.Message) -> Optional[disnake.Member]:
     return referenced.author if isinstance(referenced.author, disnake.Member) else None
 
 
-async def _resolve_target(message: disnake.Message, mention: Optional[str]) -> Optional[disnake.Member]:
+async def _resolve_target(message: disnake.Message, mention: str | None) -> disnake.Member | None:
     if message.guild is None:
         return None
     target = _member_by_mention(message.guild, mention)
@@ -200,8 +199,8 @@ async def _resolve_target(message: disnake.Message, mention: Optional[str]) -> O
 def _hierarchy_problem(
     actor: disnake.Member,
     target: disnake.Member,
-    bot_member: Optional[disnake.Member],
-) -> Optional[str]:
+    bot_member: disnake.Member | None,
+) -> str | None:
     guild = actor.guild
 
     if target.id == guild.owner_id:
@@ -225,8 +224,8 @@ def _role_problem(
     actor: disnake.Member,
     target: disnake.Member,
     role: disnake.Role,
-    bot_member: Optional[disnake.Member],
-) -> Optional[str]:
+    bot_member: disnake.Member | None,
+) -> str | None:
     base = _hierarchy_problem(actor, target, bot_member)
     if base:
         return base
@@ -263,8 +262,8 @@ class TextAdminCog(commands.Cog):
     async def _target_or_error(
         self,
         message: disnake.Message,
-        mention: Optional[str],
-    ) -> Optional[disnake.Member]:
+        mention: str | None,
+    ) -> disnake.Member | None:
         target = await _resolve_target(message, mention)
         if target is None:
             await message.reply(
@@ -278,7 +277,7 @@ class TextAdminCog(commands.Cog):
         self,
         message: disnake.Message,
         target: disnake.Member,
-    ) -> Tuple[Optional[disnake.Member], Optional[str]]:
+    ) -> tuple[disnake.Member | None, str | None]:
         assert message.guild is not None
         bot_member = _bot_member(message.guild, self.bot)
         problem = _hierarchy_problem(message.author, target, bot_member)  # type: ignore[arg-type]
@@ -429,7 +428,9 @@ class TextAdminCog(commands.Cog):
             )
         except disnake.HTTPException as exc:
             logger.warning("RP admin kick failed: %s", exc, exc_info=True)
-            await message.reply(f"❌ Discord вернул ошибку изгнания: `{str(exc)[:250]}`", mention_author=False)
+            await message.reply(
+                f"❌ Discord вернул ошибку изгнания: `{str(exc)[:250]}`", mention_author=False
+            )
 
     async def _handle_carcer(self, message: disnake.Message, match: re.Match[str]) -> None:
         target = await self._target_or_error(message, match.group("mention"))
@@ -440,7 +441,9 @@ class TextAdminCog(commands.Cog):
         if problem or bot_member is None:
             return
         if not bot_member.guild_permissions.moderate_members:
-            await message.reply("❌ У бота нет права **Модерировать участников** (`moderate_members`).", mention_author=False)
+            await message.reply(
+                "❌ У бота нет права **Модерировать участников** (`moderate_members`).", mention_author=False
+            )
             return
 
         amount = int(match.group("amount"))
@@ -453,7 +456,9 @@ class TextAdminCog(commands.Cog):
             return
 
         reason = _reason(match.group("reason"))
-        audit_reason = f"Карцер на {minutes} мин.; причина: {reason}; модератор: {message.author} ({message.author.id})"
+        audit_reason = (
+            f"Карцер на {minutes} мин.; причина: {reason}; модератор: {message.author} ({message.author.id})"
+        )
 
         try:
             await target.timeout(duration=timedelta(minutes=minutes), reason=audit_reason)
@@ -489,11 +494,15 @@ class TextAdminCog(commands.Cog):
         if problem or bot_member is None:
             return
         if not bot_member.guild_permissions.moderate_members:
-            await message.reply("❌ У бота нет права **Модерировать участников** (`moderate_members`).", mention_author=False)
+            await message.reply(
+                "❌ У бота нет права **Модерировать участников** (`moderate_members`).", mention_author=False
+            )
             return
 
         reason = _reason(match.group("reason"))
-        audit_reason = f"Досрочное освобождение из Карцера: {reason}; модератор: {message.author} ({message.author.id})"
+        audit_reason = (
+            f"Досрочное освобождение из Карцера: {reason}; модератор: {message.author} ({message.author.id})"
+        )
 
         try:
             await target.timeout(duration=None, reason=audit_reason)
@@ -514,7 +523,9 @@ class TextAdminCog(commands.Cog):
             )
         except disnake.HTTPException as exc:
             logger.warning("RP admin carcer release failed: %s", exc, exc_info=True)
-            await message.reply(f"❌ Discord вернул ошибку освобождения: `{str(exc)[:250]}`", mention_author=False)
+            await message.reply(
+                f"❌ Discord вернул ошибку освобождения: `{str(exc)[:250]}`", mention_author=False
+            )
 
     async def _handle_unban(self, message: disnake.Message, match: re.Match[str]) -> None:
         assert message.guild is not None
@@ -528,7 +539,9 @@ class TextAdminCog(commands.Cog):
 
         user_id = int(match.group("user_id"))
         reason = _reason(match.group("reason"))
-        audit_reason = f"Врата Фаервелла вновь открыты: {reason}; модератор: {message.author} ({message.author.id})"
+        audit_reason = (
+            f"Врата Фаервелла вновь открыты: {reason}; модератор: {message.author} ({message.author.id})"
+        )
 
         try:
             await message.guild.unban(disnake.Object(id=user_id), reason=audit_reason)
@@ -539,10 +552,15 @@ class TextAdminCog(commands.Cog):
         except disnake.NotFound:
             await message.reply("❌ Этого ID нет среди изгнанных (бан-лист сервера).", mention_author=False)
         except disnake.Forbidden:
-            await message.reply("❌ Discord не позволил открыть врата. Проверь право бота на снятие бана.", mention_author=False)
+            await message.reply(
+                "❌ Discord не позволил открыть врата. Проверь право бота на снятие бана.",
+                mention_author=False,
+            )
         except disnake.HTTPException as exc:
             logger.warning("RP admin unban failed: %s", exc, exc_info=True)
-            await message.reply(f"❌ Discord вернул ошибку снятия бана: `{str(exc)[:250]}`", mention_author=False)
+            await message.reply(
+                f"❌ Discord вернул ошибку снятия бана: `{str(exc)[:250]}`", mention_author=False
+            )
 
     async def _handle_role(
         self,

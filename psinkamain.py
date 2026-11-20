@@ -1,126 +1,110 @@
+import asyncio
+import io
+import logging
+import math
 import os
-import subprocess
-import sys
-from importlib.metadata import PackageNotFoundError, version as package_version
-
-
-def _installed_g4f_version() -> str | None:
-    try:
-        return package_version("g4f")
-    except PackageNotFoundError:
-        return None
-    except Exception:
-        return None
-
-
-def _upgrade_g4f_before_import() -> None:
-    """
-    На каждом старте проверяет PyPI и обновляет g4f до последнего релиза.
-
-    Обновление выполняется до первого ``import g4f``, поэтому новая версия
-    используется уже в текущем процессе. Ошибка сети/PyPI не блокирует
-    запуск: бот продолжит работу с уже установленной версией, если она есть.
-    """
-    before = _installed_g4f_version()
-    label = before or "не установлен"
-    print(f"[g4f] Проверка обновлений на PyPI (сейчас: {label})...", flush=True)
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "pip",
-        "install",
-        "--upgrade",
-        "--disable-pip-version-check",
-        "--no-input",
-        "--retries",
-        "1",
-        "--timeout",
-        "15",
-        "g4f",
-    ]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=90,
-            check=False,
-        )
-    except Exception as exc:
-        if before is None:
-            raise RuntimeError(
-                f"g4f не установлен и автоматическая установка не удалась: {exc}"
-            ) from exc
-        print(
-            f"[g4f] Не удалось проверить/обновить пакет: {exc}. "
-            "Продолжаю запуск с установленной версией.",
-            flush=True,
-        )
-        return
-
-    after = _installed_g4f_version()
-    if result.returncode == 0:
-        if before != after:
-            print(f"[g4f] Обновлено: {before or 'нет'} -> {after or 'неизвестно'}", flush=True)
-        else:
-            print(f"[g4f] Уже актуальная версия: {after or 'неизвестно'}", flush=True)
-        return
-
-    tail = (result.stdout or "").strip().splitlines()[-5:]
-    details = " | ".join(line.strip() for line in tail if line.strip())
-    if before is None and after is None:
-        raise RuntimeError(
-            f"g4f не установлен, а pip завершился с кодом {result.returncode}: {details}"
-        )
-    print(
-        f"[g4f] pip завершился с кодом {result.returncode}. "
-        f"Продолжаю запуск с версией {before or after or 'неизвестно'}. "
-        f"{details}",
-        flush=True,
-    )
-
-
-_upgrade_g4f_before_import()
-
-import g4f
-import disnake
 import random
 import re
-import logging
 import time
-import math
-import csv
-import io
-import asyncio
 import traceback
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from dotenv import load_dotenv
-from typing import Tuple, List, Dict, Any, Optional, Set
-from disnake.ext import commands
-from openai import OpenAI
+from typing import Any, TypedDict, TypeVar
+
 import aiohttp
+import disnake
+import g4f
+from disnake.ext import commands
+from disnake.interactions.application_command import ApplicationCommandInteraction
+from disnake.interactions.message import MessageInteraction
 from groq import Groq
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, UniqueConstraint, func
-from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.exc import SQLAlchemyError
-import zipfile
-from xml.sax.saxutils import escape as xml_escape
-import json
-import xml.etree.ElementTree as ET
-import calendar as pc_calendar
-import unicodedata as pc_unicodedata
+from groq.types.chat import ChatCompletionMessageParam as GroqChatMessageParam
+from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam as OpenAIChatMessageParam
+
+from core.config import BotSettings, safe_int_env
+from core.logging_setup import configure_logging
 from core.paths import (
     ANALYSIS_LOG_FILE as CORE_ANALYSIS_LOG_FILE,
     BOT_ERROR_LOG,
-    ENV_FILE,
     MERCENARY_DB_FILE as CORE_MERCENARY_DB_FILE,
     PENDING_TEST_LOG as CORE_PENDING_TEST_LOG,
     POST_COUNT_SETTINGS_FILE,
     ROOT_DIR,
+    initialize_paths,
 )
+from db.session import init_db
+from handlers.utility_commands import respond_to_bark, respond_to_cube, respond_to_status
+from repositories import jail as jail_storage
+from repositories.model_success import DBManager
+from repositories.pending_tests import PendingTestManager
+from repositories.post_count_settings import PCSettingsStore
+from services.auction_lots import (
+    parse_ancient_auction_lot,
+    parse_new_auction_lot,
+)
+from services.auction_text import (
+    append_unique_text,
+    clean_auction_text,
+    flatten_any_strings,
+    get_raw_author_id,
+    get_raw_author_name,
+    norm_auction_text,
+)
+from services.dice import DiceParser
+from services.jail_time import normalize_jail_datetime
+from services.mercenary_normalize import (
+    _clean_profession_targets,
+    _resolve_existing_profession_name,
+    _rows_to_dicts,
+    _to_int,
+    _yes,
+    dedupe_preserve_order,
+    normalize_lookup_text,
+    split_multi_field,
+)
+from services.mercenary_workbook import read_mercenary_sheets
+from services.post_count_metrics import (
+    PC_LONG_POST_MIN_CHARS,
+    pc_apply_content,
+    pc_empty_result,
+)
+from services.post_count_reporting import (
+    pc_collect_template_records,
+    pc_merge_lengths,
+    pc_merge_stats,
+    pc_percent,
+    pc_sorted_channels,
+    pc_split_lines_for_discord,
+    pc_template_public_report_lines,
+)
+from services.post_count_templates import (
+    PC_COUNT_LENGTH_FOR_ALL_TEMPLATES,
+    PC_LABELS,
+    PC_MOSCOW_TZ,
+    PCDateError,
+    PCPeriod,
+    PCSearchUnavailable,
+    pc_any_length_enabled,
+    pc_length_enabled_for_family,
+    pc_parse_period,
+    pc_template_mode,
+    pc_word_pattern,
+)
+from services.post_count_types import ChannelCounters, CountResult, FamilyStats, TemplateMessage
+from services.spreadsheets import make_xlsx_file
+
+_T = TypeVar("_T")
+
+
+class ModelProbeResult(TypedDict):
+    """Provider test result with consistent model and latency fields."""
+
+    model: str
+    success: bool
+    latency: float
+    error: str | None
+
 
 try:
     from g4f.client import AsyncClient as G4FAsyncClient
@@ -133,58 +117,32 @@ except ImportError:
 # ============================================================================
 # В начале файла, после импортов:
 try:
-    from g4f.errors import ProviderError, ModelNotFoundError, RequestLimitError, AuthenticationError
+    from g4f.errors import AuthenticationError, ModelNotFoundError, ProviderError, RequestLimitError
 except ImportError:
     # Для совместимости со старыми версиями
     ProviderError = ModelNotFoundError = RequestLimitError = AuthenticationError = Exception
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(), logging.FileHandler(BOT_ERROR_LOG, encoding='utf-8', delay=True)],
-    force=True
-)
 logger = logging.getLogger(__name__)
 
-load_dotenv(ENV_FILE)
-
-
-def safe_int_env(name: str, default: int = 0) -> int:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    try:
-        return int(str(raw).strip())
-    except (TypeError, ValueError):
-        logger.warning(f"⚠️ {name}: ожидалось число, получено `{raw}`. Использую {default}.")
-        return default
-
-
-def env_bool(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None or str(raw).strip() == "":
-        return default
-    return str(raw).strip().lower() in {"1", "true", "yes", "y", "да", "on"}
-
-
-DATABASE_URL = os.getenv('DATABASE_URL')
-IS_RAILWAY = env_bool('RAILWAY') or env_bool('IS_RAILWAY')
-OWNER_ID = safe_int_env('OWNER_ID', 0)
-REQUIRED_ROLE_ID = safe_int_env('REQUIRED_ROLE_ID', 0)
-DEBUG = env_bool('DEBUG', False)
-MAX_CONCURRENT = max(1, safe_int_env('MAX_CONCURRENT', 5))
-PROXY_REFRESH_HOURS = max(1, safe_int_env('PROXY_REFRESH_HOURS', 6))
-USE_PROXY = env_bool('USE_PROXY', False)
+settings = BotSettings.from_environment()
+DATABASE_URL = settings.database_url
+IS_RAILWAY = settings.is_railway
+OWNER_ID = settings.owner_id
+REQUIRED_ROLE_ID = settings.required_role_id
+DEBUG = settings.debug
+MAX_CONCURRENT = settings.max_concurrent
+PROXY_REFRESH_HOURS = settings.proxy_refresh_hours
+USE_PROXY = settings.use_proxy
 ai_semaphore = asyncio.Semaphore(MAX_CONCURRENT)
 
 
 # ✅ Проверка токенов при старте
-def check_tokens():
+def check_tokens() -> dict[str, str | None]:
     """Проверяет наличие всех необходимых токенов"""
     tokens = {
-        'DISCORD_TOKEN': os.getenv('DISCORD_TOKEN'),
-        'GROQ_TOKEN': os.getenv('GROQ_TOKEN'),
-        'OPENR_TOKEN': os.getenv('OPENR_TOKEN'),
+        "DISCORD_TOKEN": os.getenv("DISCORD_TOKEN"),
+        "GROQ_TOKEN": os.getenv("GROQ_TOKEN"),
+        "OPENR_TOKEN": os.getenv("OPENR_TOKEN"),
     }
 
     for name, value in tokens.items():
@@ -195,133 +153,9 @@ def check_tokens():
 
     return tokens
 
-Base = declarative_base()
 
-class ModelSuccessLog(Base):
-    __tablename__ = 'model_success_log'
-    id = Column(Integer, primary_key=True)
-    provider = Column(String(50), nullable=False)
-    model_name = Column(String(100), nullable=False)
-    success_count = Column(Integer, default=1)
-    last_success_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    avg_latency_ms = Column(Integer, default=0)
-    __table_args__ = (UniqueConstraint('provider', 'model_name', name='_provider_model_uc'),)
-
-
-def init_db():
-    if not DATABASE_URL:
-        logging.warning("⚠️ DATABASE_URL не найден. Работа с БД отключена (экономия ресурсов).")
-        return None, None
-    try:
-        engine = create_engine(DATABASE_URL, echo=False, future=True, pool_pre_ping=True, pool_size=5, max_overflow=10)
-        Base.metadata.create_all(engine)
-        SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-        logging.info("✅ База данных Neon подключена.")
-        return engine, SessionLocal
-    except Exception as e:
-        logging.error(f"❌ Ошибка подключения к БД: {e}")
-        return None, None
-
-
-db_engine, SessionLocal = init_db()
-
-
-class DBManager:
-    def __init__(self, session_factory):
-        self.SessionLocal = session_factory
-
-    def log_success(self, provider: str, model: str, latency_ms: int):
-        if not self.SessionLocal:
-            return
-        session = self.SessionLocal()
-        try:
-            record = session.query(ModelSuccessLog).filter_by(provider=provider, model_name=model).first()
-            if record:
-                record.success_count += 1
-                record.avg_latency_ms = int(
-                    (record.avg_latency_ms * (record.success_count - 1) + latency_ms) / record.success_count)
-                record.last_success_at = datetime.now(timezone.utc)
-            else:
-                record = ModelSuccessLog(provider=provider, model_name=model, success_count=1,
-                                         last_success_at=datetime.now(timezone.utc), avg_latency_ms=latency_ms)
-                session.add(record)
-            session.commit()
-            self._cleanup_old_records(session)
-        except Exception as e:
-            session.rollback()
-            logging.error(f"Ошибка записи в БД: {e}")
-        finally:
-            session.close()
-
-    def _cleanup_old_records(self, session):
-        try:
-            count = session.query(ModelSuccessLog).count()
-            if count > 200:
-                old_ids = session.query(ModelSuccessLog.id).order_by(ModelSuccessLog.last_success_at.asc()).limit(
-                    count - 200).all()
-                if old_ids:
-                    session.query(ModelSuccessLog).filter(ModelSuccessLog.id.in_([x[0] for x in old_ids])).delete(
-                        synchronize_session=False)
-                    session.commit()
-        except:
-            pass
-
-    def get_top_models(self, limit: int = 10) -> List[Tuple[str, str, int]]:
-        if not self.SessionLocal: return []
-        session = self.SessionLocal()
-        try:
-            results = session.query(ModelSuccessLog.provider, ModelSuccessLog.model_name,
-                                    ModelSuccessLog.avg_latency_ms) \
-                .order_by(ModelSuccessLog.success_count.desc(), ModelSuccessLog.avg_latency_ms.asc()) \
-                .limit(limit).all()
-            return [(r.provider, r.model_name, r.avg_latency_ms) for r in results]
-        except:
-            return []
-        finally:
-            session.close()
-
-    def export_to_csv(self) -> Optional[str]:
-        if not self.SessionLocal: return None
-        session = self.SessionLocal()
-        try:
-            output = io.StringIO()
-            writer = csv.writer(output)
-            writer.writerow(['ID', 'Provider', 'Model', 'Success Count', 'Avg Latency (ms)', 'Last Success'])
-            records = session.query(ModelSuccessLog).order_by(ModelSuccessLog.success_count.desc()).all()
-            for r in records:
-                writer.writerow([r.id, r.provider, r.model_name, r.success_count, r.avg_latency_ms, r.last_success_at])
-            return output.getvalue()
-        except Exception as e:
-            logging.error(f"Ошибка экспорта CSV: {e}")
-            return None
-        finally:
-            session.close()
-
-    def is_connected(self) -> bool:
-        return self.SessionLocal is not None
-
-    def has_data(self) -> bool:
-        if not self.SessionLocal: return False
-        session = self.SessionLocal()
-        try:
-            return session.query(ModelSuccessLog).count() > 0
-        except:
-            return False
-        finally:
-            session.close()
-
-    def get_all_models(self) -> List[Tuple[str, str]]:
-        if not self.SessionLocal: return []
-        session = self.SessionLocal()
-        try:
-            results = session.query(ModelSuccessLog.provider, ModelSuccessLog.model_name) \
-                .order_by(ModelSuccessLog.success_count.desc()).all()
-            return [(r.provider, r.model_name) for r in results]
-        except:
-            return []
-        finally:
-            session.close()
-
+# Initialized only after all mapped model classes have been declared.
+db_engine, SessionLocal = None, None
 
 db_manager = DBManager(SessionLocal)
 
@@ -330,71 +164,6 @@ db_manager = DBManager(SessionLocal)
 # ============================================================================
 
 PENDING_TEST_LOG = str(CORE_PENDING_TEST_LOG)
-
-
-class PendingTestManager:
-    def __init__(self, filename: str):
-        self.filename = filename
-        if not os.path.exists(self.filename):
-            with open(self.filename, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow(['provider', 'model', 'latency_ms', 'timestamp'])
-
-    def log_success(self, provider: str, model: str, latency_ms: int):
-        try:
-            with open(self.filename, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([provider, model, latency_ms, datetime.now(timezone.utc).isoformat()])
-        except Exception as e:
-            logger.error(f"Ошибка записи во временный лог тестов: {e}")
-
-    def read_records(self) -> List[Tuple[str, str, int]]:
-        results = []
-        if not os.path.exists(self.filename):
-            return results
-        try:
-            with open(self.filename, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f)
-                next(reader, None)
-                for row in reader:
-                    if len(row) >= 3:
-                        results.append((row[0], row[1], int(row[2])))
-            return results
-        except Exception as e:
-            logger.error(f"Ошибка чтения временного лога: {e}")
-            return []
-
-    def clear(self):
-        try:
-            with open(self.filename, 'w', encoding='utf-8') as f:
-                f.write('provider,model,latency_ms,timestamp\n')
-        except Exception as e:
-            logger.error(f"Ошибка очистки временного лога: {e}")
-
-    def read_and_clear(self) -> List[Tuple[str, str, int]]:
-        results = self.read_records()
-        if results:
-            self.clear()
-        return results
-
-    def get_pending_models(self) -> List[Tuple[str, str]]:
-        models = []
-        if not os.path.exists(self.filename):
-            return models
-        try:
-            with open(self.filename, 'r', encoding='utf-8') as f:
-                reader = csv.reader(f)
-                next(reader, None)
-                seen = set()
-                for row in reader:
-                    if len(row) >= 2:
-                        key = (row[0], row[1])
-                        if key not in seen:
-                            models.append(key)
-                            seen.add(key)
-            return models
-        except:
-            return []
 
 
 pending_test_manager = PendingTestManager(PENDING_TEST_LOG)
@@ -415,27 +184,11 @@ G4F_FALLBACK_PROVIDERS = ["PollinationsAI", "Qwen", "Perplexity"]
 # 🔧 ЛОГИРОВАНИЕ
 # ============================================================================
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(BOT_ERROR_LOG, encoding='utf-8', delay=True)
-    ],
-    force=True
-)
-logger = logging.getLogger(__name__)
-
 ANALYSIS_LOG_FILE = str(CORE_ANALYSIS_LOG_FILE)
 analysis_logger = logging.getLogger("analysis_debug")
-analysis_logger.setLevel(logging.INFO)
-if not analysis_logger.handlers:
-    fh = logging.FileHandler(ANALYSIS_LOG_FILE, mode='w', encoding='utf-8')
-    fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    analysis_logger.addHandler(fh)
 
 
-def log_analysis(msg: str, level: str = "INFO"):
+def log_analysis(msg: str, level: str = "INFO") -> None:
     getattr(analysis_logger, level.lower())(msg)
 
 
@@ -483,8 +236,11 @@ OR_PRIORITY_MODELS = [
 ]
 
 FREE_PROXY_LIST = [
-    "http://103.152.112.162:80", "http://185.217.136.234:8080",
-    "http://47.88.29.109:8080", "http://103.167.135.110:80", "http://185.162.230.55:80",
+    "http://103.152.112.162:80",
+    "http://185.217.136.234:8080",
+    "http://47.88.29.109:8080",
+    "http://103.167.135.110:80",
+    "http://185.162.230.55:80",
 ]
 
 TEST_PROMPT = "Ответь только словом ок"
@@ -546,7 +302,7 @@ OR_ALL_MODELS = OR_PRIORITY_MODELS + [
 ]
 
 
-def get_all_g4f_combinations() -> List[Tuple[str, str]]:
+def get_all_g4f_combinations() -> list[tuple[str, str]]:
     """
     Возвращает комбинации провайдер/модель для G4F из конфигурации и БД.
     Устаревшие записи не ломают очередь: имя провайдера нормализуется, а
@@ -577,7 +333,7 @@ def get_all_g4f_combinations() -> List[Tuple[str, str]]:
     return combos
 
 
-def normalize_provider_name(provider: Optional[str]) -> str:
+def normalize_provider_name(provider: str | None) -> str:
     """Приводит имена маршрутов из БД/старых файлов к одному виду."""
     raw = str(provider or "").strip()
     folded = raw.casefold()
@@ -590,7 +346,7 @@ def normalize_provider_name(provider: Optional[str]) -> str:
     return raw
 
 
-def is_model_excluded(provider: Optional[str], model: Optional[str]) -> bool:
+def is_model_excluded(provider: str | None, model: str | None) -> bool:
     """Сохраняет все прежние исключения, но применяет их по назначению."""
     provider = normalize_provider_name(provider)
     model = str(model or "").strip()
@@ -600,22 +356,20 @@ def is_model_excluded(provider: Optional[str], model: Optional[str]) -> bool:
         return True
     if provider == "OpenRouter" and model in EXCLUDED_OR_MODELS:
         return True
-    if provider == "Groq" and model in GROQ_EXCLUDED_MODELS:
-        return True
-    return False
+    return provider == "Groq" and model in GROQ_EXCLUDED_MODELS
 
 
-def get_all_groq_combinations() -> List[Tuple[str, str]]:
+def get_all_groq_combinations() -> list[tuple[str, str]]:
     """Возвращает все известные модели Groq, сохраняя исключения проекта."""
     return [("Groq", mod) for mod in GROQ_ALL_MODELS if not is_model_excluded("Groq", mod)]
 
 
-def get_all_openrouter_combinations() -> List[Tuple[str, str]]:
+def get_all_openrouter_combinations() -> list[tuple[str, str]]:
     """Возвращает все известные модели OpenRouter, сохраняя исключения проекта."""
     return [("OpenRouter", mod) for mod in OR_ALL_MODELS if not is_model_excluded("OpenRouter", mod)]
 
 
-def dedupe_combinations(combinations: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+def dedupe_combinations(combinations: list[tuple[str, str]]) -> list[tuple[str, str]]:
     result = []
     seen = set()
     for provider, model in combinations:
@@ -630,7 +384,7 @@ def dedupe_combinations(combinations: List[Tuple[str, str]]) -> List[Tuple[str, 
     return result
 
 
-def get_db_combinations(provider: Optional[str] = None) -> List[Tuple[str, str]]:
+def get_db_combinations(provider: str | None = None) -> list[tuple[str, str]]:
     if not SessionLocal:
         return []
     combos = [(normalize_provider_name(p), m) for p, m in db_manager.get_all_models()]
@@ -640,55 +394,59 @@ def get_db_combinations(provider: Optional[str] = None) -> List[Tuple[str, str]]
     return dedupe_combinations(combos)
 
 
-async def fetch_groq_model_ids() -> List[str]:
-    token = os.getenv('GROQ_TOKEN')
+async def fetch_groq_model_ids() -> list[str]:
+    token = os.getenv("GROQ_TOKEN")
     if not token:
         return []
     try:
         headers = {"Authorization": f"Bearer {token}"}
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get("https://api.groq.com/openai/v1/models", timeout=15) as response:
-                if response.status != 200:
-                    logger.warning(f"Groq models list status: {response.status}")
-                    return []
-                data = await response.json()
-                return [item.get('id') for item in data.get('data', []) if item.get('id')]
-    except Exception as e:
+        async with (
+            aiohttp.ClientSession(headers=headers) as session,
+            session.get("https://api.groq.com/openai/v1/models", timeout=15) as response,
+        ):
+            if response.status != 200:
+                logger.warning(f"Groq models list status: {response.status}")
+                return []
+            data = await response.json()
+            return [item.get("id") for item in data.get("data", []) if item.get("id")]
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError, AttributeError, KeyError) as e:
         logger.warning(f"Не удалось получить живой список Groq моделей: {e}")
         return []
 
 
-async def fetch_openrouter_model_ids(free_only: bool = True) -> List[str]:
+async def fetch_openrouter_model_ids(free_only: bool = True) -> list[str]:
     headers = {}
-    token = os.getenv('OPENR_TOKEN')
+    token = os.getenv("OPENR_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get("https://openrouter.ai/api/v1/models", timeout=20) as response:
-                if response.status != 200:
-                    logger.warning(f"OpenRouter models list status: {response.status}")
-                    return []
-                data = await response.json()
-                models = []
-                for item in data.get('data', []):
-                    model_id = item.get('id')
-                    if not model_id:
+        async with (
+            aiohttp.ClientSession(headers=headers) as session,
+            session.get("https://openrouter.ai/api/v1/models", timeout=20) as response,
+        ):
+            if response.status != 200:
+                logger.warning(f"OpenRouter models list status: {response.status}")
+                return []
+            data = await response.json()
+            models = []
+            for item in data.get("data", []):
+                model_id = item.get("id")
+                if not model_id:
+                    continue
+                if free_only and not model_id.endswith(":free"):
+                    pricing = item.get("pricing") or {}
+                    prompt_price = str(pricing.get("prompt", ""))
+                    completion_price = str(pricing.get("completion", ""))
+                    if prompt_price not in {"0", "0.0"} or completion_price not in {"0", "0.0"}:
                         continue
-                    if free_only and not model_id.endswith(':free'):
-                        pricing = item.get('pricing') or {}
-                        prompt_price = str(pricing.get('prompt', ''))
-                        completion_price = str(pricing.get('completion', ''))
-                        if prompt_price not in {'0', '0.0'} or completion_price not in {'0', '0.0'}:
-                            continue
-                    models.append(model_id)
-                return models
-    except Exception as e:
+                models.append(model_id)
+            return models
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError, AttributeError, KeyError) as e:
         logger.warning(f"Не удалось получить живой список OpenRouter моделей: {e}")
         return []
 
 
-async def get_all_groq_combinations_live() -> List[Tuple[str, str]]:
+async def get_all_groq_combinations_live() -> list[tuple[str, str]]:
     live_models = await fetch_groq_model_ids()
     source_models = live_models if live_models else GROQ_ALL_MODELS
     combos = [("Groq", m) for m in GROQ_PRIORITY_MODELS]
@@ -697,7 +455,7 @@ async def get_all_groq_combinations_live() -> List[Tuple[str, str]]:
     return dedupe_combinations(combos)
 
 
-async def get_all_openrouter_combinations_live() -> List[Tuple[str, str]]:
+async def get_all_openrouter_combinations_live() -> list[tuple[str, str]]:
     live_models = await fetch_openrouter_model_ids(free_only=True)
     source_models = live_models if live_models else OR_ALL_MODELS
     combos = [("OpenRouter", m) for m in OR_PRIORITY_MODELS]
@@ -706,17 +464,20 @@ async def get_all_openrouter_combinations_live() -> List[Tuple[str, str]]:
     return dedupe_combinations(combos)
 
 
-async def get_all_test_combinations_live() -> List[Tuple[str, str]]:
+async def get_all_test_combinations_live() -> list[tuple[str, str]]:
     combos = []
     combos.extend(get_all_g4f_combinations())
     combos.extend(await get_all_groq_combinations_live())
     combos.extend(await get_all_openrouter_combinations_live())
     return dedupe_combinations(combos)
+
+
 # ============================================================================
 # 🛠 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ============================================================================
 
-async def fetch_free_proxies(count: int = 20) -> List[str]:
+
+async def fetch_free_proxies(count: int = 20) -> list[str]:
     """Загружает свежие HTTP-прокси. Не используется по умолчанию, только если /скажи прокси=Да."""
     try:
         async with aiohttp.ClientSession() as session:
@@ -724,12 +485,12 @@ async def fetch_free_proxies(count: int = 20) -> List[str]:
             async with session.get(url, timeout=10) as response:
                 if response.status == 200:
                     text = await response.text()
-                    proxies = [f"http://{p.strip()}" for p in text.split('\n') if p.strip() and ':' in p]
+                    proxies = [f"http://{p.strip()}" for p in text.split("\n") if p.strip() and ":" in p]
                     proxies = [p for p in proxies if validate_proxy_format(p)]
                     if proxies:
                         logger.info(f"🌐 Обновлён список прокси: {len(proxies)} шт.")
                         return proxies
-    except Exception as e:
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, TypeError) as e:
         logger.warning(f"⚠️ Не удалось обновить прокси: {e}")
     return [p for p in FREE_PROXY_LIST if validate_proxy_format(p)]
 
@@ -738,13 +499,13 @@ def validate_proxy_format(proxy: str) -> bool:
     """Проверяет формат прокси: http(s)/socks + host:port."""
     if not proxy:
         return False
-    if not proxy.startswith(('http://', 'https://', 'socks4://', 'socks5://')):
+    if not proxy.startswith(("http://", "https://", "socks4://", "socks5://")):
         return False
     try:
-        host_port = proxy.split('://')[-1]
-        host, port = host_port.rsplit(':', 1)
+        host_port = proxy.split("://")[-1]
+        host, port = host_port.rsplit(":", 1)
         return bool(host) and port.isdigit() and 1 <= int(port) <= 65535
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         return False
 
 
@@ -752,7 +513,7 @@ proxy_lock = asyncio.Lock()
 proxy_last_refresh = 0.0
 
 
-async def ensure_proxy_list(force: bool = False) -> List[str]:
+async def ensure_proxy_list(force: bool = False) -> list[str]:
     """Обновляет глобальный список прокси по требованию, а не при обычном старте."""
     global FREE_PROXY_LIST, proxy_last_refresh
     now = time.time()
@@ -771,41 +532,51 @@ async def ensure_proxy_list(force: bool = False) -> List[str]:
         return [p for p in FREE_PROXY_LIST if validate_proxy_format(p)]
 
 
-def get_random_proxy(use_proxy: bool) -> Optional[str]:
+def get_random_proxy(use_proxy: bool) -> str | None:
     if not use_proxy:
         return None
     valid = [p for p in FREE_PROXY_LIST if validate_proxy_format(p)]
     return random.choice(valid) if valid else None
 
 
-async def get_random_proxy_async(use_proxy: bool) -> Optional[str]:
+async def get_random_proxy_async(use_proxy: bool) -> str | None:
     if not use_proxy:
         return None
     proxies = await ensure_proxy_list()
     return random.choice(proxies) if proxies else None
 
 
-async def check_access(interaction: disnake.CommandInteraction, allowed_role_names: List[str] = ["Псарь"]) -> bool:
+async def check_access(
+    interaction: ApplicationCommandInteraction,
+    allowed_role_names: Sequence[str] = ("Псарь",),
+) -> bool:
     if interaction.author.id == OWNER_ID:
         return True
 
+    member = interaction.author
+    if not isinstance(member, disnake.Member):
+        await interaction.response.send_message("❌ Гав! Нет доступа вне сервера.", ephemeral=True)
+        return False
+
     if REQUIRED_ROLE_ID != 0:
-        if any(role.id == REQUIRED_ROLE_ID for role in interaction.author.roles):
+        if any(role.id == REQUIRED_ROLE_ID for role in member.roles):
             return True
         await interaction.response.send_message("❌ Гав! Нет доступа (нужна роль по ID).", ephemeral=True)
         return False
 
-    user_role_names = [role.name for role in interaction.author.roles]
+    user_role_names = [role.name for role in member.roles]
     if any(role_name in user_role_names for role_name in allowed_role_names):
         return True
 
-    await interaction.response.send_message(f"❌ Гав! Нет доступа (нужна роль: {', '.join(allowed_role_names)}).",
-                                            ephemeral=True)
+    await interaction.response.send_message(
+        f"❌ Гав! Нет доступа (нужна роль: {', '.join(allowed_role_names)}).", ephemeral=True
+    )
     return False
 
 
 def create_progress_bar(current: int, total: int, length: int = 10) -> str:
-    if total == 0: return "░" * length
+    if total == 0:
+        return "░" * length
     filled = int(length * current / total)
     return "█" * filled + "░" * (length - filled)
 
@@ -815,8 +586,8 @@ def strip_think_content(text: str) -> str:
     if not text:
         return text
 
-    cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    cleaned = re.sub(r'</?think>', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"</?think>", "", cleaned, flags=re.IGNORECASE)
     cleaned = cleaned.lstrip()
 
     return cleaned if cleaned.strip() else text
@@ -826,9 +597,15 @@ def strip_think_content(text: str) -> str:
 # 🌐 ЗАПРОСЫ К МОДЕЛЯМ (ИСПРАВЛЕНО)
 # ============================================================================
 
-async def make_g4f_request(provider_name: str, model: str, prompt: str,
-                           timeout: float = 45.0, system_prompt: str = None,
-                           proxy_url: str = None) -> Tuple[bool, str, float]:
+
+async def make_g4f_request(
+    provider_name: str,
+    model: str,
+    prompt: str,
+    timeout: float = 45.0,
+    system_prompt: str | None = None,
+    proxy_url: str | None = None,
+) -> tuple[bool, str, float]:
     """Запрос к актуальному g4f через AsyncClient с сохранением каскадного fallback."""
     start = time.time()
 
@@ -838,7 +615,7 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
     messages.append({"role": "user", "content": prompt})
 
     requested_provider = normalize_provider_name(provider_name)
-    providers_to_try = []
+    providers_to_try: list[str | None] = []
 
     # None означает штатный автоматический роутинг g4f.
     if requested_provider == "g4f-default" or not requested_provider:
@@ -850,8 +627,8 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
     providers_to_try.extend(G4F_FALLBACK_PROVIDERS)
     providers_to_try.append(None)
 
-    deduped_providers = []
-    seen_providers = set()
+    deduped_providers: list[str | None] = []
+    seen_providers: set[str] = set()
     for item in providers_to_try:
         key = item or "__default__"
         if key not in seen_providers:
@@ -892,8 +669,10 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
             else:
                 # Совместимость со старой установкой: requirements уже фиксирует
                 # Синхронный Client оставлен намеренно как резервный путь совместимости.
-                def sync_call():
+                def sync_call(provider_class: Any = provider_class, kwargs: dict[str, Any] = kwargs) -> Any:
+                    # Freeze the provider/request for worker threads that may outlive a timeout.
                     from g4f.client import Client as G4FClient
+
                     client = G4FClient(provider=provider_class) if provider_class else G4FClient()
                     return client.chat.completions.create(**kwargs)
 
@@ -905,9 +684,9 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
             if response is None:
                 raise Exception("Пустой ответ (None)")
 
-            if hasattr(response, 'choices') and response.choices:
+            if hasattr(response, "choices") and response.choices:
                 choice = response.choices[0]
-                if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                if hasattr(choice, "message") and hasattr(choice.message, "content"):
                     answer = choice.message.content
                     if answer and str(answer).strip():
                         answer = strip_think_content(str(answer).strip())
@@ -924,10 +703,12 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
         except (AuthenticationError, RequestLimitError, ModelNotFoundError, ProviderError) as e:
             logger.debug(f"⚠️ G4F {display_name}/{model}: {str(e)[:80]}")
             continue
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - G4F fallback catches unknown provider errors
             err_str = str(e).lower()
 
-            if any(kw in err_str for kw in ["api_key", "unauthorized", "authentication", "401", "missingauth"]):
+            if any(
+                kw in err_str for kw in ["api_key", "unauthorized", "authentication", "401", "missingauth"]
+            ):
                 logger.debug(f"⚠️ G4F {display_name} требует авторизацию")
                 continue
 
@@ -946,10 +727,15 @@ async def make_g4f_request(provider_name: str, model: str, prompt: str,
     return False, "Все провайдеры G4F недоступны", elapsed
 
 
-async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.0,
-                                 system_prompt: str = None, proxy_url: str = None) -> Tuple[bool, str, float]:
+async def test_openrouter_single(
+    models: list,
+    prompt: str,
+    timeout: float = 45.0,
+    system_prompt: str | None = None,
+    proxy_url: str | None = None,
+) -> tuple[bool, str, float]:
     """Запрос к OpenRouter с одним контролируемым retry для временных ошибок."""
-    openrouter_token = os.getenv('OPENR_TOKEN')
+    openrouter_token = os.getenv("OPENR_TOKEN")
     if not openrouter_token:
         return False, "No OPENR_TOKEN", 0.0
 
@@ -964,7 +750,7 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
         return False, "Все модели OpenRouter исключены из маршрута", 0.0
 
     start = time.time()
-    messages = []
+    messages: list[OpenAIChatMessageParam] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
@@ -981,7 +767,9 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
     for model in models:
         for attempt in range(2):
             try:
-                def sync_call():
+
+                def sync_call(model: str = model) -> Any:
+                    # Late-running workers must keep this retry's original model ID.
                     return client.chat.completions.create(
                         model=model,
                         messages=messages,
@@ -1005,7 +793,7 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
 
                 raise Exception("Пустой ответ от OpenRouter")
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - OpenRouter SDK errors must fall through routing
                 err_str = str(e).lower()
                 status_code = getattr(e, "status_code", None)
                 if status_code is None:
@@ -1022,9 +810,7 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
                 logger.info(f"⚠️ OpenRouter/{model}: HTTP {status_label} — {detail}")
 
                 is_timeout = (
-                    isinstance(e, asyncio.TimeoutError)
-                    or "timeout" in err_str
-                    or "timed out" in err_str
+                    isinstance(e, asyncio.TimeoutError) or "timeout" in err_str or "timed out" in err_str
                 )
                 is_not_found = (
                     status_num == 404
@@ -1032,14 +818,8 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
                     or "invalid model" in err_str
                     or "not found" in err_str
                 )
-                is_rate_limit = (
-                    status_num == 429
-                    or "429" in err_str
-                    or "rate limit" in err_str
-                )
-                is_server_error = (
-                    status_num is not None and 500 <= status_num <= 599
-                )
+                is_rate_limit = status_num == 429 or "429" in err_str or "rate limit" in err_str
+                is_server_error = status_num is not None and 500 <= status_num <= 599
 
                 # 404/невалидная модель — сразу следующая модель, без ожидания.
                 if is_not_found:
@@ -1049,9 +829,7 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
                 if (is_rate_limit or is_server_error) and attempt == 0:
                     delay = 2.0 if is_rate_limit else 1.0
                     reason = "429" if is_rate_limit else f"HTTP {status_label}"
-                    logger.info(
-                        f"↻ OpenRouter/{model}: один повтор после {reason}, ожидание {delay:.0f}с"
-                    )
+                    logger.info(f"↻ OpenRouter/{model}: один повтор после {reason}, ожидание {delay:.0f}с")
                     await asyncio.sleep(delay)
                     continue
 
@@ -1064,21 +842,25 @@ async def test_openrouter_single(models: list, prompt: str, timeout: float = 45.
     elapsed = time.time() - start
     return False, "Все модели OpenRouter недоступны", elapsed
 
-async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
-                           system_prompt: str = None, return_model_name: bool = False) -> Tuple[bool, str, float]:
+
+async def test_groq_single(
+    models: list,
+    prompt: str,
+    timeout: float = 45.0,
+    system_prompt: str | None = None,
+    return_model_name: bool = False,
+) -> tuple[bool, str, float]:
     """
     Запрос к Groq с ВАШИМ именем переменной GROQ_TOKEN
     """
-    groq_token = os.getenv('GROQ_TOKEN')  # ✅ ВАША переменная
+    groq_token = os.getenv("GROQ_TOKEN")  # ✅ ВАША переменная
     if not groq_token:
         return False, "No GROQ_TOKEN", 0.0
 
     if isinstance(models, str):
         models = [models]
     models = [
-        str(model).strip()
-        for model in models
-        if str(model).strip() and not is_model_excluded("Groq", model)
+        str(model).strip() for model in models if str(model).strip() and not is_model_excluded("Groq", model)
     ]
     if not models:
         return False, "Все модели Groq исключены из маршрута", 0.0
@@ -1086,24 +868,22 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
     client = Groq(api_key=groq_token, timeout=timeout)
     start = time.time()
 
-    messages = []
+    messages: list[GroqChatMessageParam] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
 
     for model in models:
         try:
-            def sync_call():
+
+            def sync_call(model: str = model) -> Any:
                 return client.chat.completions.create(
                     model=model,
                     messages=messages,
                     temperature=0.5,
                 )
 
-            response = await asyncio.wait_for(
-                asyncio.to_thread(sync_call),
-                timeout=timeout + 5
-            )
+            response = await asyncio.wait_for(asyncio.to_thread(sync_call), timeout=timeout + 5)
 
             if response.choices and len(response.choices) > 0:
                 elapsed = time.time() - start
@@ -1119,7 +899,7 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
 
             raise Exception("Пустой ответ от Groq")
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - Groq SDK errors must fall through routing
             err_str = str(e).lower()
 
             if "timeout" in err_str:
@@ -1143,10 +923,16 @@ async def test_groq_single(models: list, prompt: str, timeout: float = 45.0,
     return False, "Все модели Groq недоступны", elapsed
 
 
-async def route_model_request(provider: str, model: str, prompt: str, *,
-                              timeout: float = 45.0, system_prompt: str = None,
-                              proxy_url: str = None,
-                              return_model_name: bool = False) -> Tuple[bool, str, float]:
+async def route_model_request(
+    provider: str,
+    model: str,
+    prompt: str,
+    *,
+    timeout: float = 45.0,
+    system_prompt: str | None = None,
+    proxy_url: str | None = None,
+    return_model_name: bool = False,
+) -> tuple[bool, str, float]:
     """Единая точка маршрутизации команд к Groq, OpenRouter и G4F."""
     provider = normalize_provider_name(provider)
     model = str(model or "").strip()
@@ -1156,22 +942,31 @@ async def route_model_request(provider: str, model: str, prompt: str, *,
 
     if provider == "OpenRouter":
         return await test_openrouter_single(
-            [model], prompt, timeout=timeout,
-            system_prompt=system_prompt, proxy_url=proxy_url,
+            [model],
+            prompt,
+            timeout=timeout,
+            system_prompt=system_prompt,
+            proxy_url=proxy_url,
         )
     if provider == "Groq":
         return await test_groq_single(
-            [model], prompt, timeout=timeout,
+            [model],
+            prompt,
+            timeout=timeout,
             system_prompt=system_prompt,
             return_model_name=return_model_name,
         )
     return await make_g4f_request(
-        provider, model, prompt, timeout=timeout,
-        system_prompt=system_prompt, proxy_url=proxy_url,
+        provider,
+        model,
+        prompt,
+        timeout=timeout,
+        system_prompt=system_prompt,
+        proxy_url=proxy_url,
     )
 
 
-async def heartbeat_keeper():
+async def heartbeat_keeper() -> None:
     while True:
         await asyncio.sleep(60)
         logger.debug("💓 Heartbeat OK")
@@ -1181,451 +976,6 @@ async def heartbeat_keeper():
 # 🎲 ДВИЖОК КУБИКОВ
 # ============================================================================
 
-class DiceTermResult:
-    def __init__(self, source: str, sign: int = 1):
-        self.source = source.strip()
-        self.sign = 1 if sign >= 0 else -1
-        self.kind = "dice"
-        self.num_dice = 0
-        self.num_sides = 0
-        self.base_rolls: List[int] = []
-        self.final_rolls: List[int] = []
-        self.all_rolls: List[int] = []
-        self.exploded_rolls: List[int] = []
-        self.kept_dice: List[int] = []
-        self.dropped_dice: List[int] = []
-        self.reroll_sequences: List[Tuple[int, List[int]]] = []
-        self.details: List[str] = []
-        self.warnings: List[str] = []
-        self.successes = 0
-        self.failures = 0
-        self.botches = 0
-        self.target: Optional[int] = None
-        self.subtotal = 0.0
-        self.number_value: Optional[float] = None
-
-
-class DiceResult:
-    def __init__(self):
-        self.total = 0.0
-        self.dice_rolls: List[int] = []
-        self.all_rolls: List[int] = []
-        self.details: List[str] = []
-        self.comment = ""
-        self.exploded_rolls: List[int] = []
-        self.kept_dice: List[int] = []
-        self.dropped_dice: List[int] = []
-        self.rerolled = False
-        self.successes: int = 0
-        self.failures: int = 0
-        self.botches: int = 0
-        self.terms: List[DiceTermResult] = []
-        self.warnings: List[str] = []
-        self.expression = ""
-        self.formula_raw = ""
-        self.formula_expanded = ""
-        self.formula_index = 0
-        self.formula_count = 1
-        self.set_index = 0
-        self.set_count = 1
-        self.global_modifier: Optional[Tuple[str, float, float]] = None
-
-
-class DiceParser:
-    MAX_SIDES = 100
-    MAX_DICE_PER_SET = 100
-    MAX_SETS = 20
-    MAX_FORMULAS = 4
-    MAX_EXTRA_ROLLS = 100
-    MAX_INPUT_LENGTH = 2000
-    MAX_COMMENT_LENGTH = 500
-
-    def __init__(self):
-        self.aliases = {
-            "dndstats": "6 4d6 k3",
-            "attack": "1d20",
-            "+d20": "2d20 d1",
-            "-d20": "2d20 kl1",
-            "stat": "4d6 k3",
-            "save": "1d20 + 5",
-        }
-
-    def parse(self, command_str: str) -> List[DiceResult]:
-        if not command_str or not command_str.strip():
-            return []
-        if len(command_str) > self.MAX_INPUT_LENGTH:
-            raise ValueError(f"Формула слишком длинная: максимум {self.MAX_INPUT_LENGTH} символов.")
-
-        formulas = [part.strip() for part in command_str.split(';') if part.strip()]
-        if not formulas:
-            return []
-        if len(formulas) > self.MAX_FORMULAS:
-            raise ValueError(f"Можно указать максимум {self.MAX_FORMULAS} отдельные формулы через `;`.")
-
-        results: List[DiceResult] = []
-        formula_count = len(formulas)
-        for formula_index, raw_formula in enumerate(formulas):
-            parsed = self._parse_expression(raw_formula)
-            for result in parsed:
-                result.formula_raw = raw_formula
-                result.formula_index = formula_index
-                result.formula_count = formula_count
-            results.extend(parsed)
-
-        return results
-
-    def _expand_alias(self, expression: str) -> str:
-        parts = expression.strip().split(maxsplit=1)
-        if not parts:
-            return expression.strip()
-        alias = parts[0].lower()
-        if alias not in self.aliases:
-            return expression.strip()
-        tail = parts[1] if len(parts) > 1 else ""
-        return (self.aliases[alias] + (" " + tail if tail else "")).strip()
-
-    def _parse_expression(self, expression: str) -> List[DiceResult]:
-        comment = ""
-        if '!' in expression:
-            expression, comment = expression.split('!', 1)
-            expression = expression.strip()
-            comment = comment.strip()
-            if len(comment) > self.MAX_COMMENT_LENGTH:
-                raise ValueError(f"Комментарий после `!` должен быть не длиннее {self.MAX_COMMENT_LENGTH} символов.")
-        if not expression:
-            raise ValueError("Перед комментарием `!` должна быть формула броска.")
-
-        expanded = self._expand_alias(expression)
-
-        num_sets = 1
-        set_match = re.match(r'^(\d+)\s+(.+)$', expanded)
-        if set_match:
-            possible_sets = int(set_match.group(1))
-            remainder = set_match.group(2).strip()
-            first_token = remainder.split(maxsplit=1)[0].lower() if remainder else ""
-            if 'd' in remainder.lower() or first_token in self.aliases:
-                if not 1 <= possible_sets <= self.MAX_SETS:
-                    raise ValueError(f"Количество наборов должно быть от 1 до {self.MAX_SETS}.")
-                num_sets = possible_sets
-                expanded = self._expand_alias(remainder)
-
-        results: List[DiceResult] = []
-        for set_index in range(num_sets):
-            result = self._roll_once(expanded)
-            result.comment = comment
-            result.formula_expanded = expanded
-            result.set_index = set_index
-            result.set_count = num_sets
-            results.append(result)
-        return results
-
-    def _extract_global_modifier(self, expression: str) -> Tuple[str, Optional[Tuple[str, float]]]:
-        match = re.search(r'\s*([*/])\s*(-?\d+(?:\.\d+)?)\s*$', expression)
-        if not match:
-            return expression.strip(), None
-        core = expression[:match.start()].strip()
-        if not core:
-            raise ValueError("Перед `*` или `/` должна быть формула.")
-        return core, (match.group(1), float(match.group(2)))
-
-    def _split_additive_terms(self, expression: str) -> List[Tuple[int, str]]:
-        if not expression.strip():
-            raise ValueError("Пустая формула броска.")
-
-        terms: List[Tuple[int, str]] = []
-        current: List[str] = []
-        sign = 1
-        saw_content = False
-
-        for ch in expression:
-            if ch in '+-':
-                text = ''.join(current).strip()
-                if text:
-                    terms.append((sign, text))
-                    current = []
-                    sign = 1 if ch == '+' else -1
-                    saw_content = True
-                elif not saw_content and not terms:
-                    sign = 1 if ch == '+' else -1
-                    saw_content = True
-                else:
-                    raise ValueError("Некорректная последовательность `+`/`-` в формуле.")
-            else:
-                current.append(ch)
-                if not ch.isspace():
-                    saw_content = True
-
-        text = ''.join(current).strip()
-        if not text:
-            raise ValueError("Формула не может заканчиваться оператором `+` или `-`.")
-        terms.append((sign, text))
-        return terms
-
-    def _parse_flags(self, tail: str, num_sides: int) -> Dict[str, Tuple[str, int]]:
-        flags: Dict[str, Tuple[str, int]] = {}
-        pos = 0
-        pattern = re.compile(r'(ie|ir|kh|kl|dh|dl|e|r|k|d|t)\s*(\d+)?', re.IGNORECASE)
-        category_for = {
-            'r': 'reroll', 'ir': 'reroll',
-            'e': 'explode', 'ie': 'explode',
-            'k': 'keepdrop', 'kh': 'keepdrop', 'kl': 'keepdrop',
-            'd': 'keepdrop', 'dl': 'keepdrop', 'dh': 'keepdrop',
-            't': 'target',
-        }
-
-        while pos < len(tail):
-            while pos < len(tail) and tail[pos].isspace():
-                pos += 1
-            if pos >= len(tail):
-                break
-            match = pattern.match(tail, pos)
-            if not match:
-                fragment = tail[pos:].strip()
-                raise ValueError(f"Не понял часть формулы: `{fragment}`.")
-            end = match.end()
-            if end < len(tail) and not tail[end].isspace():
-                fragment = tail[pos:].strip()
-                raise ValueError(f"Не понял часть формулы: `{fragment}`.")
-
-            flag = match.group(1).lower()
-            category = category_for[flag]
-            if category in flags:
-                raise ValueError(f"Нельзя указывать два модификатора одного типа в одном кубике: `{tail.strip()}`.")
-
-            default_value = num_sides if category in {'explode', 'target'} else 1
-            value = int(match.group(2)) if match.group(2) is not None else default_value
-            if category in {'reroll', 'explode', 'target'} and not 1 <= value <= num_sides:
-                raise ValueError(f"Значение `{flag}{value}` должно быть от 1 до {num_sides} для d{num_sides}.")
-            if flag == 'ir' and value >= num_sides:
-                raise ValueError(f"`ir{value}` для d{num_sides} никогда не сможет завершиться: порог должен быть ниже {num_sides}.")
-
-            flags[category] = (flag, value)
-            pos = end
-
-        return flags
-
-    def _parse_term(self, text: str, sign: int) -> DiceTermResult:
-        term = DiceTermResult(text, sign)
-        number_match = re.fullmatch(r'\d+(?:\.\d+)?', text.strip())
-        if number_match:
-            term.kind = "number"
-            term.number_value = float(number_match.group(0))
-            term.subtotal = term.number_value
-            return term
-
-        dice_match = re.fullmatch(r'(\d*)d(\d+)(.*)', text.strip(), re.IGNORECASE)
-        if not dice_match:
-            raise ValueError(f"Не удалось разобрать часть `{text}`. Используйте вид `XdY`, число или их сумму.")
-
-        num_dice = int(dice_match.group(1) or 1)
-        num_sides = int(dice_match.group(2))
-        if not 1 <= num_dice <= self.MAX_DICE_PER_SET:
-            raise ValueError(f"В одном кубиковом терме можно бросить от 1 до {self.MAX_DICE_PER_SET} кубиков.")
-        if not 2 <= num_sides <= self.MAX_SIDES:
-            raise ValueError(f"Количество граней должно быть от 2 до {self.MAX_SIDES}.")
-
-        term.num_dice = num_dice
-        term.num_sides = num_sides
-        flags = self._parse_flags(dice_match.group(3), num_sides)
-
-        rolls = [random.randint(1, num_sides) for _ in range(num_dice)]
-        term.base_rolls = rolls.copy()
-        term.all_rolls = rolls.copy()
-        working_rolls = rolls.copy()
-
-        reroll = flags.get('reroll')
-        if reroll:
-            flag, threshold = reroll
-            infinite = flag == 'ir'
-            budget = self.MAX_EXTRA_ROLLS
-            for index, original in enumerate(list(working_rolls)):
-                if original > threshold or budget <= 0:
-                    continue
-                sequence: List[int] = []
-                while working_rolls[index] <= threshold and budget > 0:
-                    new_value = random.randint(1, num_sides)
-                    working_rolls[index] = new_value
-                    term.all_rolls.append(new_value)
-                    sequence.append(new_value)
-                    budget -= 1
-                    if not infinite:
-                        break
-                if sequence:
-                    term.reroll_sequences.append((index, sequence))
-            if budget == 0 and infinite and any(value <= threshold for value in working_rolls):
-                term.warnings.append(f"Достигнут защитный лимит {self.MAX_EXTRA_ROLLS} дополнительных перебросов.")
-            if term.reroll_sequences:
-                count = sum(len(seq) for _, seq in term.reroll_sequences)
-                term.details.append(f"переброс ≤{threshold}: {count}")
-
-        explode = flags.get('explode')
-        if explode:
-            flag, threshold = explode
-            infinite = flag == 'ie'
-            to_check = list(working_rolls)
-            budget = self.MAX_EXTRA_ROLLS
-            while to_check and budget > 0:
-                current = to_check.pop(0)
-                if current >= threshold:
-                    new_roll = random.randint(1, num_sides)
-                    working_rolls.append(new_roll)
-                    term.all_rolls.append(new_roll)
-                    term.exploded_rolls.append(new_roll)
-                    budget -= 1
-                    if infinite and new_roll >= threshold:
-                        to_check.append(new_roll)
-            if budget == 0 and infinite and to_check:
-                term.warnings.append(f"Достигнут защитный лимит {self.MAX_EXTRA_ROLLS} дополнительных взрывов.")
-            if term.exploded_rolls:
-                term.details.append(f"взрыв ≥{threshold}: +{len(term.exploded_rolls)}")
-
-        selected_rolls = working_rolls.copy()
-        keepdrop = flags.get('keepdrop')
-        if keepdrop:
-            flag, amount = keepdrop
-            if amount > len(selected_rolls):
-                raise ValueError(
-                    f"`{flag}{amount}` нельзя применить: после перебросов/взрывов доступно только {len(selected_rolls)} кубиков."
-                )
-            indexed = list(enumerate(selected_rolls))
-            if flag in ('k', 'kh'):
-                keep_indexes = {
-                    idx for idx, _ in sorted(indexed, key=lambda x: x[1], reverse=True)[:amount]
-                } if amount else set()
-                term.details.append(f"оставлено лучших: {amount}")
-            elif flag == 'kl':
-                keep_indexes = {
-                    idx for idx, _ in sorted(indexed, key=lambda x: x[1])[:amount]
-                } if amount else set()
-                term.details.append(f"оставлено худших: {amount}")
-            elif flag in ('d', 'dl'):
-                drop_indexes = {
-                    idx for idx, _ in sorted(indexed, key=lambda x: x[1])[:amount]
-                } if amount else set()
-                keep_indexes = {idx for idx, _ in indexed if idx not in drop_indexes}
-                term.details.append(f"сброшено худших: {amount}")
-            else:  # dh
-                drop_indexes = {
-                    idx for idx, _ in sorted(indexed, key=lambda x: x[1], reverse=True)[:amount]
-                } if amount else set()
-                keep_indexes = {idx for idx, _ in indexed if idx not in drop_indexes}
-                term.details.append(f"сброшено лучших: {amount}")
-
-            term.kept_dice = [value for idx, value in indexed if idx in keep_indexes]
-            term.dropped_dice = [value for idx, value in indexed if idx not in keep_indexes]
-            selected_rolls = term.kept_dice.copy()
-
-        term.final_rolls = selected_rolls.copy()
-
-        target = flags.get('target')
-        if target:
-            _, target_value = target
-            term.target = target_value
-            term.successes = sum(1 for value in selected_rolls if value >= target_value)
-            term.failures = len(selected_rolls) - term.successes
-            term.botches = sum(1 for value in selected_rolls if value == 1)
-            term.subtotal = float(term.successes)
-            term.details.append(
-                f"цель ≥{target_value}: {term.successes} успех., {term.failures} провал."
-            )
-        else:
-            term.subtotal = float(sum(selected_rolls))
-
-        return term
-
-    def _roll_once(self, expression: str) -> DiceResult:
-        res = DiceResult()
-        res.expression = expression.strip()
-        core_expression, global_modifier = self._extract_global_modifier(res.expression)
-        additive_terms = self._split_additive_terms(core_expression)
-
-        parsed_terms: List[DiceTermResult] = []
-        total_base_dice = 0
-        for sign, text in additive_terms:
-            term = self._parse_term(text, sign)
-            if term.kind == 'dice':
-                total_base_dice += term.num_dice
-            parsed_terms.append(term)
-
-        if total_base_dice > self.MAX_DICE_PER_SET:
-            raise ValueError(
-                f"В одном наборе можно бросить максимум {self.MAX_DICE_PER_SET} базовых кубиков суммарно."
-            )
-
-        res.terms = parsed_terms
-        res.total = sum(term.sign * term.subtotal for term in parsed_terms)
-
-        if global_modifier:
-            op, value = global_modifier
-            before = res.total
-            if op == '*':
-                res.total *= value
-                res.global_modifier = (op, value, before)
-            elif value == 0:
-                res.warnings.append("Деление на ноль пропущено; итог оставлен без изменения.")
-            else:
-                res.total /= value
-                res.global_modifier = (op, value, before)
-
-        for term in parsed_terms:
-            if term.kind != 'dice':
-                continue
-            res.dice_rolls.extend(term.final_rolls)
-            res.all_rolls.extend(term.all_rolls)
-            res.exploded_rolls.extend(term.exploded_rolls)
-            res.kept_dice.extend(term.kept_dice)
-            res.dropped_dice.extend(term.dropped_dice)
-            res.rerolled = res.rerolled or bool(term.reroll_sequences)
-            res.successes += term.successes
-            res.failures += term.failures
-            res.botches += term.botches
-            res.warnings.extend(term.warnings)
-
-        return res
-
-    def get_help_text(self) -> str:
-        return """
-🎲 **Команда `/кубик` — продвинутая система бросков**
-
-**Базовые формулы:**
-• `XdY` — X кубиков с Y гранями: `2d6`
-• `1d6 + 1d4` — складывать разные типы кубиков в одном результате
-• `2d6 + 1d8 + 5` — кубики и обычные числовые модификаторы
-• `1d20 * 2` / `1d20 / 2` — умножить или разделить итог всей формулы
-• `N XdY` — N независимых наборов: `6 4d6 k3`
-• `A; B; C` — отдельные формулы; каждая выводится отдельно и не суммируется с соседними
-• `! текст` — комментарий к конкретной формуле
-
-**Модификаторы кубиков** *(относятся к кубику непосредственно перед ними)*:
-• `eZ` — один взрыв при результате ≥ Z: `3d6 e6`
-• `ieZ` — цепные взрывы
-• `kZ` / `khZ` — оставить Z лучших: `4d6 k3`
-• `klZ` — оставить Z худших
-• `dZ` / `dlZ` — сбросить Z худших
-• `dhZ` — сбросить Z лучших
-• `rZ` — один раз перебросить кубики ≤ Z
-• `irZ` — повторять переброс ≤ Z до выхода выше порога или защитного лимита
-• `tZ` — считать успехи при ≥ Z вместо суммы данного кубикового терма
-
-**Примеры:**
-• `1d6 + 1d4`
-• `4d6 k3 + 1d8`
-• `2d10 r2 + 1d6 e6 + 3`
-• `1d20 + 5; 2d6 + 1d4 ! урон`
-
-**Алиасы:**
-• `dndstats` — 6 наборов 4d6 k3
-• `attack` — 1d20
-• `+d20` — преимущество, 2d20 d1
-• `-d20` — помеха, 2d20 kl1
-• `stat` — 4d6 k3
-• `save` — 1d20 + 5
-
-**Ограничения:** до 100 базовых кубиков суммарно на набор, до 100 граней, до 20 наборов и до 4 формул через `;`.
-Неверные или неоднозначные части формулы теперь отклоняются с понятной причиной вместо молчаливого исправления.
-"""
-
-
 dice_engine = DiceParser()
 
 
@@ -1633,7 +983,10 @@ dice_engine = DiceParser()
 # 💬 КОМАНДЫ (СОБАЧИЙ СТИЛЬ)
 # ============================================================================
 
-def _queue_add(queue, seen, provider, model):
+
+def _queue_add(
+    queue: list[tuple[str, str]], seen: set[tuple[str, str]], provider: str | None, model: str | None
+) -> None:
     provider = normalize_provider_name(provider)
     model = str(model or "").strip()
     if not provider or is_model_excluded(provider, model):
@@ -1644,24 +997,26 @@ def _queue_add(queue, seen, provider, model):
         seen.add(key)
 
 
-def _queue_extend(queue, seen, combinations):
+def _queue_extend(
+    queue: list[tuple[str, str]], seen: set[tuple[str, str]], combinations: Iterable[tuple[str, str]]
+) -> None:
     for provider, model in combinations:
         _queue_add(queue, seen, provider, model)
 
 
-def _pending_route_keys():
+def _pending_route_keys() -> set[tuple[str, str]]:
     return {
         (normalize_provider_name(provider), str(model or "").strip())
         for provider, model in pending_test_manager.get_pending_models()
     }
 
 
-async def _build_model_queue(*, db_first: bool) -> List[Tuple[str, str]]:
+async def _build_model_queue(*, db_first: bool) -> list[tuple[str, str]]:
     """Общий конструктор очереди для /скажи и /анализ."""
-    queue = []
-    seen = set()
-    pending = pending_test_manager.get_pending_models()
-    db_models = db_manager.get_all_models() if SessionLocal else []
+    queue: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    pending = await asyncio.to_thread(pending_test_manager.get_pending_models)
+    db_models = await asyncio.to_thread(db_manager.get_all_models) if SessionLocal else []
 
     if db_first:
         _queue_extend(queue, seen, db_models)
@@ -1681,21 +1036,22 @@ async def _build_model_queue(*, db_first: bool) -> List[Tuple[str, str]]:
     return queue
 
 
-async def get_priority_queue():
+async def get_priority_queue() -> list[tuple[str, str]]:
     """Очередь /скажи: временные успехи → актуальные API → БД → G4F."""
     return await _build_model_queue(db_first=False)
 
 
-async def get_analysis_priority_queue():
+async def get_analysis_priority_queue() -> list[tuple[str, str]]:
     """Очередь /анализ: БД → временные успехи → актуальные API → G4F."""
     return await _build_model_queue(db_first=True)
 
 
 @bot.slash_command(name="скажи", description="Запрос к ИИ")
-async def slash_say(interaction: disnake.CommandInteraction,
-                    вопрос: str = commands.Param(min_length=1, description="Ваш вопрос или запрос"),
-                    прокси: str = commands.Param(choices=["Да", "Нет"], default="Нет",
-                                                 description="Использовать прокси")):
+async def slash_say(
+    interaction: ApplicationCommandInteraction,
+    вопрос: str = commands.Param(min_length=1, description="Ваш вопрос или запрос"),
+    прокси: str = commands.Param(choices=["Да", "Нет"], default="Нет", description="Использовать прокси"),
+) -> None:
     if not await check_access(interaction):
         return
 
@@ -1706,7 +1062,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
             title="🐕 ПсИИнка слушает...",
             description="*виляет хвостом* Сейчас прогавкаю ответ, хозяин! ⏳",
             color=0xFF8844,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         status_embed.add_field(name="📡 Статус", value="ПсИИнка принюхивается к нейросети...", inline=False)
         status_embed.set_footer(text="Может занять до 45 секунд 🐾")
@@ -1723,20 +1079,28 @@ async def slash_say(interaction: disnake.CommandInteraction,
         final_prov = "?"
         final_mod = "?"
         final_lat = 0.0
-        use_proxy = (прокси == "Да")
+        use_proxy = прокси == "Да"
         proxy_url = await get_random_proxy_async(use_proxy)
         proxy_display = "Да" if proxy_url else "Нет"
         used_temp_file = False
 
         for idx, (prov, mod) in enumerate(queue):
             try:
-                status_embed.description = f"*рычит на нейросети* Попытка {idx + 1}/{len(queue)}: `{prov}` / `{mod}`"
-                status_embed.set_field_at(0, name="📡 Статус", value=f"ПсИИнка лает на **{prov}**... 🐕", inline=False)
+                status_embed.description = (
+                    f"*рычит на нейросети* Попытка {idx + 1}/{len(queue)}: `{prov}` / `{mod}`"
+                )
+                status_embed.set_field_at(
+                    0, name="📡 Статус", value=f"ПсИИнка лает на **{prov}**... 🐕", inline=False
+                )
                 await msg.edit(embed=status_embed)
 
                 ok, ans, lat = await route_model_request(
-                    prov, mod, вопрос, timeout=45.0,
-                    system_prompt=system_prompt, proxy_url=proxy_url,
+                    prov,
+                    mod,
+                    вопрос,
+                    timeout=45.0,
+                    system_prompt=system_prompt,
+                    proxy_url=proxy_url,
                 )
 
                 if ok and ans and len(ans.strip()) > 0:  # ✅ Проверка на пустой ответ
@@ -1746,7 +1110,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
                     if (normalize_provider_name(prov), mod) in _pending_route_keys():
                         used_temp_file = True
                     if not used_temp_file and SessionLocal:
-                        db_manager.log_success(prov, mod, int(lat * 1000))
+                        await asyncio.to_thread(db_manager.log_success, prov, mod, int(lat * 1000))
                     break
 
             except Exception as e:
@@ -1762,18 +1126,20 @@ async def slash_say(interaction: disnake.CommandInteraction,
                 title="❌ ПсИИнка устал...",
                 description="*повесил уши* Ни одна нейросеть не ответила, хозяин... 🐕",
                 color=0xFF4444,
-                timestamp=datetime.now()
+                timestamp=datetime.now(),
             )
-            error_embed.add_field(name="💡 Что делать?",
-                                  value="• Проверь токены в .env 🔑\n• Проверь интернет 🌐\n• Попробуй позже 💤",
-                                  inline=False)
+            error_embed.add_field(
+                name="💡 Что делать?",
+                value="• Проверь токены в .env 🔑\n• Проверь интернет 🌐\n• Попробуй позже 💤",
+                inline=False,
+            )
             await msg.edit(embed=error_embed)
             return
 
         await msg.delete()
 
-        header_text = f"🐕 **ПсИИнка прогавкал ответ!**\n"
-        header_text += f"*виляет хвостом* Держи, хозяин:\n\n"
+        header_text = "🐕 **ПсИИнка прогавкал ответ!**\n"
+        header_text += "*виляет хвостом* Держи, хозяин:\n\n"
         header_text += f"📊 **Источник:** `{final_prov}` / `{final_mod}`\n"
         header_text += f"⏱ **Время:** `{final_lat:.2f}с` | 📏 **Длина:** `{len(final_response)} симв.`\n"
         header_text += f"🔀 **Прокси:** `{proxy_display}`\n"
@@ -1782,10 +1148,10 @@ async def slash_say(interaction: disnake.CommandInteraction,
         MAX_CHUNK_SIZE = 1900
         chunks = []
 
-        first_chunk = header_text + final_response[:MAX_CHUNK_SIZE - len(header_text)]
+        first_chunk = header_text + final_response[: MAX_CHUNK_SIZE - len(header_text)]
         chunks.append(first_chunk)
 
-        remaining = final_response[MAX_CHUNK_SIZE - len(header_text):]
+        remaining = final_response[MAX_CHUNK_SIZE - len(header_text) :]
         while remaining:
             chunks.append(remaining[:MAX_CHUNK_SIZE])
             remaining = remaining[MAX_CHUNK_SIZE:]
@@ -1796,7 +1162,7 @@ async def slash_say(interaction: disnake.CommandInteraction,
             await interaction.channel.send(chunks[i], reference=first_msg, mention_author=False)
 
     except Exception as e:
-        if 'semaphore_acquired' in locals() and semaphore_acquired:
+        if "semaphore_acquired" in locals() and semaphore_acquired:
             ai_semaphore.release()
         logger.error(f"Critical error in /say: {e}", exc_info=True)
         err_msg = f"❌ Гав! Ошибка: {str(e)[:100]}"
@@ -1806,305 +1172,91 @@ async def slash_say(interaction: disnake.CommandInteraction,
             await interaction.response.send_message(err_msg, ephemeral=True)
 
 
-def _dice_number(value: float) -> str:
-    if value == int(value):
-        return str(int(value))
-    return str(round(value, 2))
-
-
-def _dice_roll_list(values: List[int]) -> str:
-    return "[" + ", ".join(map(str, values)) + "]"
-
-
-def _dice_term_lines(term: DiceTermResult, is_first: bool = False) -> List[str]:
-    sign_text = "" if is_first and term.sign > 0 else ("+" if term.sign > 0 else "−")
-    label_prefix = f"{sign_text} " if sign_text else ""
-    if term.kind == "number":
-        value = _dice_number(term.number_value or 0.0)
-        contribution = _dice_number(term.sign * (term.number_value or 0.0))
-        return [f"🧮 `{label_prefix}{value}` → вклад **{contribution}**"]
-
-    lines = [f"🎲 `{label_prefix}{term.source}`: исходно `{_dice_roll_list(term.base_rolls)}`"]
-
-    if term.reroll_sequences:
-        rerolls = []
-        for die_index, sequence in term.reroll_sequences:
-            chain = [term.base_rolls[die_index], *sequence]
-            rerolls.append(f"#{die_index + 1} " + "→".join(map(str, chain)))
-        lines.append("↪️ перебросы: " + "; ".join(rerolls))
-
-    if term.exploded_rolls:
-        lines.append(f"💥 добавочные броски: `{_dice_roll_list(term.exploded_rolls)}`")
-
-    if term.kept_dice or term.dropped_dice:
-        lines.append(f"📌 засчитано: `{_dice_roll_list(term.final_rolls)}`")
-        if term.dropped_dice:
-            lines.append(f"🗑 отброшено: `{_dice_roll_list(term.dropped_dice)}`")
-    elif term.reroll_sequences or term.exploded_rolls:
-        lines.append(f"📌 после эффектов: `{_dice_roll_list(term.final_rolls)}`")
-
-    if term.target is not None:
-        lines.append(
-            f"🎯 цель ≥{term.target}: **{term.successes}** успех., {term.failures} провал., {term.botches} единиц"
-        )
-
-    if term.details:
-        lines.append("⚙️ " + "; ".join(term.details))
-
-    contribution = term.sign * term.subtotal
-    lines.append(f"➡️ вклад в формулу: **{_dice_number(contribution)}**")
-
-    for warning in term.warnings:
-        lines.append(f"⚠️ {warning}")
-    return lines
-
-
-def _dice_result_block(result: DiceResult) -> str:
-    lines = []
-    if result.set_count > 1:
-        lines.append(f"**Набор {result.set_index + 1}/{result.set_count}**")
-    else:
-        lines.append("**Результат**")
-
-    for term_index, term in enumerate(result.terms):
-        lines.extend(_dice_term_lines(term, is_first=(term_index == 0)))
-
-    if result.global_modifier:
-        op, value, before = result.global_modifier
-        lines.append(
-            f"🧮 итог до `{op}`: {_dice_number(before)} {op} {_dice_number(value)} = **{_dice_number(result.total)}**"
-        )
-
-    for warning in result.warnings:
-        if warning not in {warning for term in result.terms for warning in term.warnings}:
-            lines.append(f"⚠️ {warning}")
-
-    if result.comment:
-        lines.append(f"💬 _{result.comment}_")
-
-    lines.append(f"🏁 **Итог: {_dice_number(result.total)}**")
-    return "\n".join(lines)
-
-
-def _dice_paginate(header: str, blocks: List[str], max_chars: int = 3900) -> List[str]:
-    pages: List[str] = []
-    current = header.strip()
-    for block in blocks:
-        candidate = f"{current}\n\n{block}" if current else block
-        if len(candidate) <= max_chars:
-            current = candidate
-            continue
-        if current:
-            pages.append(current)
-        if len(block) <= max_chars:
-            current = block
-        else:
-            # Защитный fallback для крайне длинной цепочки перебросов/взрывов.
-            chunks = [block[i:i + max_chars] for i in range(0, len(block), max_chars)]
-            pages.extend(chunks[:-1])
-            current = chunks[-1]
-    if current:
-        pages.append(current)
-    return pages
-
-
 @bot.slash_command(name="кубик", description="Бросок кубиков")
-async def slash_cube(interaction: disnake.CommandInteraction,
-                     формула: Optional[str] = commands.Param(
-                         description="Формула броска (например: 1d6+1d4 или dndstats)", default=None)):
-    if not формула:
-        help_embed = disnake.Embed(
-            title="🎲 ПсИИнка: Справка по кубикам",
-            description=dice_engine.get_help_text(),
-            color=0xFF8844,
-            timestamp=datetime.now()
-        )
-        help_embed.set_footer(text="ПсИИнка бот | Dice Roller 🐾")
-        await interaction.response.send_message(embed=help_embed)
-        return
+async def slash_cube(
+    interaction: ApplicationCommandInteraction,
+    формула: str | None = commands.Param(
+        description="Формула броска (например: 1d6+1d4 или dndstats)", default=None
+    ),
+) -> None:
+    await respond_to_cube(interaction, формула, dice_engine)
 
-    await interaction.response.defer()
-
-    try:
-        results = dice_engine.parse(формула)
-        if not results:
-            raise ValueError("Не удалось разобрать формулу.")
-
-        grouped: Dict[int, List[DiceResult]] = {}
-        for result in results:
-            grouped.setdefault(result.formula_index, []).append(result)
-
-        for formula_index in sorted(grouped):
-            formula_results = grouped[formula_index]
-            first = formula_results[0]
-            header_lines = [f"*подбрасывает лапой* Формула: `{first.formula_raw}` 🐾"]
-            if first.formula_expanded and first.formula_expanded.strip() != first.formula_raw.split('!', 1)[0].strip():
-                header_lines.append(f"Разобрано как: `{first.formula_expanded}`")
-            header = "\n".join(header_lines)
-            blocks = [_dice_result_block(result) for result in formula_results]
-            pages = _dice_paginate(header, blocks)
-
-            for page_index, page in enumerate(pages):
-                title = f"🎲 Кубик — формула {formula_index + 1}/{first.formula_count}"
-                if len(pages) > 1:
-                    title += f" · стр. {page_index + 1}/{len(pages)}"
-                embed = disnake.Embed(
-                    title=title,
-                    description=page,
-                    color=0x00AAFF,
-                    timestamp=datetime.now(),
-                )
-                embed.set_footer(text="ПсИИнка бот | Dice Roller 🐾")
-                embed.check_limits()
-                # Каждая формула через `;` уходит отдельным сообщением и не суммируется с соседними.
-                await interaction.followup.send(embed=embed)
-
-    except ValueError as e:
-        shown_formula = формула if len(формула) <= 1200 else формула[:1197] + "..."
-        error_embed = disnake.Embed(
-            title="❌ ПсИИнка не понял формулу",
-            description=(
-                f"*склонил голову набок* Не могу разобрать: `{shown_formula}` 🐕\n\n"
-                f"**Причина:** {e}"
-            ),
-            color=0xFF4444,
-            timestamp=datetime.now(),
-        )
-        error_embed.add_field(
-            name="💡 Помощь",
-            value="Используй `/кубик` без параметров — я покажу синтаксис и примеры.",
-            inline=False,
-        )
-        await interaction.followup.send(embed=error_embed, ephemeral=True)
-    except Exception as e:
-        logger.error(f"Error in /cube: {e}", exc_info=True)
-        error_embed = disnake.Embed(
-            title="❌ Ошибка броска",
-            description="*ПсИИнка растерянно посмотрел на кубики.* Произошла внутренняя ошибка; она записана в лог.",
-            color=0xFF4444,
-            timestamp=datetime.now(),
-        )
-        await interaction.followup.send(embed=error_embed, ephemeral=True)
 
 @bot.slash_command(name="погавкай", description="Проверка пинга бота")
-async def slash_bark(interaction: disnake.CommandInteraction):
-    try:
-        ping_ms = round(bot.latency * 1000)
-        status = "🟢" if ping_ms < 100 else "🟡" if ping_ms < 300 else "🔴"
-
-        embed = disnake.Embed(
-            title="🐕 Гав! ПсИИнка на связи!",
-            description=f"{status} **Пинг:** `{ping_ms} мс` *тяв!*",
-            color=0x00FF88 if ping_ms < 100 else 0xFFAA00 if ping_ms < 300 else 0xFF4444,
-            timestamp=datetime.now()
-        )
-        embed.add_field(name="📊 Статус", value="Бот работает нормально *виляет хвостом*", inline=False)
-        embed.set_footer(text="ПсИИнка бот | Health Check 🐾")
-
-        await interaction.response.send_message(embed=embed)
-    except Exception as e:
-        logger.error(f"Error in /bark: {e}", exc_info=True)
-        await interaction.response.send_message(f"❌ Гав! Ошибка: {str(e)[:100]}", ephemeral=True)
+async def slash_bark(interaction: ApplicationCommandInteraction) -> None:
+    await respond_to_bark(interaction, bot)
 
 
 @bot.slash_command(name="статус", description="Статистика использования моделей")
-async def slash_status(interaction: disnake.CommandInteraction):
-    try:
-        if not await check_access(interaction): return
-        await interaction.response.defer()
-
-        top = db_manager.get_top_models(10)
-
-        embed = disnake.Embed(
-            title="📊 ПсИИнка отчитывается",
-            description="*виляет хвостом* Вот моя статистика, хозяин! 🐕",
-            color=0x00FF88,
-            timestamp=datetime.now()
-        )
-
-        if top:
-            stats_text = ""
-            for i, (p, m, lat) in enumerate(top, 1):
-                medal = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"][i - 1] if i <= 5 else f"{i}."
-                stats_text += f"{medal} `{p}` / `{m}` — `{lat}мс`\n"
-
-            embed.add_field(name="🏆 Топ-10 моделей", value=stats_text, inline=False)
-        else:
-            embed.add_field(name="📭 Данные", value="Нет записей. *Гавкни* `/скажи` для начала сбора статистики!",
-                            inline=False)
-
-        db_state = "✅ Подключена *гав!*" if db_manager.is_connected() else "⚠️ Отключена *скулит*"
-        data_state = "✅ Есть записи" if db_manager.has_data() else "📭 Записей пока нет"
-        embed.add_field(name="🔧 Режим", value=f"Экономия ресурсов (No Warmup)\nБД: {db_state}\nДанные: {data_state}", inline=False)
-        embed.set_footer(text="ПсИИнка бот | Statistics 🐾")
-
-        await interaction.edit_original_response(embed=embed)
-
-    except Exception as e:
-        logger.error(f"Error in /status: {e}", exc_info=True)
-        await interaction.followup.send(f"❌ Гав! Ошибка: {str(e)[:100]}", ephemeral=True)
+async def slash_status(interaction: ApplicationCommandInteraction) -> None:
+    await respond_to_status(interaction, check_access, db_manager)
 
 
 # ============================================================================
 # 🧪 ТЕСТИРОВАНИЕ (ОБНОВЛЁННОЕ — МАССОВОЕ ПО ПРОВАЙДЕРАМ)
 # ============================================================================
 
-async def test_provider_models(provider: str, models: list, prompt: str = TEST_PROMPT,
-                               timeout: float = 30.0, system_prompt: str = None,
-                               use_proxy: bool = False) -> List[Dict]:
+
+async def test_provider_models(
+    provider: str,
+    models: list,
+    prompt: str = TEST_PROMPT,
+    timeout: float = 30.0,
+    system_prompt: str | None = None,
+    use_proxy: bool = False,
+) -> list[dict]:
     """Универсальная функция для тестирования всех моделей провайдера"""
     results = []
 
     for model in models:
-        start = time.time()
         try:
             proxy_url = get_random_proxy(use_proxy) if use_proxy else None
 
             ok, ans, lat = await route_model_request(
-                provider, model, prompt, timeout=timeout,
-                system_prompt=system_prompt, proxy_url=proxy_url,
+                provider,
+                model,
+                prompt,
+                timeout=timeout,
+                system_prompt=system_prompt,
+                proxy_url=proxy_url,
             )
 
             result = {
-                'model': model,
-                'success': ok,
-                'latency': round(lat, 2),
-                'error': ans if not ok else None,
-                'answer_preview': ans[:100] if ok and ans else None
+                "model": model,
+                "success": ok,
+                "latency": round(lat, 2),
+                "error": ans if not ok else None,
+                "answer_preview": ans[:100] if ok and ans else None,
             }
 
             # Логгируем успешные тесты
             if ok:
-                pending_test_manager.log_success(provider, model, int(lat * 1000))
+                await asyncio.to_thread(pending_test_manager.log_success, provider, model, int(lat * 1000))
 
             results.append(result)
             await asyncio.sleep(0.3)  # Небольшая пауза между запросами
 
-        except Exception as e:
-            results.append({
-                'model': model,
-                'success': False,
-                'latency': 0,
-                'error': str(e)[:80],
-                'answer_preview': None
-            })
+        except Exception as e:  # noqa: BLE001 - model health probe results retain all errors
+            results.append(
+                {"model": model, "success": False, "latency": 0, "error": str(e)[:80], "answer_preview": None}
+            )
 
     return results
 
 
-def format_test_results(provider: str, results: List[Dict], max_show: int = 10) -> str:
+def format_test_results(provider: str, results: list[dict], max_show: int = 10) -> str:
     """Форматирует результаты тестов для вывода в embed"""
     if not results:
         return "❌ Нет данных *скулит*"
 
-    successful = [r for r in results if r['success']]
-    failed = [r for r in results if not r['success']]
+    successful = [r for r in results if r["success"]]
+    failed = [r for r in results if not r["success"]]
 
     output = f"**Всего:** `{len(results)}` | ✅ Успешно: `{len(successful)}` | ❌ Ошибок: `{len(failed)}`\n\n"
 
     # Показываем топ быстрых успешных
     if successful:
-        successful_sorted = sorted(successful, key=lambda x: x['latency'] if x['latency'] else 999)
+        successful_sorted = sorted(successful, key=lambda x: x["latency"] if x["latency"] else 999)
         output += "**🏆 Топ быстрых:**\n"
         for r in successful_sorted[:max_show]:
             emoji = "🥇" if r == successful_sorted[0] else "•"
@@ -2125,11 +1277,11 @@ def format_test_results(provider: str, results: List[Dict], max_show: int = 10) 
 
 
 class TestModeView(disnake.ui.View):
-    def __init__(self, ctx=None):
+    def __init__(self, ctx: object | None = None) -> None:
         super().__init__(timeout=None)
 
     @disnake.ui.button(label="⚡ Тест ВСЕ G4F", style=disnake.ButtonStyle.green, custom_id="test_all_g4f")
-    async def all_g4f_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
+    async def all_g4f_button(self, button: disnake.ui.Button, interaction: MessageInteraction) -> None:
         await interaction.response.defer()
         log_analysis("TEST: All G4F providers started", "INFO")
         start = time.time()
@@ -2145,35 +1297,35 @@ class TestModeView(disnake.ui.View):
             title="🔄 ПсИИнка тестирует G4F...",
             description=f"*нюхает* Всего моделей: `{len(all_combinations)}` 🐕",
             color=0xFF8844,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
         progress_embed.add_field(name="Статус", value="Запуск тестов...", inline=False)
-        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True)
+        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True, wait=True)
 
         all_results = []
         semaphore = asyncio.Semaphore(3)  # Ограничение параллельных запросов
 
-        async def test_single(prov, mod):
+        async def test_single(prov: str, mod: str) -> dict[str, Any]:
             async with semaphore:
                 try:
                     ok, ans, lat = await make_g4f_request(prov, mod, TEST_PROMPT, timeout=45.0)
                     if ok:
-                        pending_test_manager.log_success(prov, mod, int(lat * 1000))
+                        await asyncio.to_thread(pending_test_manager.log_success, prov, mod, int(lat * 1000))
                     return {
-                        'provider': prov,
-                        'model': mod,
-                        'success': ok,
-                        'latency': round(lat, 2) if lat else 0,
-                        'error': ans if not ok else None
+                        "provider": prov,
+                        "model": mod,
+                        "success": ok,
+                        "latency": round(lat, 2) if lat else 0,
+                        "error": ans if not ok else None,
                     }
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - G4F model probe retains errors
                     return {
-                        'provider': prov,
-                        'model': mod,
-                        'success': False,
-                        'latency': 0,
-                        'error': str(e)[:80]
+                        "provider": prov,
+                        "model": mod,
+                        "success": False,
+                        "latency": 0,
+                        "error": str(e)[:80],
                     }
 
         tasks = [test_single(p, m) for p, m in all_combinations]
@@ -2186,21 +1338,24 @@ class TestModeView(disnake.ui.View):
 
             try:
                 progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
-                succ = len([r for r in all_results if r['success']])
-                progress_embed.set_field_at(1, name="Статус",
-                                            value=f"*лает на* `{res['provider']}`/`{res['model']}` 🐕\n✅ Успешно: `{succ}`",
-                                            inline=False)
+                succ = len([r for r in all_results if r["success"]])
+                progress_embed.set_field_at(
+                    1,
+                    name="Статус",
+                    value=f"*лает на* `{res['provider']}`/`{res['model']}` 🐕\n✅ Успешно: `{succ}`",
+                    inline=False,
+                )
                 await progress_msg.edit(embed=progress_embed)
-            except:
-                pass  # Игнорируем ошибки обновления сообщения
+            except disnake.HTTPException as exc:
+                logger.warning("Не удалось обновить прогресс G4F-тестирования: %s", exc)
 
         elapsed = time.time() - start
-        successful = [r for r in all_results if r['success']]
+        successful = [r for r in all_results if r["success"]]
 
         # Группируем результаты по провайдерам
-        by_provider = {}
+        by_provider: dict[str, list[dict[str, Any]]] = {}
         for r in all_results:
-            prov = r['provider']
+            prov = r["provider"]
             if prov not in by_provider:
                 by_provider[prov] = []
             by_provider[prov].append(r)
@@ -2209,34 +1364,34 @@ class TestModeView(disnake.ui.View):
             title="✅ ПсИИнка закончил тест G4F!",
             description=f"*виляет хвостом* Общее время: `{elapsed:.0f}с` 🐕\n📊 **Итого:** `{len(successful)}/{len(all_results)}` успешных",
             color=0x00FF88 if successful else 0xFF4444,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
 
         # Статистика по каждому провайдеру
         for prov, prov_results in sorted(by_provider.items()):
-            succ = len([r for r in prov_results if r['success']])
+            succ = len([r for r in prov_results if r["success"]])
             if succ > 0:
-                avg_lat = round(sum(r['latency'] for r in prov_results if r['success']) / succ, 2)
+                avg_lat = round(sum(r["latency"] for r in prov_results if r["success"]) / succ, 2)
                 final_embed.add_field(
                     name=f"📡 {prov} ({succ}/{len(prov_results)})",
                     value=f"⏱ Ср. время: `{avg_lat}с`",
-                    inline=True
+                    inline=True,
                 )
             else:
                 final_embed.add_field(
-                    name=f"📡 {prov} (0/{len(prov_results)})",
-                    value="❌ Все неудачны",
-                    inline=True
+                    name=f"📡 {prov} (0/{len(prov_results)})", value="❌ Все неудачны", inline=True
                 )
 
         # Топ-5 самых быстрых моделей
         if successful:
-            top_fast = sorted(successful, key=lambda x: x['latency'] if x['latency'] else 999)[:5]
-            top_text = "\n".join([f"• `{r['provider']}`/`{r['model']}` — `{r['latency']}с`" for r in top_fast])
+            top_fast = sorted(successful, key=lambda x: x["latency"] if x["latency"] else 999)[:5]
+            top_text = "\n".join(
+                [f"• `{r['provider']}`/`{r['model']}` — `{r['latency']}с`" for r in top_fast]
+            )
             final_embed.add_field(name="🏆 Топ-5 быстрых", value=top_text, inline=False)
 
         # Если есть ошибки — покажем первые 3
-        failed = [r for r in all_results if not r['success']]
+        failed = [r for r in all_results if not r["success"]]
         if failed:
             err_text = "\n".join([f"• `{r['provider']}`/`{r['model']}`: {r['error']}" for r in failed[:3]])
             if len(failed) > 3:
@@ -2247,7 +1402,7 @@ class TestModeView(disnake.ui.View):
         log_analysis(f"TEST G4F All: {len(successful)}/{len(all_results)} success, {elapsed:.1f}s", "INFO")
 
     @disnake.ui.button(label="🦅 Тест ВСЕ Groq", style=disnake.ButtonStyle.blurple, custom_id="test_all_groq")
-    async def all_groq_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
+    async def all_groq_button(self, button: disnake.ui.Button, interaction: MessageInteraction) -> None:
         await interaction.response.defer()
         log_analysis("TEST: All Groq models started", "INFO")
         start = time.time()
@@ -2263,13 +1418,13 @@ class TestModeView(disnake.ui.View):
             title="🔄 ПсИИнка тестирует Groq...",
             description=f"*нюхает* Всего моделей: `{len(all_combinations)}` 🐕",
             color=0x5865F2,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
         progress_embed.add_field(name="Статус", value="Запуск тестов...", inline=False)
-        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True)
+        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True, wait=True)
 
-        all_results = []
+        all_results: list[ModelProbeResult] = []
 
         for i, (prov, model) in enumerate(all_combinations):
             try:
@@ -2279,17 +1434,17 @@ class TestModeView(disnake.ui.View):
                     TEST_PROMPT,
                     timeout=45.0,
                     system_prompt="Ты тестовый ИИ.",
-                    return_model_name=False
+                    return_model_name=False,
                 )
 
                 if ok:
-                    pending_test_manager.log_success(prov, model, int(lat * 1000))
+                    await asyncio.to_thread(pending_test_manager.log_success, prov, model, int(lat * 1000))
 
-                result = {
-                    'model': model,
-                    'success': ok,
-                    'latency': round(lat, 2) if lat else 0,
-                    'error': ans if not ok else None
+                result: ModelProbeResult = {
+                    "model": model,
+                    "success": ok,
+                    "latency": round(lat, 2) if lat else 0,
+                    "error": ans if not ok else None,
                 }
                 all_results.append(result)
 
@@ -2298,48 +1453,49 @@ class TestModeView(disnake.ui.View):
                 bar = create_progress_bar(i + 1, len(all_combinations))
                 progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
                 status = "✅" if ok else "❌"
-                progress_embed.set_field_at(1, name="Статус", value=f"*лает на* `{model}` {status} 🐕", inline=False)
+                progress_embed.set_field_at(
+                    1, name="Статус", value=f"*лает на* `{model}` {status} 🐕", inline=False
+                )
                 await progress_msg.edit(embed=progress_embed)
 
                 await asyncio.sleep(0.3)  # Пауза между запросами
 
-            except Exception as e:
-                all_results.append({
-                    'model': model,
-                    'success': False,
-                    'latency': 0,
-                    'error': str(e)[:80]
-                })
+            except Exception as e:  # noqa: BLE001 - model probe counts failures
+                all_results.append({"model": model, "success": False, "latency": 0, "error": str(e)[:80]})
 
         elapsed = time.time() - start
-        successful = [r for r in all_results if r['success']]
+        successful = [r for r in all_results if r["success"]]
 
         final_embed = disnake.Embed(
             title="✅ ПсИИнка закончил тест Groq!",
             description=f"*виляет хвостом* Общее время: `{elapsed:.0f}с` 🐕\n📊 **Итого:** `{len(successful)}/{len(all_combinations)}` успешных",
             color=0x00FF88 if successful else 0xFF4444,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
 
         # Детали по каждой модели (сортируем: успешные с быстрым временем вверху)
         details = ""
-        for r in sorted(all_results, key=lambda x: (not x['success'], x['latency'] if x['success'] else 999)):
-            emoji = "✅" if r['success'] else "❌"
-            latency_str = f"`{r['latency']}с`" if r['success'] and r['latency'] > 0 else "—"
+        for r in sorted(all_results, key=lambda x: (not x["success"], x["latency"] if x["success"] else 999)):
+            emoji = "✅" if r["success"] else "❌"
+            latency_str = f"`{r['latency']}с`" if r["success"] and r["latency"] > 0 else "—"
             details += f"{emoji} `{r['model']}` — {latency_str}\n"
 
         final_embed.add_field(name="📋 Результаты по моделям", value=details or "❌ Нет данных", inline=False)
 
         if successful:
-            top_fast = sorted(successful, key=lambda x: x['latency'] if x['latency'] else 999)[:3]
+            top_fast = sorted(successful, key=lambda x: x["latency"] if x["latency"] else 999)[:3]
             top_text = "\n".join([f"• `{r['model']}` — `{r['latency']}с`" for r in top_fast])
             final_embed.add_field(name="🏆 Топ-3 быстрых", value=top_text, inline=True)
 
         await progress_msg.edit(embed=final_embed)
-        log_analysis(f"TEST Groq All: {len(successful)}/{len(all_combinations)} success, {elapsed:.1f}s", "INFO")
+        log_analysis(
+            f"TEST Groq All: {len(successful)}/{len(all_combinations)} success, {elapsed:.1f}s", "INFO"
+        )
 
-    @disnake.ui.button(label="🌐 Тест ВСЕ OpenRouter", style=disnake.ButtonStyle.gray, custom_id="test_all_openrouter")
-    async def all_openrouter_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
+    @disnake.ui.button(
+        label="🌐 Тест ВСЕ OpenRouter", style=disnake.ButtonStyle.gray, custom_id="test_all_openrouter"
+    )
+    async def all_openrouter_button(self, button: disnake.ui.Button, interaction: MessageInteraction) -> None:
         await interaction.response.defer()
         log_analysis("TEST: All OpenRouter models started", "INFO")
         start = time.time()
@@ -2348,39 +1504,38 @@ class TestModeView(disnake.ui.View):
         all_combinations = await get_all_openrouter_combinations_live()
 
         if not all_combinations:
-            await interaction.followup.send("❌ Гав! Нет моделей OpenRouter для теста. *нюхает*", ephemeral=True)
+            await interaction.followup.send(
+                "❌ Гав! Нет моделей OpenRouter для теста. *нюхает*", ephemeral=True
+            )
             return
 
         progress_embed = disnake.Embed(
             title="🔄 ПсИИнка тестирует OpenRouter...",
             description=f"*нюхает* Всего моделей: `{len(all_combinations)}` 🐕",
             color=0x95A5A6,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
         progress_embed.add_field(name="Статус", value="Запуск тестов...", inline=False)
-        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True)
+        progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True, wait=True)
 
-        all_results = []
+        all_results: list[ModelProbeResult] = []
 
         for i, (prov, model) in enumerate(all_combinations):
             try:
                 # ✅ Передаём правильные заголовки: X-Title вместо X-OpenRouter-Title [[51]]
                 ok, ans, lat = await test_openrouter_single(
-                    [model],
-                    TEST_PROMPT,
-                    timeout=45.0,
-                    system_prompt="Ты тестовый ИИ."
+                    [model], TEST_PROMPT, timeout=45.0, system_prompt="Ты тестовый ИИ."
                 )
 
                 if ok:
-                    pending_test_manager.log_success(prov, model, int(lat * 1000))
+                    await asyncio.to_thread(pending_test_manager.log_success, prov, model, int(lat * 1000))
 
-                result = {
-                    'model': model,
-                    'success': ok,
-                    'latency': round(lat, 2) if lat else 0,
-                    'error': ans if not ok else None
+                result: ModelProbeResult = {
+                    "model": model,
+                    "success": ok,
+                    "latency": round(lat, 2) if lat else 0,
+                    "error": ans if not ok else None,
                 }
                 all_results.append(result)
 
@@ -2389,56 +1544,56 @@ class TestModeView(disnake.ui.View):
                 bar = create_progress_bar(i + 1, len(all_combinations))
                 progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
                 status = "✅" if ok else "❌"
-                progress_embed.set_field_at(1, name="Статус", value=f"*лает на* `{model}` {status} 🐕", inline=False)
+                progress_embed.set_field_at(
+                    1, name="Статус", value=f"*лает на* `{model}` {status} 🐕", inline=False
+                )
                 await progress_msg.edit(embed=progress_embed)
 
                 await asyncio.sleep(0.3)  # Пауза между запросами
 
-            except Exception as e:
-                all_results.append({
-                    'model': model,
-                    'success': False,
-                    'latency': 0,
-                    'error': str(e)[:80]
-                })
+            except Exception as e:  # noqa: BLE001 - model probe counts failures
+                all_results.append({"model": model, "success": False, "latency": 0, "error": str(e)[:80]})
 
         elapsed = time.time() - start
-        successful = [r for r in all_results if r['success']]
+        successful = [r for r in all_results if r["success"]]
 
         final_embed = disnake.Embed(
             title="✅ ПсИИнка закончил тест OpenRouter!",
             description=f"*виляет хвостом* Общее время: `{elapsed:.0f}с` 🐕\n📊 **Итого:** `{len(successful)}/{len(all_combinations)}` успешных",
             color=0x00FF88 if successful else 0xFF4444,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
 
         # Детали по каждой модели
         details = ""
-        for r in sorted(all_results, key=lambda x: (not x['success'], x['latency'] if x['success'] else 999)):
-            emoji = "✅" if r['success'] else "❌"
-            latency_str = f"`{r['latency']}с`" if r['success'] and r['latency'] > 0 else "—"
+        for r in sorted(all_results, key=lambda x: (not x["success"], x["latency"] if x["success"] else 999)):
+            emoji = "✅" if r["success"] else "❌"
+            latency_str = f"`{r['latency']}с`" if r["success"] and r["latency"] > 0 else "—"
             details += f"{emoji} `{r['model']}` — {latency_str}\n"
 
         final_embed.add_field(name="📋 Результаты по моделям", value=details or "❌ Нет данных", inline=False)
 
         if successful:
-            top_fast = sorted(successful, key=lambda x: x['latency'] if x['latency'] else 999)[:3]
+            top_fast = sorted(successful, key=lambda x: x["latency"] if x["latency"] else 999)[:3]
             top_text = "\n".join([f"• `{r['model']}` — `{r['latency']}с`" for r in top_fast])
             final_embed.add_field(name="🏆 Топ-3 быстрых", value=top_text, inline=True)
 
         await progress_msg.edit(embed=final_embed)
-        log_analysis(f"TEST OpenRouter All: {len(successful)}/{len(all_combinations)} success, {elapsed:.1f}s", "INFO")
+        log_analysis(
+            f"TEST OpenRouter All: {len(successful)}/{len(all_combinations)} success, {elapsed:.1f}s", "INFO"
+        )
 
     @disnake.ui.button(label="🔍 Полное сканирование", style=disnake.ButtonStyle.red, custom_id="test_full")
-    async def all_button(self, button: disnake.ui.Button, interaction: disnake.MessageInteraction):
+    async def all_button(self, button: disnake.ui.Button, interaction: MessageInteraction) -> None:
         await interaction.response.defer()
-        await interaction.followup.send("🔄 ПсИИнка начинает полное сканирование... *нюхает* (это займёт время) 🐕",
-                                        ephemeral=True)
+        await interaction.followup.send(
+            "🔄 ПсИИнка начинает полное сканирование... *нюхает* (это займёт время) 🐕", ephemeral=True
+        )
         asyncio.create_task(run_mass_test(interaction.channel))
 
 
 @bot.slash_command(name="тест", description="Тестирование провайдеров и моделей")
-async def slash_test(interaction: disnake.CommandInteraction):
+async def slash_test(interaction: ApplicationCommandInteraction) -> None:
     try:
         if not await check_access(interaction):
             return
@@ -2469,11 +1624,11 @@ async def slash_test(interaction: disnake.CommandInteraction):
    └─ Время: ~10-20 минут (зависит от стабильности провайдеров)
    └─ Режим: параллельные запросы (×3 для G4F) + прогресс-бар
 
-> ℹ️ Все тесты используют каскадный перебор, логируют успехи в БД 
+> ℹ️ Все тесты используют каскадный перебор, логируют успехи в БД
 > и поддерживают прокси для обхода ограничений.
 """,
             color=0xFF8844,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         embed.add_field(
             name="📊 Что проверяется",
@@ -2483,7 +1638,7 @@ async def slash_test(interaction: disnake.CommandInteraction):
                 "• 🤖 Работоспособность моделей\n"
                 "• 🔀 Обход блокировок (прокси)"
             ),
-            inline=False
+            inline=False,
         )
         embed.add_field(
             name="💾 Сохранение результатов",
@@ -2492,7 +1647,7 @@ async def slash_test(interaction: disnake.CommandInteraction):
                 "🔧 Команда `/записать_тест` → БД Neon\n"
                 "📈 Команда `/статус` → топ моделей"
             ),
-            inline=False
+            inline=False,
         )
         embed.set_footer(text="ПсИИнка бот | Diagnostics 🐾")
 
@@ -2512,12 +1667,13 @@ async def slash_test(interaction: disnake.CommandInteraction):
 # 📊 МАССОВОЕ ТЕСТИРОВАНИЕ (СОБАЧИЙ СТИЛЬ)
 # ============================================================================
 
-async def run_mass_test(channel):
+
+async def run_mass_test(channel: disnake.abc.Messageable) -> None:
     progress_embed = disnake.Embed(
         title="🔄 ПсИИнка сканирует...",
         description="*нюхает* G4F (Deep) + Groq + OpenRouter... 🐕",
         color=0xFF8844,
-        timestamp=datetime.now()
+        timestamp=datetime.now(),
     )
     progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
     progress_embed.add_field(name="📊 Статистика", value="✅ Успешно: 0\n❌ Ошибок: 0", inline=False)
@@ -2531,21 +1687,36 @@ async def run_mass_test(channel):
     total = len(combinations)
     semaphore = asyncio.Semaphore(5)
 
-    async def test_combo(provider, model):
+    async def test_combo(provider: str, model: str) -> dict[str, Any]:
         async with semaphore:
-            start = time.time()
             try:
                 ok, ans, lat = await route_model_request(
-                    provider, model, TEST_PROMPT, timeout=45.0,
+                    provider,
+                    model,
+                    TEST_PROMPT,
+                    timeout=45.0,
                 )
 
                 if ok:
-                    pending_test_manager.log_success(provider, model, int(lat * 1000))
+                    await asyncio.to_thread(
+                        pending_test_manager.log_success, provider, model, int(lat * 1000)
+                    )
 
-                return {'provider': provider, 'model': model, 'success': ok, 'time': lat,
-                        'error': ans if not ok else None}
-            except Exception as e:
-                return {'provider': provider, 'model': model, 'success': False, 'time': 0, 'error': str(e)[:50]}
+                return {
+                    "provider": provider,
+                    "model": model,
+                    "success": ok,
+                    "time": lat,
+                    "error": ans if not ok else None,
+                }
+            except Exception as e:  # noqa: BLE001 - mass probe keeps other tasks alive
+                return {
+                    "provider": provider,
+                    "model": model,
+                    "success": False,
+                    "time": 0,
+                    "error": str(e)[:50],
+                }
 
     tasks = [test_combo(p, m) for p, m in combinations]
 
@@ -2557,34 +1728,42 @@ async def run_mass_test(channel):
         bar = create_progress_bar(i + 1, total)
 
         try:
-            progress_embed.description = f"*лает на* {i + 1}/{total}: `{res['provider']}` / `{res['model']}` 🐕"
-            progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`\n⏳ Прошло: {elapsed:.0f}с",
-                                        inline=False)
+            progress_embed.description = (
+                f"*лает на* {i + 1}/{total}: `{res['provider']}` / `{res['model']}` 🐕"
+            )
+            progress_embed.set_field_at(
+                0, name="Прогресс", value=f"`[{bar}] {percent}%`\n⏳ Прошло: {elapsed:.0f}с", inline=False
+            )
 
-            success_count = len([r for r in results if r['success']])
-            progress_embed.set_field_at(1, name="📊 Статистика",
-                                        value=f"✅ Успешно: {success_count} *гав!*\n❌ Ошибок: {len(results) - success_count} *скулит*",
-                                        inline=False)
+            success_count = len([r for r in results if r["success"]])
+            progress_embed.set_field_at(
+                1,
+                name="📊 Статистика",
+                value=f"✅ Успешно: {success_count} *гав!*\n❌ Ошибок: {len(results) - success_count} *скулит*",
+                inline=False,
+            )
 
             await progress_msg.edit(embed=progress_embed)
-        except:
-            pass
+        except disnake.HTTPException as exc:
+            logger.warning("Не удалось обновить прогресс массового тестирования: %s", exc)
 
     elapsed_total = time.time() - start_time
-    successful = [r for r in results if r['success']]
+    successful = [r for r in results if r["success"]]
 
     final_embed = disnake.Embed(
         title="✅ ПсИИнка закончил тест!",
         description=f"*виляет хвостом* Общее время: `{elapsed_total:.0f}с` ({elapsed_total / 60:.1f} мин) 🐕",
         color=0x00FF88,
-        timestamp=datetime.now()
+        timestamp=datetime.now(),
     )
-    final_embed.add_field(name="📊 Результаты",
-                          value=f"✅ Успешно: `{len(successful)}/{total}` *гав!*\n📈 Процент: `{int(len(successful) / total * 100)}%`",
-                          inline=False)
+    final_embed.add_field(
+        name="📊 Результаты",
+        value=f"✅ Успешно: `{len(successful)}/{total}` *гав!*\n📈 Процент: `{int(len(successful) / total * 100)}%`",
+        inline=False,
+    )
 
     if successful:
-        successful.sort(key=lambda x: x['time'] if x['time'] else 999)
+        successful.sort(key=lambda x: x["time"] if x["time"] else 999)
         top_text = ""
         for r in successful[:5]:
             top_text += f"• `{r['provider']}`/{r['model']} — `{r['time']:.2f}с`\n"
@@ -2604,7 +1783,7 @@ DISCORD_CHANNEL_LINK_RE = re.compile(
 DISCORD_CHANNEL_MENTION_RE = re.compile(r"^<#(?P<channel>\d+)>$")
 
 
-def get_analysis_channel_types() -> List[Any]:
+def get_analysis_channel_types() -> list[Any]:
     """Типы каналов, которые можно выбрать в UI slash-команды."""
     wanted = ["text", "news", "forum", "public_thread", "private_thread", "news_thread"]
     return [getattr(disnake.ChannelType, name) for name in wanted if hasattr(disnake.ChannelType, name)]
@@ -2613,7 +1792,7 @@ def get_analysis_channel_types() -> List[Any]:
 ANALYSIS_CHANNEL_TYPES = get_analysis_channel_types()
 
 
-def extract_channel_reference(raw: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+def extract_channel_reference(raw: str | None) -> tuple[int | None, int | None]:
     """
     Достаёт guild_id и channel/thread_id из ссылки Discord, упоминания <#id> или голого ID.
     Для message-link берётся второй ID — это канал или тред, где лежит сообщение.
@@ -2638,14 +1817,14 @@ def extract_channel_reference(raw: Optional[str]) -> Tuple[Optional[int], Option
     return None, None
 
 
-async def find_thread_in_archives(guild, target_id: int):
+async def find_thread_in_archives(guild: disnake.Guild | None, target_id: int) -> disnake.Thread | None:
     """Fallback для старых/архивных тредов, если cache/fetch_channel их не нашли."""
     if not guild:
         return None
 
     for channel in getattr(guild, "channels", []):
         for thread in getattr(channel, "threads", []):
-            if getattr(thread, "id", None) == target_id:
+            if isinstance(thread, disnake.Thread) and thread.id == target_id:
                 return thread
 
         archived_threads = getattr(channel, "archived_threads", None)
@@ -2655,9 +1834,9 @@ async def find_thread_in_archives(guild, target_id: int):
         for private_flag in (False, True):
             try:
                 async for thread in channel.archived_threads(private=private_flag, limit=100):
-                    if getattr(thread, "id", None) == target_id:
+                    if isinstance(thread, disnake.Thread) and thread.id == target_id:
                         return thread
-            except Exception as e:
+            except (disnake.HTTPException, TypeError, AttributeError) as e:
                 log_analysis(
                     f"Archive lookup skipped for {getattr(channel, 'name', '?')} private={private_flag}: {e}",
                     "DEBUG",
@@ -2666,27 +1845,32 @@ async def find_thread_in_archives(guild, target_id: int):
     return None
 
 
-async def resolve_analysis_target(interaction: disnake.CommandInteraction,
-                                  selected_channel=None,
-                                  ссылка: Optional[str] = None):
+async def resolve_analysis_target(
+    interaction: ApplicationCommandInteraction,
+    selected_channel: disnake.abc.GuildChannel | disnake.Thread | None = None,
+    ссылка: str | None = None,
+) -> tuple[Any, str | None]:
     """
     Возвращает канал/форум/тред для анализа.
     Приоритет: ссылка/ID/упоминание → выбранный канал → текущий канал.
     """
-    if not getattr(interaction, "guild", None):
+    guild = interaction.guild
+    if guild is None:
         return None, "❌ Гав! `/анализ` работает только внутри сервера."
 
-    target = None
+    target: object | None = None
     link_guild_id, link_channel_id = extract_channel_reference(ссылка)
 
     if ссылка and not link_channel_id:
-        return None, "❌ ПсИИнка не смог разобрать ссылку/ID канала. Дай ссылку Discord, `<#канал>` или числовой ID."
+        return (
+            None,
+            "❌ ПсИИнка не смог разобрать ссылку/ID канала. Дай ссылку Discord, `<#канал>` или числовой ID.",
+        )
 
-    if link_guild_id and link_guild_id != interaction.guild.id:
+    if link_guild_id and link_guild_id != guild.id:
         return None, "❌ Эта ссылка ведёт на другой сервер. ПсИИнка нюхает только текущий сервер."
 
     if link_channel_id:
-        guild = interaction.guild
         target = guild.get_channel(link_channel_id)
 
         if target is None and hasattr(guild, "get_thread"):
@@ -2698,13 +1882,13 @@ async def resolve_analysis_target(interaction: disnake.CommandInteraction,
         if target is None:
             try:
                 target = await bot.fetch_channel(link_channel_id)
-            except Exception as e:
+            except disnake.HTTPException as e:
                 log_analysis(f"bot.fetch_channel({link_channel_id}) failed: {e}", "DEBUG")
 
         if target is None:
             try:
                 target = await guild.fetch_channel(link_channel_id)
-            except Exception as e:
+            except disnake.HTTPException as e:
                 log_analysis(f"guild.fetch_channel({link_channel_id}) failed: {e}", "DEBUG")
 
         if target is None:
@@ -2716,7 +1900,7 @@ async def resolve_analysis_target(interaction: disnake.CommandInteraction,
         return None, "❌ ПсИИнка не нашёл такой канал/форум/тред. Проверь ссылку и права бота."
 
     target_guild = getattr(target, "guild", None)
-    if target_guild and getattr(target_guild, "id", None) != interaction.guild.id:
+    if target_guild and getattr(target_guild, "id", None) != guild.id:
         return None, "❌ Этот канал не из текущего сервера."
 
     has_history = callable(getattr(target, "history", None))
@@ -2727,14 +1911,17 @@ async def resolve_analysis_target(interaction: disnake.CommandInteraction,
     return target, None
 
 
-def analysis_target_name(channel) -> str:
+def analysis_target_name(channel: Any) -> str:
     if hasattr(channel, "parent") and getattr(channel, "parent", None):
         return f"{channel.parent.name} / {channel.name}"
     return getattr(channel, "name", str(getattr(channel, "id", "unknown")))
 
-async def collect_all_messages_debug(channel, days_limit: int, max_per_source: int = 400):
+
+async def collect_all_messages_debug(
+    channel: Any, days_limit: int, max_per_source: int = 400
+) -> list[dict[str, Any]]:
     after_date = datetime.now(timezone.utc) - timedelta(days=days_limit)
-    all_messages = []
+    all_messages: list[dict[str, Any]] = []
     target_label = analysis_target_name(channel)
     log_analysis(f"Start collecting #{target_label} for {days_limit} days.", "INFO")
 
@@ -2744,114 +1931,126 @@ async def collect_all_messages_debug(channel, days_limit: int, max_per_source: i
             async for message in channel.history(limit=max_per_source, after=after_date):
                 if message.is_system() or message.author == bot.user or not message.content.strip():
                     continue
-                all_messages.append({
-                    "id": len(all_messages) + 1,
-                    "real_id": message.id,
-                    "content": message.content[:1500],
-                    "author": str(message.author),
-                    "url": message.jump_url,
-                    "source": f"#{target_label}",
-                    "created_at": message.created_at
-                })
+                all_messages.append(
+                    {
+                        "id": len(all_messages) + 1,
+                        "real_id": message.id,
+                        "content": message.content[:1500],
+                        "author": str(message.author),
+                        "url": message.jump_url,
+                        "source": f"#{target_label}",
+                        "created_at": message.created_at,
+                    }
+                )
             log_analysis(f"✅ Main channel/thread: {len(all_messages)} msgs.", "INFO")
-        except Exception as e:
+        except (disnake.HTTPException, asyncio.TimeoutError, TypeError, AttributeError) as e:
             log_analysis(f"❌ Main channel/thread error: {e}", "ERROR")
     else:
         log_analysis(f"Main history skipped for {target_label}: no direct history method.", "INFO")
 
-    if hasattr(channel, 'threads'):
+    if hasattr(channel, "threads"):
         for thread in channel.threads:
-            if not hasattr(thread, 'history'):
+            if not hasattr(thread, "history"):
                 continue
             try:
                 count = 0
                 async for message in thread.history(limit=max_per_source, after=after_date):
                     if message.is_system() or message.author == bot.user or not message.content.strip():
                         continue
-                    all_messages.append({
-                        "id": len(all_messages) + 1,
-                        "real_id": message.id,
-                        "content": message.content[:1500],
-                        "author": str(message.author),
-                        "url": message.jump_url,
-                        "source": f"Thread: {thread.name}",
-                        "created_at": message.created_at
-                    })
+                    all_messages.append(
+                        {
+                            "id": len(all_messages) + 1,
+                            "real_id": message.id,
+                            "content": message.content[:1500],
+                            "author": str(message.author),
+                            "url": message.jump_url,
+                            "source": f"Thread: {thread.name}",
+                            "created_at": message.created_at,
+                        }
+                    )
                     count += 1
                 log_analysis(f"✅ Thread {thread.name}: {count} msgs.", "INFO")
                 await asyncio.sleep(0.5)
-            except:
-                pass
+            except (disnake.HTTPException, asyncio.TimeoutError) as exc:
+                logger.warning("Не удалось прочитать ветку %s: %s", getattr(thread, "name", "?"), exc)
 
     # Архивные треды: добавлено без изменения основного механизма анализа.
-    if hasattr(channel, 'archived_threads'):
-        seen_thread_ids = {getattr(t, 'id', None) for t in getattr(channel, 'threads', [])}
+    if hasattr(channel, "archived_threads"):
+        seen_thread_ids = {getattr(t, "id", None) for t in getattr(channel, "threads", [])}
         for private_flag in (False, True):
             try:
                 async for thread in channel.archived_threads(private=private_flag, limit=100):
-                    if getattr(thread, 'id', None) in seen_thread_ids or not hasattr(thread, 'history'):
+                    if getattr(thread, "id", None) in seen_thread_ids or not hasattr(thread, "history"):
                         continue
-                    seen_thread_ids.add(getattr(thread, 'id', None))
+                    seen_thread_ids.add(getattr(thread, "id", None))
                     try:
                         count = 0
                         async for message in thread.history(limit=max_per_source, after=after_date):
-                            if message.is_system() or message.author == bot.user or not message.content.strip():
+                            if (
+                                message.is_system()
+                                or message.author == bot.user
+                                or not message.content.strip()
+                            ):
                                 continue
-                            all_messages.append({
-                                "id": len(all_messages) + 1,
-                                "real_id": message.id,
-                                "content": message.content[:1500],
-                                "author": str(message.author),
-                                "url": message.jump_url,
-                                "source": f"Archived Thread: {thread.name}",
-                                "created_at": message.created_at
-                            })
+                            all_messages.append(
+                                {
+                                    "id": len(all_messages) + 1,
+                                    "real_id": message.id,
+                                    "content": message.content[:1500],
+                                    "author": str(message.author),
+                                    "url": message.jump_url,
+                                    "source": f"Archived Thread: {thread.name}",
+                                    "created_at": message.created_at,
+                                }
+                            )
                             count += 1
                         log_analysis(f"✅ Archived thread {thread.name}: {count} msgs.", "INFO")
                         await asyncio.sleep(0.5)
-                    except Exception as e:
+                    except (disnake.HTTPException, asyncio.TimeoutError, TypeError, AttributeError) as e:
                         log_analysis(f"Archived thread {getattr(thread, 'name', '?')} error: {e}", "DEBUG")
-            except Exception as e:
+            except (disnake.HTTPException, asyncio.TimeoutError, TypeError, AttributeError) as e:
                 log_analysis(f"Archived threads private={private_flag} unavailable: {e}", "DEBUG")
 
     return all_messages
 
 
-def format_messages_for_ai(messages_list: List[Dict]) -> str:
-    return "\n".join([
-        f"{msg['id']} [{msg['source']}]: {msg['content'].replace(chr(10), ' ')}"
-        for msg in messages_list
-    ])
+def format_messages_for_ai(messages_list: list[dict]) -> str:
+    return "\n".join(
+        [f"{msg['id']} [{msg['source']}]: {msg['content'].replace(chr(10), ' ')}" for msg in messages_list]
+    )
 
 
-def parse_ai_response(ai_text: str, original_data: List[Dict]) -> List[Dict]:
+def parse_ai_response(ai_text: str, original_data: list[dict]) -> list[dict]:
     if not ai_text or ai_text.strip().upper() == "NONE":
         return []
 
-    found_ids = [int(x) for x in re.findall(r'\d+', ai_text)]
+    found_ids = [int(x) for x in re.findall(r"\d+", ai_text)]
     found_set = set(found_ids)
-    return [msg for msg in original_data if msg['id'] in found_set]
+    return [msg for msg in original_data if msg["id"] in found_set]
 
 
 @bot.slash_command(name="анализ", description="Анализ канала, форума или треда на нарушения")
-async def slash_analyze(interaction: disnake.CommandInteraction,
-                        канал: Optional[disnake.abc.GuildChannel] = commands.Param(
-                            default=None,
-                            description="Канал/форум/тред для анализа",
-                            channel_types=ANALYSIS_CHANNEL_TYPES,
-                        ),
-                        ссылка: Optional[str] = commands.Param(
-                            default=None,
-                            description="Ссылка, ID или упоминание канала/форума/треда",
-                        ),
-                        период: str = commands.Param(
-                            default="За последние 7 дней",
-                            choices=["За последние 7 дней", "За последние 21 день"],
-                            description="Период анализа",
-                        )):
-    if interaction.author.id != OWNER_ID:
-        if not await check_access(interaction, allowed_role_names=["Псарь"]):
-            return
+async def slash_analyze(
+    interaction: ApplicationCommandInteraction,
+    канал: disnake.abc.GuildChannel | None = commands.Param(
+        default=None,
+        description="Канал/форум/тред для анализа",
+        channel_types=ANALYSIS_CHANNEL_TYPES,
+    ),
+    ссылка: str | None = commands.Param(
+        default=None,
+        description="Ссылка, ID или упоминание канала/форума/треда",
+    ),
+    период: str = commands.Param(
+        default="За последние 7 дней",
+        choices=["За последние 7 дней", "За последние 21 день"],
+        description="Период анализа",
+    ),
+) -> None:
+    if interaction.author.id != OWNER_ID and not await check_access(
+        interaction, allowed_role_names=["Псарь"]
+    ):
+        return
 
     target_channel, target_error = await resolve_analysis_target(interaction, канал, ссылка)
     if target_error:
@@ -2877,7 +2076,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             title="🔍 ПсИИнка нюхает канал",
             description=f"*принюхивается* Канал: `#{target_name}`\nПериод: `{days_to_check} дней` 🐕\nСообщений: `{len(messages_data)}`",
             color=0xFF8844,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         progress_embed.add_field(name="Прогресс", value="`[░░░░░░░░░░] 0%`", inline=False)
         progress_embed.add_field(name="Статус", value="ПсИИнка готовится...", inline=False)
@@ -2889,7 +2088,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
         main_queue = await get_analysis_priority_queue()
 
         for i in range(0, len(messages_data), BATCH_SIZE):
-            batch_data = messages_data[i: i + BATCH_SIZE]
+            batch_data = messages_data[i : i + BATCH_SIZE]
             current_batch = (i // BATCH_SIZE) + 1
             batch_context = format_messages_for_ai(batch_data)
             user_prompt = f"Пакет {current_batch}/{total_batches}:\n\n{batch_context}"
@@ -2899,11 +2098,17 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             used_provider = "Unknown"
             used_temp_file = False
 
-            async def try_request(prov, mod, use_proxy=False):
+            async def try_request(
+                prov: str, mod: str, use_proxy: bool = False, user_prompt: str = user_prompt
+            ) -> tuple[bool, str, float]:
                 proxy_str = get_random_proxy(True) if use_proxy else None
                 return await route_model_request(
-                    prov, mod, user_prompt, timeout=50.0,
-                    system_prompt=ANALYSIS_SYSTEM_PROMPT, proxy_url=proxy_str,
+                    prov,
+                    mod,
+                    user_prompt,
+                    timeout=50.0,
+                    system_prompt=ANALYSIS_SYSTEM_PROMPT,
+                    proxy_url=proxy_str,
                 )
 
             for prov, mod in main_queue:
@@ -2911,8 +2116,12 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                     percent = int(((current_batch - 1) / total_batches) * 100)
                     bar = create_progress_bar(current_batch - 1, total_batches)
 
-                    progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
-                    progress_embed.set_field_at(1, name="Статус", value=f"*лает на* `{prov}`... 🐕", inline=False)
+                    progress_embed.set_field_at(
+                        0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False
+                    )
+                    progress_embed.set_field_at(
+                        1, name="Статус", value=f"*лает на* `{prov}`... 🐕", inline=False
+                    )
                     await status_msg.edit(embed=progress_embed)
 
                     ok, ans, lat = await try_request(prov, mod, False)
@@ -2923,15 +2132,17 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                         if (normalize_provider_name(prov), mod) in _pending_route_keys():
                             used_temp_file = True
                         if not used_temp_file:
-                            db_manager.log_success(prov, mod, int(lat * 1000))
+                            await asyncio.to_thread(db_manager.log_success, prov, mod, int(lat * 1000))
                         break
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - analysis AI fallback keeps processing
                     log_analysis(f"Error {prov}/{mod}: {e}", "DEBUG")
                     continue
 
             if not success:
                 log_analysis(f"⚠️ Batch {current_batch}: Activating PROXY MODE.", "WARNING")
-                progress_embed.set_field_at(1, name="Статус", value="⚠️ ПРОКСИ РЕЖИМ... *нюхает* 🔀", inline=False)
+                progress_embed.set_field_at(
+                    1, name="Статус", value="⚠️ ПРОКСИ РЕЖИМ... *нюхает* 🔀", inline=False
+                )
                 await status_msg.edit(embed=progress_embed)
 
                 for prov, mod in main_queue:
@@ -2942,7 +2153,8 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                             used_provider = f"{prov} ({mod}) [PROXY]"
                             success = True
                             break
-                    except:
+                    except Exception as exc:  # noqa: BLE001 - fallback для ошибок сторонних AI SDK
+                        logger.warning("Прокси-запрос AI %s/%s не удался: %s", prov, mod, exc)
                         continue
 
             if not success:
@@ -2950,20 +2162,26 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
                 used_provider = "NO_RESPONSE"
                 log_analysis(f"❌ Batch {current_batch}: FAILED.", "ERROR")
 
-            batch_violations = parse_ai_response(final_answer, batch_data)
+            batch_violations = parse_ai_response(final_answer or "", batch_data)
             all_violations.extend(batch_violations)
             log_analysis(f"Batch {current_batch}: {used_provider}. Found: {len(batch_violations)}", "INFO")
 
             percent = int((current_batch / total_batches) * 100)
             bar = create_progress_bar(current_batch, total_batches)
             progress_embed.set_field_at(0, name="Прогресс", value=f"`[{bar}] {percent}%`", inline=False)
-            progress_embed.set_field_at(1, name="Статус", value=f"✅ Пакет #{current_batch} готов *гав!*", inline=False)
-            progress_embed.add_field(name="Найдено нарушений", value=f"`{len(all_violations)}` *рычит*", inline=False)
+            progress_embed.set_field_at(
+                1, name="Статус", value=f"✅ Пакет #{current_batch} готов *гав!*", inline=False
+            )
+            progress_embed.add_field(
+                name="Найдено нарушений", value=f"`{len(all_violations)}` *рычит*", inline=False
+            )
             await status_msg.edit(embed=progress_embed)
             await asyncio.sleep(1.0)
 
         progress_embed.color = 0x00FF88
-        progress_embed.set_field_at(1, name="Статус", value="✅ Анализ завершен! *виляет хвостом* 🐕", inline=False)
+        progress_embed.set_field_at(
+            1, name="Статус", value="✅ Анализ завершен! *виляет хвостом* 🐕", inline=False
+        )
         await status_msg.edit(embed=progress_embed)
 
         if not all_violations:
@@ -2972,11 +2190,11 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             return
 
         report_parts = []
-        current_part = []
+        current_part: list[str] = []
         current_len = 0
 
         for i, v in enumerate(all_violations, 1):
-            clean_txt = re.sub(r'<@!?[0-9]+>', '@user', v['content'])[:400]
+            clean_txt = re.sub(r"<@!?[0-9]+>", "@user", v["content"])[:400]
             line = f"{i}) **[{v['source']}]** {clean_txt}\n🔗 [Ссылка]({v['url']})\n\n"
 
             if current_len + len(line) > 1800:
@@ -2994,7 +2212,7 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
             title="🚨 ПсИИнка нашёл нарушения!",
             description=f"*рычит на нарушителей* Найдено **{len(all_violations)}** нарушений 🐕",
             color=0xFF4444,
-            timestamp=datetime.now()
+            timestamp=datetime.now(),
         )
         header_embed.add_field(name="Канал", value=f"#{target_name}", inline=True)
         header_embed.add_field(name="Период", value=f"{days_to_check} дней", inline=True)
@@ -3012,8 +2230,11 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
         error_trace = traceback.format_exc()
         log_analysis(f"CRITICAL ERROR: {e}\n{error_trace}", "ERROR")
         logger.error(f"Critical error in /analyze: {e}", exc_info=True)
-        await interaction.followup.send(f"❌ ПсИИнка ошибся... *повесил уши*\nЛог сохранен.\nОшибка: {str(e)[:100]} 🐕",
-                                        ephemeral=True)
+        await interaction.followup.send(
+            f"❌ ПсИИнка ошибся... *повесил уши*\nЛог сохранен.\nОшибка: {str(e)[:100]} 🐕", ephemeral=True
+        )
+
+
 # ============================================================================
 # 💰 КОМАНДА: ЦЕНЫ АУКЦИОНА
 # ============================================================================
@@ -3022,31 +2243,8 @@ async def slash_analyze(interaction: disnake.CommandInteraction,
 # 💰 КОМАНДА: ЦЕНЫ АУКЦИОНА
 # ============================================================================
 
-AUCTIONEER_IDS = {839258901249523723, 754615336682127372}
-AUCTIONEER_USERNAMES = {"aukcionistfirewell", "lagyshka22"}
 
-NEW_AUCTION_LOT_RE = re.compile(
-    r"(?:📦\s*)?(?:л\s*о\s*т|lot)\s*(?:№|#|n\s*o\.?|no\.?|nº|n°|номер)?\s*[:\-–—]?\s*(\d{1,8})",
-    re.IGNORECASE,
-)
-
-ANCIENT_AUCTION_LOT_RE = re.compile(
-    r"Номер\s+лота\s*:\s*(\d{1,8})",
-    re.IGNORECASE,
-)
-
-AUCTION_LAST_BID_RE = re.compile(
-    r"Последняя\s+ставка[^\d]{0,180}([0-9][0-9 \u00A0]*)",
-    re.IGNORECASE | re.DOTALL,
-)
-
-AUCTION_START_PRICE_RE = re.compile(
-    r"Начальная\s+стоимость[^\d]{0,120}([0-9][0-9 \u00A0]*)",
-    re.IGNORECASE | re.DOTALL,
-)
-
-
-def get_auction_price_channel_types() -> List[Any]:
+def get_auction_price_channel_types() -> list[Any]:
     wanted = ["text", "news", "public_thread", "private_thread", "news_thread"]
     return [getattr(disnake.ChannelType, name) for name in wanted if hasattr(disnake.ChannelType, name)]
 
@@ -3054,94 +2252,12 @@ def get_auction_price_channel_types() -> List[Any]:
 AUCTION_PRICE_CHANNEL_TYPES = get_auction_price_channel_types()
 
 
-def auction_money_to_int(raw: Optional[str]) -> Optional[int]:
-    digits = re.sub(r"\D+", "", raw or "")
-    return int(digits) if digits else None
-
-
-def clean_auction_text(text: Any) -> str:
-    text = "" if text is None else str(text)
-
-    # Убираем невидимые символы, которые часто ломают regex.
-    text = re.sub(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]", "", text)
-
-    text = text.replace("\u00A0", " ")
-    text = text.replace("Ｎ", "N")
-    text = text.replace("ｏ", "o")
-    text = text.replace("О", "О")
-
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-
-    return text.strip()
-
-
-def norm_auction_text(text: Any) -> str:
-    return clean_auction_text(text).lower().replace("ё", "е")
-
-
-def append_unique_text(parts: List[str], value: Any):
-    if value is None:
-        return
-
-    text = clean_auction_text(value)
-    if not text:
-        return
-
-    if text not in parts:
-        parts.append(text)
-
-
-def flatten_any_strings(value: Any) -> List[str]:
-    result = []
-
-    if value is None:
-        return result
-
-    if isinstance(value, str):
-        if value.strip():
-            result.append(value)
-        return result
-
-    if isinstance(value, dict):
-        for item in value.values():
-            result.extend(flatten_any_strings(item))
-        return result
-
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            result.extend(flatten_any_strings(item))
-        return result
-
-    return result
-
-
-def get_raw_author_name(raw_message: Dict[str, Any]) -> str:
-    author = raw_message.get("author") or {}
-    username = author.get("username") or ""
-    global_name = author.get("global_name") or ""
-    discriminator = author.get("discriminator") or ""
-
-    if global_name and username:
-        return f"{global_name} | {username}"
-
-    if username and discriminator and discriminator != "0":
-        return f"{username}#{discriminator}"
-
-    return username or global_name or ""
-
-
-def get_raw_author_id(raw_message: Dict[str, Any]) -> str:
-    author = raw_message.get("author") or {}
-    return str(author.get("id") or "")
-
-
-def raw_message_to_text(raw_message: Dict[str, Any]) -> str:
+def raw_message_to_text(raw_message: dict[str, Any]) -> str:
     """
     Собирает максимум текста из Discord raw payload:
     content, embeds, fields, footer, author, components и запасной проход по JSON.
     """
-    parts: List[str] = []
+    parts: list[str] = []
 
     append_unique_text(parts, raw_message.get("content"))
     append_unique_text(parts, raw_message.get("clean_content"))
@@ -3181,22 +2297,22 @@ def raw_message_to_text(raw_message: Dict[str, Any]) -> str:
     return clean_auction_text("\n".join(parts))
 
 
-def disnake_message_to_raw_like(message: disnake.Message) -> Dict[str, Any]:
+def disnake_message_to_raw_like(message: disnake.Message) -> dict[str, Any]:
     embeds = []
 
     for embed in getattr(message, "embeds", []) or []:
         try:
             embeds.append(embed.to_dict())
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning("Не удалось преобразовать embed сообщения %s: %s", message.id, exc)
 
     components = []
 
     for row in getattr(message, "components", []) or []:
         try:
             components.append(row.to_dict())
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning("Не удалось преобразовать компоненты сообщения %s: %s", message.id, exc)
 
     author = getattr(message, "author", None)
 
@@ -3227,12 +2343,12 @@ def make_jump_url(guild_id: int, channel_id: int, message_id: Any) -> str:
 async def fetch_raw_discord_messages(
     channel_id: int,
     limit: int,
-) -> Tuple[List[Dict[str, Any]], List[List[Any]]]:
+) -> tuple[list[dict[str, Any]], list[list[Any]]]:
     """
     Читает историю напрямую через Discord API.
     Это надёжнее, чем message.embeds, потому что мы видим сырой payload.
     """
-    logs: List[List[Any]] = []
+    logs: list[list[Any]] = []
     token = os.getenv("DISCORD_TOKEN")
 
     if not token:
@@ -3246,7 +2362,7 @@ async def fetch_raw_discord_messages(
 
     url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
 
-    all_messages: List[Dict[str, Any]] = []
+    all_messages: list[dict[str, Any]] = []
     before = None
 
     timeout = aiohttp.ClientTimeout(total=45)
@@ -3270,13 +2386,15 @@ async def fetch_raw_discord_messages(
 
                     if response.status != 200:
                         text = await response.text()
-                        logs.append([
-                            "REST",
-                            "",
-                            f"Discord API вернул статус {response.status}",
-                            "",
-                            text[:3000],
-                        ])
+                        logs.append(
+                            [
+                                "REST",
+                                "",
+                                f"Discord API вернул статус {response.status}",
+                                "",
+                                text[:3000],
+                            ]
+                        )
                         break
 
                     batch = await response.json()
@@ -3290,7 +2408,7 @@ async def fetch_raw_discord_messages(
                     if len(batch) < batch_limit:
                         break
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - raw history fallback records unexpected errors
                 logs.append(["REST", "", f"Ошибка raw REST чтения: {type(e).__name__}: {e}", "", ""])
                 break
 
@@ -3298,12 +2416,12 @@ async def fetch_raw_discord_messages(
 
 
 async def fetch_history_fallback(
-    target_channel,
+    target_channel: Any,
     guild_id: int,
     limit: int,
-) -> Tuple[List[Dict[str, Any]], List[List[Any]]]:
-    logs: List[List[Any]] = []
-    result: List[Dict[str, Any]] = []
+) -> tuple[list[dict[str, Any]], list[list[Any]]]:
+    logs: list[list[Any]] = []
+    result: list[dict[str, Any]] = []
 
     if not hasattr(target_channel, "history"):
         logs.append(["HISTORY", "", "У канала нет метода history", "", ""])
@@ -3322,314 +2440,13 @@ async def fetch_history_fallback(
 
             result.append(raw_like)
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - history fallback records unexpected errors
         logs.append(["HISTORY", "", f"Ошибка fallback history: {type(e).__name__}: {e}", "", ""])
 
     return result, logs
 
 
-def raw_field_candidates(raw_message: Dict[str, Any], field_name_part: str) -> List[str]:
-    result = []
-    target = norm_auction_text(field_name_part)
-
-    for embed in raw_message.get("embeds") or []:
-        if not isinstance(embed, dict):
-            continue
-
-        for field in embed.get("fields") or []:
-            if not isinstance(field, dict):
-                continue
-
-            name = field.get("name", "")
-            value = field.get("value", "")
-
-            if target in norm_auction_text(name):
-                result.append(clean_auction_text(value))
-                result.append(clean_auction_text(f"{name}\n{value}"))
-
-    return [x for x in result if x]
-
-
-def raw_title_candidates(raw_message: Dict[str, Any]) -> List[str]:
-    result = []
-
-    for embed in raw_message.get("embeds") or []:
-        if isinstance(embed, dict):
-            title = embed.get("title")
-            if title:
-                result.append(clean_auction_text(title))
-
-    return result
-
-
-def extract_new_lot_number(text: str, raw_message: Optional[Dict[str, Any]] = None) -> Optional[int]:
-    candidates = []
-
-    if raw_message:
-        candidates.extend(raw_title_candidates(raw_message))
-
-    candidates.append(text)
-
-    for candidate in candidates:
-        lot_match = NEW_AUCTION_LOT_RE.search(candidate)
-        if lot_match:
-            return int(lot_match.group(1))
-
-    lower = norm_auction_text(text)
-
-    # Запасной режим: если это точно новый лот, но слово "Лот" API отдало криво.
-    if "последняя ставка" in lower and "начальная стоимость" in lower:
-        fallback = re.search(r"(?:№|#|nº|n°|no\.?|n\s*o\.?)\s*(\d{1,8})", text, re.IGNORECASE)
-        if fallback:
-            return int(fallback.group(1))
-
-    return None
-
-
-def extract_between_labels(text: str, start_label: str, stop_labels: List[str]) -> str:
-    stop_part = "|".join(re.escape(label) for label in stop_labels)
-
-    pattern = re.compile(
-        rf"{re.escape(start_label)}\s*:?\s*(.*?)(?=\n\s*(?:{stop_part})\s*:|\n\s*=+|\Z)",
-        re.IGNORECASE | re.DOTALL,
-    )
-
-    match = pattern.search(text)
-    if not match:
-        return ""
-
-    return clean_auction_text(match.group(1))
-
-
-def extract_new_item_text(text: str, raw_message: Dict[str, Any]) -> str:
-    raw_items = raw_field_candidates(raw_message, "Предмет")
-
-    for item in raw_items:
-        # Берём именно value поля, а не "Предмет\nvalue", если получилось.
-        cleaned = clean_auction_text(item)
-        if cleaned and norm_auction_text(cleaned) != "предмет":
-            cleaned = re.sub(r"^\s*Предмет\s*\n", "", cleaned, flags=re.IGNORECASE).strip()
-            return clean_auction_text(cleaned.lstrip("> ").strip())
-
-    patterns = [
-        r"(?:^|\n)\s*#+\s*Предмет\s*\n\s*>?\s*(.*?)(?=\n\s*(?:💰|⏳|#+\s*Последняя|Последняя\s+ставка|\*\*Торги|Торги\s+завершены|Лот\s+проверяется|-#\s*Опубликовано)|\Z)",
-        r"(?:^|\n)\s*Предмет\s*\n\s*>?\s*(.*?)(?=\n\s*(?:💰|⏳|#+\s*Последняя|Последняя\s+ставка|\*\*Торги|Торги\s+завершены|Лот\s+проверяется|-#\s*Опубликовано)|\Z)",
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
-        if match:
-            return clean_auction_text(match.group(1).lstrip("> ").strip())
-
-    return ""
-
-
-def extract_ancient_name(text: str) -> str:
-    return extract_between_labels(
-        text,
-        "Наименование",
-        ["Описание", "Начальная стоимость", "Конец торгов", "Скриншот-подтверждение владения", "Скриншот"],
-    )
-
-
-def extract_ancient_description(text: str) -> str:
-    return extract_between_labels(
-        text,
-        "Описание",
-        ["Начальная стоимость", "Конец торгов", "Скриншот-подтверждение владения", "Скриншот"],
-    )
-
-
-def extract_start_price(text: str, raw_message: Dict[str, Any]) -> Optional[int]:
-    candidates = []
-    candidates.extend(raw_field_candidates(raw_message, "Начальная стоимость"))
-    candidates.append(text)
-
-    for candidate in candidates:
-        match = AUCTION_START_PRICE_RE.search(candidate)
-        if match:
-            return auction_money_to_int(match.group(1))
-
-        # Если field name = "💰 Начальная стоимость", а value = "`700` бонкоинов"
-        if "начальная" in norm_auction_text(candidate):
-            price = auction_money_to_int(candidate)
-            if price is not None:
-                return price
-
-    return None
-
-
-def extract_last_bid_price_and_area(text: str, raw_message: Dict[str, Any]) -> Tuple[Optional[int], str]:
-    candidates = []
-    candidates.extend(raw_field_candidates(raw_message, "Последняя ставка"))
-    candidates.append(text)
-
-    for candidate in candidates:
-        match = AUCTION_LAST_BID_RE.search(candidate)
-        if match:
-            return auction_money_to_int(match.group(1)), candidate
-
-        if "последняя ставка" in norm_auction_text(candidate):
-            price = auction_money_to_int(candidate)
-            if price is not None:
-                return price, candidate
-
-    return None, ""
-
-
-def extract_bidder(text: str, raw_message: Dict[str, Any], bid_area: str) -> str:
-    candidates = []
-
-    if bid_area:
-        candidates.append(bid_area)
-
-    candidates.extend(raw_field_candidates(raw_message, "Последняя ставка"))
-
-    last_bid_match = re.search(r"Последняя\s+ставка", text, re.IGNORECASE)
-    if last_bid_match:
-        candidates.append(text[last_bid_match.end():last_bid_match.end() + 2000])
-
-    candidates.append(text)
-
-    for candidate in candidates:
-        match = re.search(
-            r"(?:^|\n|\s)(?:\*\*)?\s*От\s*:(?:\*\*)?\s*(.*?)(?=\n|$)",
-            candidate,
-            re.IGNORECASE | re.DOTALL,
-        )
-
-        if match:
-            bidder = clean_auction_text(match.group(1))
-            bidder = bidder.replace("**", "").strip()
-            if bidder:
-                return bidder
-
-    return ""
-
-
-def is_auctioneer_bidder(bidder: str, bid_area: str, text: str) -> bool:
-    area = norm_auction_text(f"{bidder}\n{bid_area}\n{text[:1200]}")
-    area = area.replace("*", "")
-
-    for auctioneer_id in AUCTIONEER_IDS:
-        if f"<@{auctioneer_id}>" in area or f"<@!{auctioneer_id}>" in area:
-            return True
-
-    return any(nick.lower() in area for nick in AUCTIONEER_USERNAMES)
-
-
-def parse_new_auction_lot(info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    text = info["text"]
-    raw_message = info["raw"]
-
-    lot_no = extract_new_lot_number(text, raw_message)
-    if lot_no is None:
-        return None
-
-    lower = norm_auction_text(text)
-
-    start_price = extract_start_price(text, raw_message)
-    item = extract_new_item_text(text, raw_message)
-
-    base = {
-        "lot": lot_no,
-        "item": item,
-        "start_price": start_price,
-        "author": info.get("author", ""),
-        "author_id": info.get("author_id", ""),
-        "message_id": info.get("message_id", ""),
-        "message_url": info.get("message_url", ""),
-        "created_at": info.get("created_at", ""),
-        "embeds_count": info.get("embeds_count", 0),
-        "raw_text": text,
-    }
-
-    if "предмет возвращен продавцу" in lower:
-        return {
-            **base,
-            "type": "returned",
-            "status": "Возврат продавцу",
-            "price": None,
-            "bidder": "",
-            "is_auctioneer": False,
-            "closed": "торги завершены" in lower,
-        }
-
-    price, bid_area = extract_last_bid_price_and_area(text, raw_message)
-
-    if price is None:
-        if "лот проверяется администратором" in lower or "проверяется администратором" in lower:
-            status = "Проверяется администратором, ставки ещё нет"
-        else:
-            status = "Нет последней ставки"
-
-        return {
-            **base,
-            "type": "no_bid",
-            "status": status,
-            "price": None,
-            "bidder": "",
-            "is_auctioneer": False,
-            "closed": "торги завершены" in lower,
-        }
-
-    bidder = extract_bidder(text, raw_message, bid_area)
-    is_auctioneer = is_auctioneer_bidder(bidder, bid_area, text)
-
-    return {
-        **base,
-        "type": "new",
-        "status": "Засчитан: аукционист" if is_auctioneer else "Засчитан: люди",
-        "price": price,
-        "bidder": bidder or "не найдено поле От",
-        "is_auctioneer": is_auctioneer,
-        "closed": "торги завершены" in lower,
-    }
-
-
-def parse_ancient_auction_lot(info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    text = info["text"]
-
-    ancient_match = ANCIENT_AUCTION_LOT_RE.search(text)
-    if not ancient_match:
-        return None
-
-    lot_no = int(ancient_match.group(1))
-    name = extract_ancient_name(text)
-    description = extract_ancient_description(text)
-
-    start_match = AUCTION_START_PRICE_RE.search(text)
-    price = auction_money_to_int(start_match.group(1)) if start_match else None
-
-    if price is None:
-        return {
-            "type": "ancient_bad_price",
-            "lot": lot_no,
-            "name": name,
-            "description": description,
-            "price": None,
-            "author": info.get("author", ""),
-            "message_id": info.get("message_id", ""),
-            "message_url": info.get("message_url", ""),
-            "created_at": info.get("created_at", ""),
-            "raw_text": text,
-        }
-
-    return {
-        "type": "ancient",
-        "lot": lot_no,
-        "name": name,
-        "description": description,
-        "price": price,
-        "author": info.get("author", ""),
-        "message_id": info.get("message_id", ""),
-        "message_url": info.get("message_url", ""),
-        "created_at": info.get("created_at", ""),
-        "raw_text": text,
-    }
-
-
-def raw_to_info(raw_message: Dict[str, Any], guild_id: int, channel_id: int) -> Dict[str, Any]:
+def raw_to_info(raw_message: dict[str, Any], guild_id: int, channel_id: int) -> dict[str, Any]:
     message_id = str(raw_message.get("id") or "")
     real_channel_id = int(raw_message.get("channel_id") or channel_id)
 
@@ -3649,152 +2466,14 @@ def raw_to_info(raw_message: Dict[str, Any], guild_id: int, channel_id: int) -> 
     }
 
 
-def xlsx_col_name(index: int) -> str:
-    result = ""
-
-    while index:
-        index, remainder = divmod(index - 1, 26)
-        result = chr(65 + remainder) + result
-
-    return result
-
-
-def clean_xlsx_value(value: Any) -> Any:
-    if value is None:
-        return ""
-
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return value
-
-    text = str(value)
-    text = re.sub(r"[\x00-\x08\x0B-\x0C\x0E-\x1F]", "", text)
-
-    # Ограничение Excel на ячейку — 32767 символов.
-    if len(text) > 32700:
-        text = text[:32700] + "\n...[обрезано из-за лимита Excel на ячейку]"
-
-    return text
-
-
-def xlsx_cell(value: Any, row_idx: int, col_idx: int) -> str:
-    value = clean_xlsx_value(value)
-    cell_ref = f"{xlsx_col_name(col_idx)}{row_idx}"
-
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return f'<c r="{cell_ref}"><v>{value}</v></c>'
-
-    text = xml_escape(str(value))
-    return f'<c r="{cell_ref}" t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>'
-
-
-def make_sheet_xml(rows: List[List[Any]]) -> str:
-    sheet_rows = []
-
-    for row_idx, row in enumerate(rows, start=1):
-        cells = []
-
-        for col_idx, value in enumerate(row, start=1):
-            cells.append(xlsx_cell(value, row_idx, col_idx))
-
-        sheet_rows.append(f'<row r="{row_idx}">{"".join(cells)}</row>')
-
-    return f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-<sheetViews><sheetView workbookViewId="0"/></sheetViews>
-<sheetData>{"".join(sheet_rows)}</sheetData>
-</worksheet>'''
-
-
-def sanitize_sheet_name(name: str) -> str:
-    name = re.sub(r'[\[\]\:\*\?\/\\]', "_", name)
-    return name[:31] or "Лист"
-
-
-def make_xlsx_file(sheets: List[Tuple[str, List[List[Any]]]], filename: str) -> io.BytesIO:
-    file_obj = io.BytesIO()
-
-    with zipfile.ZipFile(file_obj, "w", zipfile.ZIP_DEFLATED) as z:
-        sheet_overrides = "\n".join(
-            f'<Override PartName="/xl/worksheets/sheet{i}.xml" '
-            f'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-            for i in range(1, len(sheets) + 1)
-        )
-
-        z.writestr("[Content_Types].xml", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-<Default Extension="xml" ContentType="application/xml"/>
-<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-{sheet_overrides}
-<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
-<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
-</Types>''')
-
-        z.writestr("_rels/.rels", '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
-<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
-</Relationships>''')
-
-        workbook_sheets = "\n".join(
-            f'<sheet name="{xml_escape(sanitize_sheet_name(name))}" sheetId="{i}" r:id="rId{i}"/>'
-            for i, (name, _) in enumerate(sheets, start=1)
-        )
-
-        z.writestr("xl/workbook.xml", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-<sheets>{workbook_sheets}</sheets>
-</workbook>''')
-
-        workbook_rels = "\n".join(
-            f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet{i}.xml"/>'
-            for i in range(1, len(sheets) + 1)
-        )
-
-        z.writestr("xl/_rels/workbook.xml.rels", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-{workbook_rels}
-</Relationships>''')
-
-        now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-        z.writestr("docProps/core.xml", f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
-xmlns:dc="http://purl.org/dc/elements/1.1/"
-xmlns:dcterms="http://purl.org/dc/terms/"
-xmlns:dcmitype="http://purl.org/dc/dcmitype/"
-xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-<dc:creator>PsIInka Bot</dc:creator>
-<cp:lastModifiedBy>PsIInka Bot</cp:lastModifiedBy>
-<dcterms:created xsi:type="dcterms:W3CDTF">{now}</dcterms:created>
-<dcterms:modified xsi:type="dcterms:W3CDTF">{now}</dcterms:modified>
-</cp:coreProperties>''')
-
-        z.writestr("docProps/app.xml", '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
-xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
-<Application>PsIInka Bot</Application>
-</Properties>''')
-
-        for i, (_, rows) in enumerate(sheets, start=1):
-            z.writestr(f"xl/worksheets/sheet{i}.xml", make_sheet_xml(rows))
-
-    file_obj.seek(0)
-    file_obj.name = filename
-    return file_obj
-
-
 def build_auction_prices_xlsx(
-    people_rows: List[Dict[str, Any]],
-    auctioneer_rows: List[Dict[str, Any]],
-    ancient_rows: List[Dict[str, Any]],
-    all_new_lot_rows: List[Dict[str, Any]],
-    log_rows: List[List[Any]],
-    raw_embed_rows: List[List[Any]],
-    target_channel,
+    people_rows: list[dict[str, Any]],
+    auctioneer_rows: list[dict[str, Any]],
+    ancient_rows: list[dict[str, Any]],
+    all_new_lot_rows: list[dict[str, Any]],
+    log_rows: list[list[Any]],
+    raw_embed_rows: list[list[Any]],
+    target_channel: Any,
     scanned: int,
     limit: int,
     raw_messages_count: int,
@@ -3845,90 +2524,112 @@ def build_auction_prices_xlsx(
         "Ссылка на сообщение",
     ]
 
-    people_sheet = [new_headers]
+    people_sheet: list[list[Any]] = [new_headers]
 
     for row in sorted(people_rows, key=lambda x: x["lot"]):
-        people_sheet.append([
-            row.get("lot"),
-            row.get("item", ""),
-            row.get("price", ""),
-            row.get("start_price", ""),
-            row.get("status", ""),
-            row.get("bidder", ""),
-            "Да" if row.get("closed") else "Нет",
-            row.get("author", ""),
-            row.get("message_id", ""),
-            row.get("message_url", ""),
-        ])
+        people_sheet.append(
+            [
+                row.get("lot"),
+                row.get("item", ""),
+                row.get("price", ""),
+                row.get("start_price", ""),
+                row.get("status", ""),
+                row.get("bidder", ""),
+                "Да" if row.get("closed") else "Нет",
+                row.get("author", ""),
+                row.get("message_id", ""),
+                row.get("message_url", ""),
+            ]
+        )
 
-    auctioneer_sheet = [new_headers]
+    auctioneer_sheet: list[list[Any]] = [new_headers]
 
     for row in sorted(auctioneer_rows, key=lambda x: x["lot"]):
-        auctioneer_sheet.append([
-            row.get("lot"),
-            row.get("item", ""),
-            row.get("price", ""),
-            row.get("start_price", ""),
-            row.get("status", ""),
-            row.get("bidder", ""),
-            "Да" if row.get("closed") else "Нет",
-            row.get("author", ""),
-            row.get("message_id", ""),
-            row.get("message_url", ""),
-        ])
+        auctioneer_sheet.append(
+            [
+                row.get("lot"),
+                row.get("item", ""),
+                row.get("price", ""),
+                row.get("start_price", ""),
+                row.get("status", ""),
+                row.get("bidder", ""),
+                "Да" if row.get("closed") else "Нет",
+                row.get("author", ""),
+                row.get("message_id", ""),
+                row.get("message_url", ""),
+            ]
+        )
 
-    ancient_sheet = [["№ лота", "Наименование", "Описание", "Стартовая цена", "Автор", "ID сообщения", "Ссылка на сообщение"]]
+    ancient_sheet: list[list[Any]] = [
+        [
+            "№ лота",
+            "Наименование",
+            "Описание",
+            "Стартовая цена",
+            "Автор",
+            "ID сообщения",
+            "Ссылка на сообщение",
+        ]
+    ]
 
     for row in sorted(ancient_rows, key=lambda x: x["lot"]):
-        ancient_sheet.append([
-            row.get("lot"),
-            row.get("name", ""),
-            row.get("description", ""),
-            row.get("price", ""),
-            row.get("author", ""),
-            row.get("message_id", ""),
-            row.get("message_url", ""),
-        ])
+        ancient_sheet.append(
+            [
+                row.get("lot"),
+                row.get("name", ""),
+                row.get("description", ""),
+                row.get("price", ""),
+                row.get("author", ""),
+                row.get("message_id", ""),
+                row.get("message_url", ""),
+            ]
+        )
 
-    all_new_sheet = [[
-        "№ лота",
-        "Тип",
-        "Статус",
-        "Предмет",
-        "Итоговая цена",
-        "Начальная цена",
-        "Ставка от",
-        "Сообщение завершено?",
-        "Автор сообщения",
-        "ID автора",
-        "Embeds count",
-        "ID сообщения",
-        "Ссылка",
-        "Сырой текст",
-    ]]
+    all_new_sheet: list[list[Any]] = [
+        [
+            "№ лота",
+            "Тип",
+            "Статус",
+            "Предмет",
+            "Итоговая цена",
+            "Начальная цена",
+            "Ставка от",
+            "Сообщение завершено?",
+            "Автор сообщения",
+            "ID автора",
+            "Embeds count",
+            "ID сообщения",
+            "Ссылка",
+            "Сырой текст",
+        ]
+    ]
 
     for row in sorted(all_new_lot_rows, key=lambda x: (x.get("lot") or 0, str(x.get("message_id", "")))):
-        all_new_sheet.append([
-            row.get("lot"),
-            row.get("type", ""),
-            row.get("status", ""),
-            row.get("item", ""),
-            row.get("price", ""),
-            row.get("start_price", ""),
-            row.get("bidder", ""),
-            "Да" if row.get("closed") else "Нет",
-            row.get("author", ""),
-            row.get("author_id", ""),
-            row.get("embeds_count", ""),
-            row.get("message_id", ""),
-            row.get("message_url", ""),
-            row.get("raw_text", ""),
-        ])
+        all_new_sheet.append(
+            [
+                row.get("lot"),
+                row.get("type", ""),
+                row.get("status", ""),
+                row.get("item", ""),
+                row.get("price", ""),
+                row.get("start_price", ""),
+                row.get("bidder", ""),
+                "Да" if row.get("closed") else "Нет",
+                row.get("author", ""),
+                row.get("author_id", ""),
+                row.get("embeds_count", ""),
+                row.get("message_id", ""),
+                row.get("message_url", ""),
+                row.get("raw_text", ""),
+            ]
+        )
 
     logs_sheet = [["Тип", "№ лота", "Причина/статус", "ID сообщения", "Ссылка", "Текст/детали"]]
     logs_sheet.extend(log_rows)
 
-    raw_embed_sheet = [["Дата", "Автор", "ID автора", "Embeds count", "ID сообщения", "Ссылка", "Сырой текст"]]
+    raw_embed_sheet = [
+        ["Дата", "Автор", "ID автора", "Embeds count", "ID сообщения", "Ссылка", "Сырой текст"]
+    ]
     raw_embed_sheet.extend(raw_embed_rows)
 
     filename = f"auction_prices_{getattr(target_channel, 'id', 'channel')}.xlsx"
@@ -3949,8 +2650,8 @@ def build_auction_prices_xlsx(
 
 @bot.slash_command(name="цены", description="Посчитать цены выкупа лотов в аукционном канале")
 async def slash_auction_prices(
-    interaction: disnake.CommandInteraction,
-    канал: Optional[disnake.abc.GuildChannel] = commands.Param(
+    interaction: ApplicationCommandInteraction,
+    канал: disnake.abc.GuildChannel | None = commands.Param(
         default=None,
         description="Канал или тред с лотами. Если не указать — текущий канал.",
         channel_types=AUCTION_PRICE_CHANNEL_TYPES,
@@ -3959,7 +2660,7 @@ async def slash_auction_prices(
         default=20000,
         description="Сколько последних сообщений проверить. Максимум 50000.",
     ),
-):
+) -> None:
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message(
             "❌ Эта команда доступна только овнеру бота.",
@@ -3983,20 +2684,20 @@ async def slash_auction_prices(
     guild_id = int(getattr(interaction.guild, "id", 0) or 0)
     channel_id = int(getattr(target_channel, "id", 0))
 
-    people_rows: List[Dict[str, Any]] = []
-    auctioneer_rows: List[Dict[str, Any]] = []
-    ancient_rows: List[Dict[str, Any]] = []
-    all_new_lot_rows: List[Dict[str, Any]] = []
+    people_rows: list[dict[str, Any]] = []
+    auctioneer_rows: list[dict[str, Any]] = []
+    ancient_rows: list[dict[str, Any]] = []
+    all_new_lot_rows: list[dict[str, Any]] = []
 
-    log_rows: List[List[Any]] = []
-    raw_embed_rows: List[List[Any]] = []
+    log_rows: list[list[Any]] = []
+    raw_embed_rows: list[list[Any]] = []
 
     # Повторный НОМЕР лота — это не дубль сообщения и должен считаться.
     # Дедупликация нужна только если один и тот же Discord message_id
     # каким-либо образом попал в выборку повторно.
-    seen_message_ids: Set[str] = set()
-    seen_new_lots: Set[int] = set()
-    seen_ancient_lots: Set[int] = set()
+    seen_message_ids: set[str] = set()
+    seen_new_lots: set[int] = set()
+    seen_ancient_lots: set[int] = set()
 
     scanned = 0
     skipped_returned = 0
@@ -4031,14 +2732,16 @@ async def slash_auction_prices(
 
             if message_id and message_id in seen_message_ids:
                 duplicate_message_ids_skipped += 1
-                log_rows.append([
-                    "MESSAGE_DUPLICATE",
-                    "",
-                    "Тот же Discord message_id уже был обработан; повтор API пропущен",
-                    message_id,
-                    info.get("message_url", ""),
-                    text,
-                ])
+                log_rows.append(
+                    [
+                        "MESSAGE_DUPLICATE",
+                        "",
+                        "Тот же Discord message_id уже был обработан; повтор API пропущен",
+                        message_id,
+                        info.get("message_url", ""),
+                        text,
+                    ]
+                )
                 continue
 
             if message_id:
@@ -4049,15 +2752,17 @@ async def slash_auction_prices(
 
             if info["embeds_count"] > 0:
                 if len(raw_embed_rows) < raw_embed_rows_limit:
-                    raw_embed_rows.append([
-                        info.get("created_at", ""),
-                        info.get("author", ""),
-                        info.get("author_id", ""),
-                        info.get("embeds_count", 0),
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    raw_embed_rows.append(
+                        [
+                            info.get("created_at", ""),
+                            info.get("author", ""),
+                            info.get("author_id", ""),
+                            info.get("embeds_count", 0),
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
                 else:
                     raw_embed_rows_truncated += 1
 
@@ -4068,52 +2773,60 @@ async def slash_auction_prices(
 
                 if lot_no in seen_new_lots:
                     repeated_lot_numbers_counted += 1
-                    log_rows.append([
-                        "NEW_REPEAT_COUNTED",
-                        lot_no,
-                        "Повторный номер нового лота: запись НЕ пропущена и будет засчитана",
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    log_rows.append(
+                        [
+                            "NEW_REPEAT_COUNTED",
+                            lot_no,
+                            "Повторный номер нового лота: запись НЕ пропущена и будет засчитана",
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
 
                 seen_new_lots.add(lot_no)
                 all_new_lot_rows.append(new_lot)
 
                 if new_lot["type"] == "returned":
                     skipped_returned += 1
-                    log_rows.append([
-                        "NEW_RETURNED",
-                        lot_no,
-                        "Предмет возвращён продавцу, не считаем",
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    log_rows.append(
+                        [
+                            "NEW_RETURNED",
+                            lot_no,
+                            "Предмет возвращён продавцу, не считаем",
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
                     continue
 
                 if new_lot["type"] == "no_bid":
                     skipped_no_bid += 1
-                    log_rows.append([
-                        "NEW_NO_BID",
-                        lot_no,
-                        new_lot.get("status", "Нет последней ставки"),
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    log_rows.append(
+                        [
+                            "NEW_NO_BID",
+                            lot_no,
+                            new_lot.get("status", "Нет последней ставки"),
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
                     continue
 
                 if new_lot.get("price") is None:
                     skipped_bad_price += 1
-                    log_rows.append([
-                        "NEW_BAD_PRICE",
-                        lot_no,
-                        "Не удалось достать итоговую цену",
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    log_rows.append(
+                        [
+                            "NEW_BAD_PRICE",
+                            lot_no,
+                            "Не удалось достать итоговую цену",
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
                     continue
 
                 if new_lot["is_auctioneer"]:
@@ -4130,14 +2843,16 @@ async def slash_auction_prices(
 
                 if lot_no in seen_ancient_lots:
                     repeated_lot_numbers_counted += 1
-                    log_rows.append([
-                        "ANCIENT_REPEAT_COUNTED",
-                        lot_no,
-                        "Повторный номер древнего лота: запись НЕ пропущена и будет засчитана",
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    log_rows.append(
+                        [
+                            "ANCIENT_REPEAT_COUNTED",
+                            lot_no,
+                            "Повторный номер древнего лота: запись НЕ пропущена и будет засчитана",
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
 
                 seen_ancient_lots.add(lot_no)
 
@@ -4145,14 +2860,16 @@ async def slash_auction_prices(
                     ancient_rows.append(ancient_lot)
                 else:
                     skipped_bad_price += 1
-                    log_rows.append([
-                        "ANCIENT_BAD_PRICE",
-                        lot_no,
-                        "Древний лот найден, но стартовая цена не распарсилась",
-                        info.get("message_id", ""),
-                        info.get("message_url", ""),
-                        text,
-                    ])
+                    log_rows.append(
+                        [
+                            "ANCIENT_BAD_PRICE",
+                            lot_no,
+                            "Древний лот найден, но стартовая цена не распарсилась",
+                            info.get("message_id", ""),
+                            info.get("message_url", ""),
+                            text,
+                        ]
+                    )
 
                 continue
 
@@ -4167,14 +2884,16 @@ async def slash_auction_prices(
             )
 
             if maybe_auction:
-                log_rows.append([
-                    "UNPARSED",
-                    "",
-                    "Сообщение похоже на аукционное, но не распарсилось",
-                    info.get("message_id", ""),
-                    info.get("message_url", ""),
-                    text,
-                ])
+                log_rows.append(
+                    [
+                        "UNPARSED",
+                        "",
+                        "Сообщение похоже на аукционное, но не распарсилось",
+                        info.get("message_id", ""),
+                        info.get("message_url", ""),
+                        text,
+                    ]
+                )
 
         people_total = sum(row["price"] for row in people_rows if row.get("price") is not None)
         auctioneer_total = sum(row["price"] for row in auctioneer_rows if row.get("price") is not None)
@@ -4231,26 +2950,29 @@ async def slash_auction_prices(
             ephemeral=True,
         )
 
+
 # ============================================================================
 # 💾 АДМИН КОМАНДЫ: СКАЧАТЬ ФАЙЛЫ
 # ============================================================================
 
+
 @bot.slash_command(name="скачать_анализ", description="Скачать лог анализа")
-async def slash_download_analysis_log(interaction: disnake.CommandInteraction):
-    if interaction.author.id != OWNER_ID: return
+async def slash_download_analysis_log(interaction: ApplicationCommandInteraction) -> None:
+    if interaction.author.id != OWNER_ID:
+        return
     await interaction.response.defer()
     for handler in analysis_logger.handlers:
         if isinstance(handler, logging.FileHandler):
             handler.flush()
 
-    if os.path.exists(ANALYSIS_LOG_FILE):
+    if await asyncio.to_thread(os.path.exists, ANALYSIS_LOG_FILE):
         await interaction.followup.send(file=disnake.File(ANALYSIS_LOG_FILE))
     else:
         await interaction.followup.send("❌ Гав! Файл не найден. *нюхает*", ephemeral=True)
 
 
 @bot.slash_command(name="скачать_ошибки", description="Скачать общий лог ошибок бота")
-async def slash_download_logs(interaction: disnake.CommandInteraction):
+async def slash_download_logs(interaction: ApplicationCommandInteraction) -> None:
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
         return
@@ -4264,32 +2986,33 @@ async def slash_download_logs(interaction: disnake.CommandInteraction):
 
     await asyncio.sleep(0.1)
 
-    if os.path.exists(BOT_ERROR_LOG):
+    if await asyncio.to_thread(os.path.exists, BOT_ERROR_LOG):
         await interaction.followup.send(file=disnake.File(BOT_ERROR_LOG))
     else:
         await interaction.followup.send("❌ Гав! Файл логов пуст или не найден. *скулит*", ephemeral=True)
 
 
 @bot.slash_command(name="скачать_бд", description="Скачать таблицу успехов из БД (CSV)")
-async def slash_download_db(interaction: disnake.CommandInteraction):
+async def slash_download_db(interaction: ApplicationCommandInteraction) -> None:
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
         return
 
     await interaction.response.defer()
-    csv_data = db_manager.export_to_csv()
+    csv_data = await asyncio.to_thread(db_manager.export_to_csv)
 
     if csv_data:
-        file_obj = io.BytesIO(csv_data.encode('utf-8'))
+        file_obj = io.BytesIO(csv_data.encode("utf-8"))
         file_obj.name = "model_success_log.csv"
         await interaction.followup.send(file=disnake.File(file_obj))
     else:
-        await interaction.followup.send("❌ Гав! Не удалось экспортировать данные или БД не подключена. *скулит*",
-                                        ephemeral=True)
+        await interaction.followup.send(
+            "❌ Гав! Не удалось экспортировать данные или БД не подключена. *скулит*", ephemeral=True
+        )
 
 
 @bot.slash_command(name="очистить_бд", description="Полная очистка таблицы успехов в БД")
-async def slash_clear_db(interaction: disnake.CommandInteraction):
+async def slash_clear_db(interaction: ApplicationCommandInteraction) -> None:
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
         return
@@ -4300,23 +3023,19 @@ async def slash_clear_db(interaction: disnake.CommandInteraction):
         await interaction.followup.send("❌ Гав! БД не подключена.", ephemeral=True)
         return
 
-    session = SessionLocal()
-    try:
-        count = session.query(ModelSuccessLog).count()
-        session.query(ModelSuccessLog).delete()
-        session.commit()
-        await interaction.followup.send(f"✅ ПсИИнка очистил БД! Удалено записей: `{count}` *виляет хвостом* 🐕",
-                                        ephemeral=True)
-    except Exception as e:
-        session.rollback()
-        logger.error(f"Error clearing DB: {e}")
-        await interaction.followup.send(f"❌ Ошибка очистки: {str(e)[:100]}", ephemeral=True)
-    finally:
-        session.close()
+    count = await asyncio.to_thread(db_manager.clear_all)
+    if count is None:
+        await interaction.followup.send("❌ Ошибка очистки БД. Подробности записаны в лог.", ephemeral=True)
+        return
+
+    await interaction.followup.send(
+        f"✅ ПсИИнка очистил БД! Удалено записей: `{count}` *виляет хвостом* 🐕",
+        ephemeral=True,
+    )
 
 
 @bot.slash_command(name="записать_тест", description="Перенос данных из временного лога тестов в БД")
-async def slash_commit_tests(interaction: disnake.CommandInteraction):
+async def slash_commit_tests(interaction: ApplicationCommandInteraction) -> None:
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
         return
@@ -4327,27 +3046,49 @@ async def slash_commit_tests(interaction: disnake.CommandInteraction):
         await interaction.followup.send("❌ Гав! БД не подключена, временный лог не трогаю.", ephemeral=True)
         return
 
-    records = pending_test_manager.read_records()
+    records = await asyncio.to_thread(pending_test_manager.read_records)
     if not records:
-        await interaction.followup.send("ℹ️ ПсИИнка проверил временный лог — там пусто. *нюхает* 🐕", ephemeral=True)
+        await interaction.followup.send(
+            "ℹ️ ПсИИнка проверил временный лог — там пусто. *нюхает* 🐕", ephemeral=True
+        )
         return
 
-    count = 0
+    # One transaction: a failed write never destroys the pending CSV.
     try:
-        for prov, mod, lat in records:
-            db_manager.log_success(prov, mod, lat)
-            count += 1
-        pending_test_manager.clear()
-        await interaction.followup.send(f"✅ ПсИИнка записал `{count}` успешных тестов в БД Neon! *виляет хвостом* 🐕",
-                                        ephemeral=True)
-    except Exception as e:
-        logger.error(f"Error committing tests: {e}", exc_info=True)
-        await interaction.followup.send(f"❌ Ошибка записи, временный лог НЕ очищен: {str(e)[:100]}", ephemeral=True)
+        imported = await asyncio.to_thread(db_manager.import_pending_records, records)
+        if not imported:
+            await interaction.followup.send(
+                "❌ База данных отклонила перенос. Временный лог сохранён; подробности в журнале.",
+                ephemeral=True,
+            )
+            return
+
+        cleared = await asyncio.to_thread(pending_test_manager.acknowledge_records, records)
+        if not cleared:
+            await interaction.followup.send(
+                "⚠️ Записи сохранены в БД, но временный CSV не удалось обновить. "
+                "Не повторяйте перенос до проверки файла, чтобы избежать дублей.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ ПсИИнка записал `{len(records)}` успешных тестов в БД Neon! *виляет хвостом* 🐕",
+            ephemeral=True,
+        )
+    except Exception:
+        logger.exception("Error committing test records to the DB")
+        await interaction.followup.send(
+            "❌ Ошибка переноса тестов. Проверьте журнал и временный CSV.",
+            ephemeral=True,
+        )
+
 
 # ============================================================================
 # ✉️ КОМАНДА ДЛЯ ВЛАДЕЛЬЦА: НАПИСАТЬ В КАНАЛ ОТ ЛИЦА БОТА
 # /напиши канал:<канал> текст:<текст> закрепить:<Да/Нет>
 # ============================================================================
+
 
 def normalize_channel_lookup_text(text: str) -> str:
     """Нормализация для поиска каналов по названию/серверу."""
@@ -4356,7 +3097,7 @@ def normalize_channel_lookup_text(text: str) -> str:
     return " ".join(text.split())
 
 
-def parse_discord_channel_id(raw: str) -> Optional[int]:
+def parse_discord_channel_id(raw: str) -> int | None:
     """
     Достаёт ID канала из:
     - значения autocomplete: 123456789012345678
@@ -4376,17 +3117,14 @@ def parse_discord_channel_id(raw: str) -> Optional[int]:
     if re.fullmatch(r"\d{15,25}", raw):
         return int(raw)
 
-    link_match = re.search(
-        r"discord(?:app)?\.com/channels/\d{15,25}/(\d{15,25})(?:/\d{15,25})?",
-        raw
-    )
+    link_match = re.search(r"discord(?:app)?\.com/channels/\d{15,25}/(\d{15,25})(?:/\d{15,25})?", raw)
     if link_match:
         return int(link_match.group(1))
 
     return None
 
 
-def split_discord_message(text: str, limit: int = 2000) -> List[str]:
+def split_discord_message(text: str, limit: int = 2000) -> list[str]:
     """Делит длинный текст на куски до лимита Discord."""
     text = text or ""
     chunks = []
@@ -4406,7 +3144,7 @@ def split_discord_message(text: str, limit: int = 2000) -> List[str]:
     return chunks or [""]
 
 
-def get_writable_text_channels() -> List[disnake.TextChannel]:
+def get_writable_text_channels() -> list[disnake.TextChannel]:
     """Все текстовые каналы, куда бот может писать."""
     result = []
 
@@ -4423,7 +3161,7 @@ def get_writable_text_channels() -> List[disnake.TextChannel]:
     return result
 
 
-def find_channels_by_query(query: str, limit: int = 25) -> List[disnake.TextChannel]:
+def find_channels_by_query(query: str, limit: int = 25) -> list[disnake.TextChannel]:
     """Ищет каналы по названию канала, названию сервера или ID."""
     query_norm = normalize_channel_lookup_text(query)
     channels = get_writable_text_channels()
@@ -4472,9 +3210,8 @@ def find_channels_by_query(query: str, limit: int = 25) -> List[disnake.TextChan
 
 
 async def owner_channel_autocomplete(
-    interaction: disnake.ApplicationCommandInteraction,
-    user_input: str
-):
+    interaction: ApplicationCommandInteraction, user_input: str
+) -> dict[str, str] | list[str]:
     """
     Всплывающий список каналов для /напиши.
     Показывает каналы всех серверов, где бот может писать.
@@ -4518,7 +3255,7 @@ def replace_role_name_mentions_for_guild(text: str, guild: disnake.Guild) -> str
     roles_sorted = sorted(
         [role for role in guild.roles if role.name and role.name != "@everyone"],
         key=lambda role: len(role.name),
-        reverse=True
+        reverse=True,
     )
 
     for role in roles_sorted:
@@ -4527,16 +3264,14 @@ def replace_role_name_mentions_for_guild(text: str, guild: disnake.Guild) -> str
             continue
 
         # Ищет именно @НазваниеРоли, без замены внутри уже готовых <@&...>
-        pattern = re.compile(
-            rf"(?<![<\w])@{re.escape(role_name)}(?![\w>])",
-            flags=re.IGNORECASE
-        )
+        pattern = re.compile(rf"(?<![<\w])@{re.escape(role_name)}(?![\w>])", flags=re.IGNORECASE)
 
         result = pattern.sub(role.mention, result)
 
     return result
 
-async def ensure_guild_members_loaded(guild: disnake.Guild):
+
+async def ensure_guild_members_loaded(guild: disnake.Guild) -> None:
     """
     Подгружает участников сервера в кэш, чтобы бот мог найти @ник по имени.
     Требует включённый Server Members Intent в Discord Developer Portal.
@@ -4551,11 +3286,11 @@ async def ensure_guild_members_loaded(guild: disnake.Guild):
 
         if hasattr(guild, "chunk"):
             await guild.chunk(cache=True)
-    except Exception as e:
+    except (disnake.HTTPException, disnake.ClientException, asyncio.TimeoutError) as e:
         logger.warning(f"Не удалось подгрузить участников сервера {guild.name}: {e}")
 
 
-def get_member_ping_names(member: disnake.Member) -> Set[str]:
+def get_member_ping_names(member: disnake.Member) -> set[str]:
     """
     Какие варианты имени разрешаем писать в /напиши:
     @username
@@ -4593,9 +3328,9 @@ async def replace_member_name_mentions_for_guild(text: str, guild: disnake.Guild
     await ensure_guild_members_loaded(guild)
 
     result = text
-    name_to_member = {}
-    original_name_by_key = {}
-    ambiguous = set()
+    name_to_member: dict[str, disnake.Member] = {}
+    original_name_by_key: dict[str, str] = {}
+    ambiguous: set[str] = set()
 
     for member in guild.members:
         if member.bot:
@@ -4646,48 +3381,38 @@ async def prepare_owner_message_text(text: str, guild: disnake.Guild) -> str:
         text = await replace_member_name_mentions_for_guild(text, guild)
 
     return text
-    
+
+
 def build_allowed_mentions_for_owner_message() -> disnake.AllowedMentions:
     """
     Разрешаем пинговать роли и пользователей, но не @everyone/@here.
     @everyone/@here специально выключены, чтобы случайно не снести сервер.
     """
-    return disnake.AllowedMentions(
-        everyone=False,
-        users=True,
-        roles=True,
-        replied_user=False
-    )
+    return disnake.AllowedMentions(everyone=False, users=True, roles=True, replied_user=False)
 
 
 @bot.slash_command(
     name="напиши",
     description="Отправить сообщение в выбранный канал от лица бота. Только для владельца.",
-    dm_permission=True
+    dm_permission=True,
 )
 async def slash_owner_write(
-    interaction: disnake.CommandInteraction,
+    interaction: ApplicationCommandInteraction,
     канал: str = commands.Param(
         min_length=1,
         autocomplete=owner_channel_autocomplete,
-        description="Начни вводить название канала/сервера или вставь ссылку/ID"
+        description="Начни вводить название канала/сервера или вставь ссылку/ID",
     ),
-    текст: str = commands.Param(
-        min_length=1,
-        description="Текст, который бот отправит в канал"
-    ),
+    текст: str = commands.Param(min_length=1, description="Текст, который бот отправит в канал"),
     закрепить: str = commands.Param(
-        choices=["Нет", "Да"],
-        default="Нет",
-        description="Закрепить отправленное сообщение в канале?"
-    )
-):
+        choices=["Нет", "Да"], default="Нет", description="Закрепить отправленное сообщение в канале?"
+    ),
+) -> None:
     try:
         # Только владелец бота.
         if interaction.author.id != OWNER_ID:
             await interaction.response.send_message(
-                "❌ Гав! Эта команда доступна только владельцу бота.",
-                ephemeral=True
+                "❌ Гав! Эта команда доступна только владельцу бота.", ephemeral=True
             )
             return
 
@@ -4695,8 +3420,7 @@ async def slash_owner_write(
         # В сервере тоже не даём пользоваться, чтобы текст не светился в командном канале.
         if interaction.guild is not None:
             await interaction.response.send_message(
-                "❌ Гав! Эту команду пиши мне в ЛС, чтобы текст не светился на сервере.",
-                ephemeral=True
+                "❌ Гав! Эту команду пиши мне в ЛС, чтобы текст не светился на сервере.", ephemeral=True
             )
             return
 
@@ -4712,10 +3436,7 @@ async def slash_owner_write(
                 channel_id = matches[0].id
 
             elif len(matches) > 1:
-                variants = "\n".join(
-                    f"• `{ch.guild.name} / #{ch.name}` — `{ch.id}`"
-                    for ch in matches
-                )
+                variants = "\n".join(f"• `{ch.guild.name} / #{ch.name}` — `{ch.id}`" for ch in matches)
                 await interaction.edit_original_response(
                     "❌ Нашлось несколько похожих каналов. "
                     "Выбери точный канал из всплывающего списка или вставь ID.\n\n"
@@ -4743,23 +3464,17 @@ async def slash_owner_write(
                 return
 
         if not isinstance(target_channel, disnake.TextChannel):
-            await interaction.edit_original_response(
-                "❌ Это не обычный текстовый канал, куда я могу писать."
-            )
+            await interaction.edit_original_response("❌ Это не обычный текстовый канал, куда я могу писать.")
             return
 
         bot_member = target_channel.guild.me or target_channel.guild.get_member(bot.user.id)
         if not bot_member:
-            await interaction.edit_original_response(
-                "❌ Не смог проверить свои права на этом сервере."
-            )
+            await interaction.edit_original_response("❌ Не смог проверить свои права на этом сервере.")
             return
 
         perms = target_channel.permissions_for(bot_member)
         if not perms.view_channel or not perms.send_messages:
-            await interaction.edit_original_response(
-                "❌ У меня нет прав видеть этот канал или писать туда."
-            )
+            await interaction.edit_original_response("❌ У меня нет прав видеть этот канал или писать туда.")
             return
 
         should_pin = закрепить == "Да"
@@ -4779,10 +3494,7 @@ async def slash_owner_write(
 
         sent_messages = []
         for chunk in chunks:
-            sent_msg = await target_channel.send(
-                chunk,
-                allowed_mentions=allowed_mentions
-            )
+            sent_msg = await target_channel.send(chunk, allowed_mentions=allowed_mentions)
             sent_messages.append(sent_msg)
 
         pinned = False
@@ -4828,14 +3540,17 @@ async def slash_owner_write(
         if interaction.response.is_done():
             await interaction.edit_original_response(error_text)
         else:
-            await interaction.response.send_message(error_text, ephemeral=True)    
-#жопажопа
+            await interaction.response.send_message(error_text, ephemeral=True)
+
+
+# жопажопа
 
 # ============================================================================
 # ЛС-ПЕРЕПИСКА ОТ ЛИЦА БОТА: /напиши_юзеру + пересылка ответов овнеру
 # ============================================================================
 
-def extract_discord_user_id(raw: str) -> Optional[int]:
+
+def extract_discord_user_id(raw: str) -> int | None:
     """
     Достаёт ID пользователя из:
     - 123456789012345678
@@ -4885,7 +3600,7 @@ def get_member_search_names(member: disnake.Member) -> set[str]:
     return names
 
 
-async def find_user_for_owner_dm(raw_target: str) -> Tuple[Optional[disnake.User], Optional[str]]:
+async def find_user_for_owner_dm(raw_target: str) -> tuple[disnake.User | disnake.Member | None, str | None]:
     """
     Ищет пользователя по:
     - числовому ID
@@ -4923,7 +3638,7 @@ async def find_user_for_owner_dm(raw_target: str) -> Tuple[Optional[disnake.User
             await ensure_guild_members_loaded(guild)
         except NameError:
             pass
-        except Exception as e:
+        except (disnake.HTTPException, disnake.ClientException, asyncio.TimeoutError) as e:
             logger.warning(f"Не удалось подгрузить участников {guild.name}: {e}")
 
         for member in guild.members:
@@ -4934,10 +3649,7 @@ async def find_user_for_owner_dm(raw_target: str) -> Tuple[Optional[disnake.User
                 matches[member.id] = member
 
     if not matches:
-        return None, (
-            "❌ Не нашёл пользователя по такому нику.\n"
-            "Лучше укажи числовой ID пользователя."
-        )
+        return None, ("❌ Не нашёл пользователя по такому нику.\nЛучше укажи числовой ID пользователя.")
 
     if len(matches) > 1:
         variants = "\n".join(
@@ -4946,41 +3658,30 @@ async def find_user_for_owner_dm(raw_target: str) -> Tuple[Optional[disnake.User
         )
 
         return None, (
-            "❌ Нашлось несколько пользователей с таким именем. "
-            "Укажи точный числовой ID.\n\n"
-            f"{variants}"
+            f"❌ Нашлось несколько пользователей с таким именем. Укажи точный числовой ID.\n\n{variants}"
         )
 
     member = next(iter(matches.values()))
     return member, None
-    
+
+
 @bot.slash_command(
     name="напиши_юзеру",
     description="Отправить пользователю ЛС от лица бота. Только для владельца.",
-    contexts=disnake.InteractionContextTypes(bot_dm=True)
+    contexts=disnake.InteractionContextTypes(bot_dm=True),
 )
 async def slash_owner_write_user(
-    interaction: disnake.CommandInteraction,
-    пользователь: str = commands.Param(
-        min_length=1,
-        description="ID пользователя, mention или @username"
-    ),
-    текст: str = commands.Param(
-        min_length=1,
-        description="Текст, который бот отправит человеку в ЛС"
-    )
-):
+    interaction: ApplicationCommandInteraction,
+    пользователь: str = commands.Param(min_length=1, description="ID пользователя, mention или @username"),
+    текст: str = commands.Param(min_length=1, description="Текст, который бот отправит человеку в ЛС"),
+) -> None:
     try:
         if interaction.author.id != OWNER_ID:
-            await interaction.response.send_message(
-                "❌ Эта команда доступна только владельцу бота."
-            )
+            await interaction.response.send_message("❌ Эта команда доступна только владельцу бота.")
             return
 
         if interaction.guild is not None:
-            await interaction.response.send_message(
-                "❌ Эта команда работает только в ЛС бота."
-            )
+            await interaction.response.send_message("❌ Эта команда работает только в ЛС бота.")
             return
 
         await interaction.response.defer()
@@ -5003,11 +3704,8 @@ async def slash_owner_write_user(
             await target_user.send(
                 chunk,
                 allowed_mentions=disnake.AllowedMentions(
-                    everyone=False,
-                    users=False,
-                    roles=False,
-                    replied_user=False
-                )
+                    everyone=False, users=False, roles=False, replied_user=False
+                ),
             )
             sent_count += 1
 
@@ -5039,8 +3737,9 @@ async def slash_owner_write_user(
         else:
             await interaction.response.send_message(error_text)
 
+
 @bot.listen("on_message")
-async def owner_dm_relay_listener(message: disnake.Message):
+async def owner_dm_relay_listener(message: disnake.Message) -> None:
     """
     Если пользователь пишет боту в ЛС, бот пересылает это владельцу.
     Сообщения самого владельца не пересылаем, чтобы не ловить собственные команды/текст.
@@ -5070,8 +3769,7 @@ async def owner_dm_relay_listener(message: disnake.Message):
 
         if message.attachments:
             attachments_text = "\n\n**Вложения:**\n" + "\n".join(
-                f"• {attachment.filename}: {attachment.url}"
-                for attachment in message.attachments
+                f"• {attachment.filename}: {attachment.url}" for attachment in message.attachments
             )
 
         if not content.strip() and not attachments_text:
@@ -5094,15 +3792,13 @@ async def owner_dm_relay_listener(message: disnake.Message):
             await owner.send(
                 chunk,
                 allowed_mentions=disnake.AllowedMentions(
-                    everyone=False,
-                    users=False,
-                    roles=False,
-                    replied_user=False
-                )
+                    everyone=False, users=False, roles=False, replied_user=False
+                ),
             )
 
     except Exception as e:
         logger.error(f"Ошибка пересылки ЛС владельцу: {e}", exc_info=True)
+
 
 # ============================================================================
 # 📝 КОМАНДА И РЕАКЦИЯ ДЛЯ ВЛАДЕЛЬЦА: РЕДАКТИРОВАТЬ СООБЩЕНИЕ БОТА
@@ -5113,7 +3809,7 @@ async def owner_dm_relay_listener(message: disnake.Message):
 PENCIL_EMOJI = "📝"
 
 
-def parse_discord_message_link(raw: str) -> Tuple[Optional[int], Optional[int], Optional[int]]:
+def parse_discord_message_link(raw: str) -> tuple[int | None, int | None, int | None]:
     """
     Достаёт guild_id, channel_id, message_id из:
     - ссылки Discord: https://discord.com/channels/GUILD_ID/CHANNEL_ID/MESSAGE_ID
@@ -5125,10 +3821,7 @@ def parse_discord_message_link(raw: str) -> Tuple[Optional[int], Optional[int], 
 
     raw = raw.strip()
 
-    link_match = re.search(
-        r"discord(?:app)?\.com/channels/(\d{15,25})/(\d{15,25})/(\d{15,25})",
-        raw
-    )
+    link_match = re.search(r"discord(?:app)?\.com/channels/(\d{15,25})/(\d{15,25})/(\d{15,25})", raw)
     if link_match:
         return int(link_match.group(1)), int(link_match.group(2)), int(link_match.group(3))
 
@@ -5141,7 +3834,7 @@ def parse_discord_message_link(raw: str) -> Tuple[Optional[int], Optional[int], 
     return None, None, None
 
 
-async def fetch_bot_message_from_link(message_link: str) -> Optional[disnake.Message]:
+async def fetch_bot_message_from_link(message_link: str) -> disnake.Message | None:
     """Находит сообщение по ссылке/ID и проверяет, что оно принадлежит этому боту."""
     guild_id, channel_id, message_id = parse_discord_message_link(message_link)
 
@@ -5156,11 +3849,12 @@ async def fetch_bot_message_from_link(message_link: str) -> Optional[disnake.Mes
             logger.error(f"Не удалось получить канал {channel_id}: {e}", exc_info=True)
             return None
 
-    if not hasattr(channel, "fetch_message"):
+    fetch_message = getattr(channel, "fetch_message", None)
+    if fetch_message is None:
         return None
 
     try:
-        message = await channel.fetch_message(message_id)
+        message = await fetch_message(message_id)
     except Exception as e:
         logger.error(f"Не удалось получить сообщение {message_id}: {e}", exc_info=True)
         return None
@@ -5168,10 +3862,10 @@ async def fetch_bot_message_from_link(message_link: str) -> Optional[disnake.Mes
     if not bot.user or message.author.id != bot.user.id:
         return None
 
-    return message
+    return message if isinstance(message, disnake.Message) else None
 
 
-def prepare_edited_bot_text(text: str, guild: Optional[disnake.Guild]) -> str:
+def prepare_edited_bot_text(text: str, guild: disnake.Guild | None) -> str:
     """
     Готовит текст для отправки/редактирования:
     - заменяет @НазваниеРоли на настоящий пинг роли, если сообщение в серверном канале;
@@ -5180,11 +3874,7 @@ def prepare_edited_bot_text(text: str, guild: Optional[disnake.Guild]) -> str:
     text = text or ""
 
     if guild:
-        try:
-            text = replace_role_name_mentions_for_guild(text, guild)
-        except NameError:
-            # Если ты вдруг не вставил функцию из блока /напиши — просто отправит текст как есть.
-            pass
+        text = replace_role_name_mentions_for_guild(text, guild)
 
     return text
 
@@ -5196,18 +3886,10 @@ def get_owner_allowed_mentions() -> disnake.AllowedMentions:
     try:
         return build_allowed_mentions_for_owner_message()
     except NameError:
-        return disnake.AllowedMentions(
-            everyone=False,
-            users=True,
-            roles=True,
-            replied_user=False
-        )
+        return disnake.AllowedMentions(everyone=False, users=True, roles=True, replied_user=False)
 
 
-async def edit_bot_message_content(
-    target_message: disnake.Message,
-    new_text: str
-) -> Tuple[bool, str]:
+async def edit_bot_message_content(target_message: disnake.Message, new_text: str) -> tuple[bool, str]:
     """Редактирует сообщение бота."""
     if not bot.user or target_message.author.id != bot.user.id:
         return False, "Это сообщение написал не бот."
@@ -5218,13 +3900,13 @@ async def edit_bot_message_content(
     final_text = prepare_edited_bot_text(new_text, target_message.guild)
 
     if len(final_text) > 2000:
-        return False, f"Текст слишком длинный: `{len(final_text)}` символов. Для редактирования одного сообщения максимум `2000`."
+        return (
+            False,
+            f"Текст слишком длинный: `{len(final_text)}` символов. Для редактирования одного сообщения максимум `2000`.",
+        )
 
     try:
-        await target_message.edit(
-            content=final_text,
-            allowed_mentions=get_owner_allowed_mentions()
-        )
+        await target_message.edit(content=final_text, allowed_mentions=get_owner_allowed_mentions())
         return True, "Сообщение отредактировано."
     except disnake.Forbidden:
         return False, "У меня нет прав редактировать это сообщение."
@@ -5236,25 +3918,19 @@ async def edit_bot_message_content(
 @bot.slash_command(
     name="редактируй",
     description="Редактировать сообщение бота по ссылке. Только для владельца.",
-    dm_permission=True
+    dm_permission=True,
 )
 async def slash_owner_edit_bot_message(
-    interaction: disnake.CommandInteraction,
-    сообщение: str = commands.Param(
-        min_length=1,
-        description="Ссылка на сообщение бота"
-    ),
-    текст: str = commands.Param(
-        min_length=1,
-        description="Новый текст сообщения"
-    )
-):
+    interaction: ApplicationCommandInteraction,
+    сообщение: str = commands.Param(min_length=1, description="Ссылка на сообщение бота"),
+    текст: str = commands.Param(min_length=1, description="Новый текст сообщения"),
+) -> None:
     try:
         # Только владелец бота.
         if interaction.author.id != OWNER_ID:
             await interaction.response.send_message(
                 "❌ Гав! Эта команда доступна только владельцу бота.",
-                ephemeral=(interaction.guild is not None)
+                ephemeral=(interaction.guild is not None),
             )
             return
 
@@ -5274,9 +3950,7 @@ async def slash_owner_edit_bot_message(
         if ok:
             jump_url = getattr(target_message, "jump_url", None)
             if jump_url:
-                await interaction.edit_original_response(
-                    f"✅ {info}\n{jump_url}"
-                )
+                await interaction.edit_original_response(f"✅ {info}\n{jump_url}")
             else:
                 await interaction.edit_original_response(f"✅ {info}")
         else:
@@ -5289,14 +3963,11 @@ async def slash_owner_edit_bot_message(
         if interaction.response.is_done():
             await interaction.edit_original_response(error_text)
         else:
-            await interaction.response.send_message(
-                error_text,
-                ephemeral=(interaction.guild is not None)
-            )
+            await interaction.response.send_message(error_text, ephemeral=(interaction.guild is not None))
 
 
 @bot.event
-async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
+async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent) -> None:
     """
     Если владелец ставит 📝 на сообщение бота, бот спрашивает новый текст в ЛС
     и редактирует это сообщение.
@@ -5317,11 +3988,12 @@ async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
                 logger.error(f"Не удалось получить канал реакции {payload.channel_id}: {e}", exc_info=True)
                 return
 
-        if not hasattr(channel, "fetch_message"):
+        fetch_message = getattr(channel, "fetch_message", None)
+        if fetch_message is None:
             return
 
         try:
-            target_message = await channel.fetch_message(payload.message_id)
+            target_message = await fetch_message(payload.message_id)
         except Exception as e:
             logger.error(f"Не удалось получить сообщение реакции {payload.message_id}: {e}", exc_info=True)
             return
@@ -5348,10 +4020,7 @@ async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
         )
 
         def check(dm_message: disnake.Message) -> bool:
-            return (
-                dm_message.author.id == OWNER_ID
-                and isinstance(dm_message.channel, disnake.DMChannel)
-            )
+            return dm_message.author.id == OWNER_ID and isinstance(dm_message.channel, disnake.DMChannel)
 
         try:
             reply = await bot.wait_for("message", check=check, timeout=300)
@@ -5374,6 +4043,7 @@ async def on_raw_reaction_add(payload: disnake.RawReactionActionEvent):
 
     except Exception as e:
         logger.error(f"Ошибка в on_raw_reaction_add для редактирования: {e}", exc_info=True)
+
 
 # ============================================================================
 # 🏠 КОМАНДА: !недвижка
@@ -5409,13 +4079,29 @@ REAL_ESTATE_WORLD = {
     },
     "Крорим": {
         "Республика Ивелтин": [
-            "Ромау", "Болгар", "Карталин", "Горманд", "Назлин", "Тотеншор",
-            "Вьесте", "Броивел", "Склоны Альбы", "Объятия матери", "Арзар-Дзеге",
-            "Боннар", "Карналорт", "Поселение на выбор"
+            "Ромау",
+            "Болгар",
+            "Карталин",
+            "Горманд",
+            "Назлин",
+            "Тотеншор",
+            "Вьесте",
+            "Броивел",
+            "Склоны Альбы",
+            "Объятия матери",
+            "Арзар-Дзеге",
+            "Боннар",
+            "Карналорт",
+            "Поселение на выбор",
         ],
         "Стальное Королевство": [
-            "Стальград", "Палхорн", "Аскар-Дур", "Жикарикан",
-            "Махиненбаубург", "Цванралор", "Поселение на выбор"
+            "Стальград",
+            "Палхорн",
+            "Аскар-Дур",
+            "Жикарикан",
+            "Махиненбаубург",
+            "Цванралор",
+            "Поселение на выбор",
         ],
     },
     "Брандар": {
@@ -5429,22 +4115,22 @@ REAL_ESTATE_WORLD = {
 }
 
 REAL_ESTATE_QUALITIES = [
-    "Ужасное",          # 2%
-    "Плохое",           # 5%
-    "Ниже среднего",    # 10%
-    "Приемлемое",       # 14%
-    "Нормальное",       # 34%
-    "Хорошее",          # 20%
-    "Очень хорошее",    # 10%
-    "Отличное",         # 4%
-    "Шедевр",           # 1%
+    "Ужасное",  # 2%
+    "Плохое",  # 5%
+    "Ниже среднего",  # 10%
+    "Приемлемое",  # 14%
+    "Нормальное",  # 34%
+    "Хорошее",  # 20%
+    "Очень хорошее",  # 10%
+    "Отличное",  # 4%
+    "Шедевр",  # 1%
 ]
 
 # Недвижкаролл использует ровно ту же шкалу вероятностей, что и Качестворолл.
 REAL_ESTATE_QUALITY_WEIGHTS = [2, 5, 10, 14, 34, 20, 10, 4, 1]
 
 
-def has_real_estate_access(member):
+def has_real_estate_access(member: disnake.User | disnake.Member) -> bool:
     member_roles = getattr(member, "roles", [])
     member_role_names = {role.name.strip().lower() for role in member_roles}
     allowed_role_names = {role_name.strip().lower() for role_name in REAL_ESTATE_ALLOWED_ROLES}
@@ -5452,43 +4138,46 @@ def has_real_estate_access(member):
     return bool(member_role_names & allowed_role_names)
 
 
-def roll_real_estate():
+def roll_real_estate() -> tuple[str, str]:
     location_variants = []
 
     for continent, countries in REAL_ESTATE_WORLD.items():
         for country, cities in countries.items():
-            location_variants.append({
-                "type": "normal",
-                "continent": continent,
-                "country": country,
-                "cities": cities,
-            })
+            location_variants.append(
+                {
+                    "type": "normal",
+                    "continent": continent,
+                    "country": country,
+                    "cities": cities,
+                }
+            )
 
     # Один-единственный дополнительный вариант во всём пуле:
     # если выпадает он, секретарь может выбрать континент, государство и город.
-    location_variants.append({
-        "type": "full_choice",
-    })
+    location_variants.append(
+        {
+            "type": "full_choice",
+        }
+    )
 
     location = random.choice(location_variants)
 
-    quality = random.choices(
-        REAL_ESTATE_QUALITIES,
-        weights=REAL_ESTATE_QUALITY_WEIGHTS,
-        k=1
-    )[0]
+    quality = random.choices(REAL_ESTATE_QUALITIES, weights=REAL_ESTATE_QUALITY_WEIGHTS, k=1)[0]
 
     if location["type"] == "full_choice":
         return "находящаяся на континенте на выбор, в государстве на выбор и городе на выбор", quality
 
     city = random.choice(location["cities"])
-    country = location["country"]
-    continent = location["continent"]
+    selected_country = location["country"]
+    selected_continent = location["continent"]
 
-    return f"находящаяся в городе **{city}**, государство **{country}**, континент **{continent}**", quality
+    return (
+        f"находящаяся в городе **{city}**, государство **{selected_country}**, континент **{selected_continent}**",
+        quality,
+    )
 
 
-def clean_real_estate_text(text):
+def clean_real_estate_text(text: str) -> str:
     text = text.strip()
 
     quote_pairs = [
@@ -5510,7 +4199,7 @@ REAL_ESTATE_TRIGGER = "недвижкаролл"
 
 
 @bot.listen("on_message")
-async def real_estate_message_listener(message):
+async def real_estate_message_listener(message: disnake.Message) -> None:
     if message.author.bot:
         return
 
@@ -5528,14 +4217,14 @@ async def real_estate_message_listener(message):
         await message.reply(
             "Гав... простите, но я не могу ничего поделать — вы не мой хозяин. "
             "Эта команда слушается только **Секретариат** или **Фаеркадастр**.",
-            mention_author=False
+            mention_author=False,
         )
         return
 
     if len(parts) < 2 or not parts[1].strip():
         await message.reply(
-            '❌ Укажи недвижку после команды. Пример: `Недвижкаролл старый особняк с садом`',
-            mention_author=False
+            "❌ Укажи недвижку после команды. Пример: `Недвижкаролл старый особняк с садом`",
+            mention_author=False,
         )
         return
 
@@ -5544,9 +4233,10 @@ async def real_estate_message_listener(message):
 
     await message.reply(
         f'Недвижка "{estate_text}" определилась по запросу секретаря {message.author.mention} '
-        f'как {location_text}, итоговое качество — **{quality}**.',
-        mention_author=False
+        f"как {location_text}, итоговое качество — **{quality}**.",
+        mention_author=False,
     )
+
 
 # ============================================================================
 # 🎲 КОМАНДА: Качестворолл
@@ -5562,15 +4252,15 @@ QUALITY_ROLL_REFERENCE_TEXT = (
 )
 
 QUALITY_ROLL_QUALITIES = [
-    "Ужасное",          # 2%
-    "Плохое",           # 5%
-    "Ниже среднего",    # 10%
-    "Приемлемое",       # 14%
-    "Нормальное",       # 34%
-    "Хорошее",          # 20%
-    "Очень хорошее",    # 10%
-    "Отличное",         # 4%
-    "Шедевр",           # 1%
+    "Ужасное",  # 2%
+    "Плохое",  # 5%
+    "Ниже среднего",  # 10%
+    "Приемлемое",  # 14%
+    "Нормальное",  # 34%
+    "Хорошее",  # 20%
+    "Очень хорошее",  # 10%
+    "Отличное",  # 4%
+    "Шедевр",  # 1%
 ]
 
 QUALITY_ROLL_WEIGHTS = [
@@ -5586,7 +4276,7 @@ QUALITY_ROLL_WEIGHTS = [
 ]
 
 
-def has_quality_roll_access(member):
+def has_quality_roll_access(member: disnake.User | disnake.Member) -> bool:
     member_roles = getattr(member, "roles", [])
     member_role_names = {role.name.strip().lower() for role in member_roles}
     allowed_role_names = {role_name.strip().lower() for role_name in QUALITY_ROLL_ALLOWED_ROLES}
@@ -5594,16 +4284,12 @@ def has_quality_roll_access(member):
     return bool(member_role_names & allowed_role_names)
 
 
-def roll_item_quality():
-    return random.choices(
-        QUALITY_ROLL_QUALITIES,
-        weights=QUALITY_ROLL_WEIGHTS,
-        k=1
-    )[0]
+def roll_item_quality() -> str:
+    return random.choices(QUALITY_ROLL_QUALITIES, weights=QUALITY_ROLL_WEIGHTS, k=1)[0]
 
 
 @bot.listen("on_message")
-async def quality_roll_message_listener(message):
+async def quality_roll_message_listener(message: disnake.Message) -> None:
     if message.author.bot:
         return
 
@@ -5621,14 +4307,13 @@ async def quality_roll_message_listener(message):
         await message.reply(
             "Гав... простите, но я не могу ничего поделать — эта команда слушается только "
             "**Секретариат**, **Фаеркадастр** или **Анкетолог**.",
-            mention_author=False
+            mention_author=False,
         )
         return
 
     if len(parts) < 2 or not parts[1].strip():
         await message.reply(
-            '❌ Укажи предмет после команды. Пример: `Качестворолл меч из пака`',
-            mention_author=False
+            "❌ Укажи предмет после команды. Пример: `Качестворолл меч из пака`", mention_author=False
         )
         return
 
@@ -5637,9 +4322,9 @@ async def quality_roll_message_listener(message):
 
     await message.reply(
         f'Предмет "{item_text}" определился по запросу секретаря {message.author.mention}, '
-        f'итоговое качество — **{quality}**.\n\n'
-        f'**Справка:**\n{QUALITY_ROLL_REFERENCE_TEXT}',
-        mention_author=False
+        f"итоговое качество — **{quality}**.\n\n"
+        f"**Справка:**\n{QUALITY_ROLL_REFERENCE_TEXT}",
+        mention_author=False,
     )
 
 
@@ -5654,7 +4339,7 @@ async def quality_roll_message_listener(message):
 BASE_DIR = str(ROOT_DIR)
 MERCENARY_DB_FILE = str(CORE_MERCENARY_DB_FILE)
 
-MERCENARY_SKILL_PROBABILITIES: Dict[str, int] = {
+MERCENARY_SKILL_PROBABILITIES: dict[str, int] = {
     "Новичок": 10,
     "Опытный": 30,
     "Ветеран": 50,
@@ -5662,12 +4347,12 @@ MERCENARY_SKILL_PROBABILITIES: Dict[str, int] = {
     "Легендарный Мастер": 2,
 }
 
-MERCENARIES_DB: Dict[str, List[str]] = {}
-MERCENARY_META: Dict[str, Dict[str, Any]] = {}
-MERCENARY_SPECIALIZATIONS: Dict[str, List[Dict[str, Any]]] = {}
-MERCENARY_ALIASES: Dict[str, str] = {}
-MERCENARY_QUERY_SYNONYMS: Dict[str, List[str]] = {}
-KNOWN_MERCENARY_SKILLS: Set[str] = set()
+MERCENARIES_DB: dict[str, list[str]] = {}
+MERCENARY_META: dict[str, dict[str, Any]] = {}
+MERCENARY_SPECIALIZATIONS: dict[str, list[dict[str, Any]]] = {}
+MERCENARY_ALIASES: dict[str, str] = {}
+MERCENARY_QUERY_SYNONYMS: dict[str, list[str]] = {}
+KNOWN_MERCENARY_SKILLS: set[str] = set()
 
 XLSX_MAIN_SHEET = "01_Наёмники"
 XLSX_SPECIALIZATIONS_SHEET = "02_Специализации"
@@ -5678,381 +4363,271 @@ XLSX_SYNONYMS_SHEET = "08_Синонимы"
 
 # Фолбэк-словарь нужен, чтобы команда работала даже если лист 08_Синонимы случайно удалили.
 # Если лист 08_Синонимы есть в Excel, данные из него ДОБАВЛЯЮТСЯ поверх этого списка.
-DEFAULT_MERCENARY_QUERY_SYNONYMS: Dict[str, List[str]] = {'актер': ['Актер', 'Актер в театре', 'Голосистый артист'],
- 'актёр': ['Актер', 'Актер в театре', 'Голосистый артист'],
- 'алхимик': ['Аптекарь', 'Провизор', 'Кудесник', 'Чернокнижник'],
- 'аркебузир': ['Стрелок', 'Картечник', 'Артиллерист'],
- 'артиллерист': ['Артиллерист', 'Канонир', 'Бомбардир', 'Картечник'],
- 'артист': ['Актер', 'Актер в театре', 'Голосистый артист', 'Певец', 'Акробат', 'Крылатый факир'],
- 'бандит': ['Сиделец', 'Наемник', 'Наймит', 'Пират', 'Пальцевщик', 'Разведчик', 'Каратель'],
- 'батрак': ['Рабочий на ферме', 'Фермер-подневольный', 'Жнец', 'Косарь', 'Сборщик ягод', 'скотник'],
- 'боец': ['Солдат', 'Пехотинец', 'Мечник', 'Копейщик', 'Лучник', 'Стрелок', 'Турнирный борец', 'Наемник'],
- 'бронник': ['Оружейник', 'Кузнец', 'Клиноковщик', 'Клепальщик'],
- 'ведьмак': ['Ведьмак', 'Охотник', 'Ловец зверей', 'Преследователь'],
- 'виноградарь': ['Винодел', 'Рабочий на винодельне', 'Раб на винодельне'],
- 'воин': ['Солдат', 'Пехотинец', 'Мечник', 'Копейщик', 'Лучник', 'Стрелок', 'Рыцарь', 'Гвардеец', 'Наемник', 'Наймит'],
- 'вокалист': ['Певец', 'Певец на королевском приеме', 'Голосистый артист', 'Бард'],
- 'вор': ['Пальцевщик', 'Сиделец', 'Разведчик', 'Пират', 'Наемник'],
- 'вояка': ['Солдат', 'Пехотинец', 'Наемник', 'Наймит', 'Гвардеец'],
- 'врач': ['Лекарь', 'Аптекарь', 'Провизор'],
- 'головорез': ['Каратель', 'Палач', 'Наемник', 'Наймит', 'Пират'],
- 'гончар': ['Гончар', 'Ремесленник'],
- 'горничная': ['Горничная', 'Слуга', 'Комнатный слуга', 'Лакеи'],
- 'горняк': ['Шахтер', 'Раб на руднике', 'Рабочий на каменоломне'],
- 'грабитель': ['Пират', 'Наемник', 'Наймит', 'Сиделец', 'Каратель'],
- 'гравер': ['Ремесленник', 'Ювелир', 'Медник', 'Оружейник'],
- 'гравёр': ['Ремесленник', 'Ювелир', 'Медник', 'Оружейник'],
- 'дворецкий': ['Дворецкий', 'Лакеи', 'Слуга', 'Комнатный слуга'],
- 'дирижер': ['Дирижер', 'Бард', 'Гулящий музыкант'],
- 'дирижёр': ['Дирижер', 'Бард', 'Гулящий музыкант'],
- 'домработница': ['Горничная', 'Слуга', 'Комнатный слуга'],
- 'дровосек': ['Дровосек', 'Лесоруб', 'Рабочий на лесопилке'],
- 'дуэлянт': ['Фехтовальщик', 'Рыцарь-дуэлянт', 'Мечник'],
- 'жрец': ['Священник', 'Служитель церкви', 'Богослов', 'Инквизитор'],
- 'заводской': ['Рабочий на стекольной фабрике',
-               'Рабочий на шоколадной фабрике',
-               'Рабочий на холодильном заводе',
-               'Рабочий на кирпичной заводе',
-               'Железнодорожный техник',
-               'Котлобойщик'],
- 'заключенный': ['Сиделец', 'Раб на руднике', 'Раб на каменоломне', 'Холоп'],
- 'заключённый': ['Сиделец', 'Раб на руднике', 'Раб на каменоломне', 'Холоп'],
- 'зверолов': ['Ловец зверей', 'Охотник', 'Сторож-охотник', 'Смотритель зоопарка'],
- 'златокузнец': ['Ювелир', 'Медник', 'Ремесленник'],
- 'илот': ['Раб на руднике', 'Раб на каменоломне', 'Холоп', 'Фермер-подневольный'],
- 'каменщик': ['Каменщик', 'Печник', 'Рабочий на каменоломне', 'Раб на каменоломне'],
- 'камердинер': ['Дворецкий', 'Комнатный слуга', 'Лакеи'],
- 'караульщик': ['Караульный', 'Страж', 'Стражник', 'Ночной сторож', 'Сторож'],
- 'картограф': ['Геодезист', 'Исследователь', 'Командир корабля'],
- 'каторжник': ['Раб на руднике', 'Раб на каменоломне', 'Надзиратель в тюрьме', 'Сиделец'],
- 'книгочей': ['Библиотекарь', 'Книгоносец', 'Писарь', 'Богослов', 'Богослов-ученый'],
- 'книжник': ['Библиотекарь', 'Книгоносец', 'Писарь', 'Богослов', 'Богослов-ученый'],
- 'коваль': ['Кузнец', 'Клепальщик', 'Клиноковщик', 'Медник', 'Оружейник'],
- 'колдун': ['Кудесник', 'Чернокнижник', 'Ведьмак'],
- 'кондотьер': ['Наемник', 'Наймит', 'Солдат', 'Пехотинец', 'Мечник', 'Рыцарь', 'Гвардеец'],
- 'контрабандист': ['Пират', 'Сиделец', 'Продавец', 'Наемник'],
- 'красильщик': ['Ткач', 'Кардер', 'Продавец тканей', 'Ремесленник'],
- 'крепостной': ['Холоп', 'Фермер-подневольный', 'Рабочий на ферме', 'Раб на саванной'],
- 'крестьянин': ['Фермер', 'Фермер-подневольный', 'Рабочий на ферме', 'Жнец', 'Косарь', 'Сборщик ягод'],
- 'кузнец': ['Кузнец', 'Клепальщик', 'Клиноковщик', 'Медник', 'Оружейник'],
- 'кулинар': ['Повар', 'Кухарь', 'Мясник', 'Рабочий на шоколадной фабрике'],
- 'купец': ['Продавец', 'Продавец тканей', 'Сиделец', 'Посланник'],
- 'кухарка': ['Кухарь', 'Повар', 'Слуга', 'Горничная'],
- 'лавочник': ['Продавец', 'Сиделец', 'Продавец тканей'],
- 'лакей': ['Лакеи', 'Слуга', 'Дворецкий', 'Комнатный слуга'],
- 'ландскнехт': ['Наемник',
-                'Наймит',
-                'Солдат',
-                'Пехотинец',
-                'Копейщик',
-                'Мечник',
-                'Рыцарь',
-                'Рыцарь-дуэлянт',
-                'Рыцарь ордена',
-                'Тевтонский рыцарь',
-                'Гвардеец'],
- 'лекарь': ['Лекарь', 'Аптекарь', 'Провизор', 'Работник местной церкви', 'Служитель церкви'],
- 'лесоруб': ['Лесоруб', 'Дровосек', 'Рабочий на лесопилке', 'Раб на лесопилке'],
- 'маг': ['Кудесник', 'Чернокнижник', 'Богослов-ученый', 'Священник'],
- 'мажордом': ['Дворецкий', 'Лакеи', 'Слуга'],
- 'мародер': ['Пират', 'Наемник', 'Наймит', 'Сиделец'],
- 'мародёр': ['Пират', 'Наемник', 'Наймит', 'Сиделец'],
- 'мастеровой': ['Ремесленник', 'Мастер', 'Подмастерье', 'Ученик'],
- 'матрос': ['Корабельник', 'Гребец', 'Пират', 'Рабочий в порту'],
- 'мельник': ['Мельник', 'Рабочий на мельнице', 'Управляющий на мельнице'],
- 'менестрель': ['Бард', 'Гулящий музыкант', 'Певец'],
- 'моряк': ['Корабельник', 'Командир корабля', 'Гребец', 'Пират', 'Рабочий в порту'],
- 'мошенник': ['Сиделец', 'Продавец', 'Посланник', 'Пальцевщик'],
- 'музыкант': ['Бард', 'Гулящий музыкант', 'Баянист', 'Фортепианщик', 'Дирижер', 'Голосистый артист'],
- 'мыловар': ['Ремесленник', 'Аптекарь', 'Провизор'],
- 'мясник': ['Мясник', 'Рабочий на мясокомбинате', 'Охотник'],
- 'налетчик': ['Пират', 'Наемник', 'Наймит', 'Разведчик', 'Каратель'],
- 'налётчик': ['Пират', 'Наемник', 'Наймит', 'Разведчик', 'Каратель'],
- 'наставник': ['Наставник', 'Обучающий наставник', 'Тренер', 'Мастер'],
- 'невольник': ['Раб на руднике',
-               'Раб на каменоломне',
-               'Раб на верфи',
-               'Раб на лесопилке',
-               'Раб на винодельне',
-               'Раб на шоколадной фабрике',
-               'Раб на стекольной фабрике',
-               'Раб на холодильном заводе',
-               'Раб на саванной',
-               'Эльф раб дварфов',
-               'Холоп',
-               'Фермер-подневольный'],
- 'оружейник': ['Оружейник', 'Кузнец', 'Клиноковщик', 'Оруженосец'],
- 'охотник': ['Охотник', 'Ловец зверей', 'Сторож-охотник', 'Ведьмак'],
- 'охранник': ['Страж', 'Стражник', 'Сторож', 'Ночной сторож', 'Караульный', 'Гвардеец', 'Городовой'],
- 'певец': ['Певец', 'Певец на королевском приеме', 'Голосистый артист', 'Бард', 'Гулящий музыкант'],
- 'певица': ['Певец', 'Певец на королевском приеме', 'Голосистый артист', 'Бард'],
- 'пекарь': ['Повар', 'Кухарь', 'Мельник'],
- 'пес войны': ['Наемник', 'Наймит', 'Солдат', 'Пехотинец', 'Разведчик', 'Мечник', 'Стрелок'],
- 'писец': ['Писарь', 'Книгоносец', 'Библиотекарь'],
- 'плотник': ['Плотник', 'Столяр', 'Тесарь', 'Рабочий на лесопилке', 'Корабельник'],
- 'повар': ['Повар', 'Кухарь', 'Мясник', 'Рабочий на шоколадной фабрике'],
- 'поденщик': ['Чернорабочий', 'Рабочий на ферме', 'Рабочий на каменоломне', 'Рабочий на кирпичной заводе'],
- 'подмастерье': ['Подмастерье', 'Ученик', 'Ремесленник'],
- 'подёнщик': ['Чернорабочий', 'Рабочий на ферме', 'Рабочий на каменоломне', 'Рабочий на кирпичной заводе'],
- 'портной': ['Ткач', 'Сапожник', 'Рабочий на ткацкой фабрике', 'Кардер'],
- 'прислуга': ['Горничная', 'Слуга', 'Комнатный слуга', 'Лакеи', 'Дворецкий'],
- 'проповедник': ['Священник', 'Богослов', 'Служитель церкви', 'Духовный чиновник'],
- 'прораб': ['Прораб', 'Мастер', 'Мастер на мануфактуре', 'Надсмотрщик за общественными работами'],
- 'псы войны': ['Наемник', 'Наймит', 'Солдат', 'Пехотинец', 'Разведчик', 'Мечник', 'Стрелок'],
- 'пушкарь': ['Канонир', 'Бомбардир', 'Артиллерист', 'Картечник'],
- 'раб': ['Раб на руднике',
-         'Раб на каменоломне',
-         'Раб на верфи',
-         'Раб на лесопилке',
-         'Раб на винодельне',
-         'Раб на шоколадной фабрике',
-         'Раб на стекольной фабрике',
-         'Раб на холодильном заводе',
-         'Раб на саванной',
-         'Эльф раб дварфов',
-         'Холоп',
-         'Фермер-подневольный'],
- 'работник': ['Работник местной церкви',
-              'Рабочий в порту',
-              'Рабочий на верфи',
-              'Рабочий на ферме',
-              'Чернорабочий',
-              'Мастер на мануфактуре',
-              'Мастер'],
- 'рабочий': ['Рабочий в порту',
-             'Рабочий на верфи',
-             'Рабочий на винодельне',
-             'Рабочий на каменоломне',
-             'Рабочий на кирпичной заводе',
-             'Рабочий на лесопилке',
-             'Рабочий на мельнице',
-             'Рабочий на мясокомбинате',
-             'Рабочий на свинарнике',
-             'Рабочий на стекольной фабрике',
-             'Рабочий на ткацкой фабрике',
-             'Рабочий на ферме',
-             'Рабочий на холодильном заводе',
-             'Рабочий на шоколадной фабрике',
-             'Чернорабочий'],
- 'разбойник': ['Сиделец', 'Наемник', 'Наймит', 'Пират', 'Пальцевщик', 'Разведчик', 'Каратель'],
- 'разнорабочий': ['Чернорабочий', 'Рабочий в порту', 'Рабочий на верфи', 'Рабочий на ферме', 'Рабочий на каменоломне'],
- 'ратник': ['Солдат', 'Пехотинец', 'Мечник', 'Копейщик', 'Рыцарь', 'Страж', 'Гвардеец'],
- 'ремесленник': ['Ремесленник', 'Мастер', 'Подмастерье', 'Ученик'],
- 'рудокоп': ['Шахтер', 'Раб на руднике'],
- 'рыбак': ['Рыбак', 'Гребец', 'Рабочий в порту'],
- 'садовник': ['Фермер', 'Сборщик ягод', 'Рабочий на ферме', 'Винодел'],
- 'сапожник': ['Сапожник', 'Ткач', 'Ремесленник'],
- 'священник': ['Священник', 'Служитель церкви', 'Работник местной церкви', 'Богослов', 'Духовный чиновник'],
- 'сипай': ['Солдат', 'Пехотинец', 'Наемник', 'Наймит', 'Страж', 'Гвардеец'],
- 'скоморох': ['Бард', 'Гулящий музыкант', 'Актер', 'Акробат', 'Крылатый факир'],
- 'следопыт': ['Разведчик', 'Преследователь', 'Охотник', 'Сторож-охотник', 'Ловец зверей'],
- 'служанка': ['Горничная', 'Слуга', 'Комнатный слуга'],
- 'служивый': ['Солдат', 'Пехотинец', 'Страж', 'Стражник', 'Гвардеец', 'Наемник'],
- 'солдат удачи': ['Наемник', 'Наймит', 'Солдат', 'Пехотинец', 'Разведчик', 'Мечник', 'Стрелок'],
- 'солдат фортуны': ['Наемник', 'Наймит', 'Солдат', 'Пехотинец', 'Разведчик', 'Мечник', 'Стрелок'],
- 'стеклодув': ['Рабочий на стекольной фабрике', 'Раб на стекольной фабрике', 'Ремесленник'],
- 'столяр': ['Столяр', 'Плотник', 'Тесарь'],
- 'стрелец': ['Стрелок', 'Лучник', 'Артиллерист', 'Картечник'],
- 'строитель': ['Каменщик', 'Плотник', 'Тесарь', 'Печник', 'Прораб', 'Чернорабочий', 'Рабочий на кирпичной заводе'],
- 'сыщик': ['Разведчик', 'Преследователь', 'Сторож-охотник', 'Охотник'],
- 'ткач': ['Ткач', 'Кардер', 'Рабочий на ткацкой фабрике', 'Продавец тканей'],
- 'торговец': ['Продавец', 'Продавец тканей', 'Сиделец', 'Посланник', 'Дворецкий'],
- 'травник': ['Аптекарь', 'Провизор', 'Табачник', 'Фермер'],
- 'тюремщик': ['Надзиратель в тюрьме', 'Каратель', 'Палач', 'Инквизитор'],
- 'уголовник': ['Сиделец', 'Пальцевщик', 'Каратель', 'Пират', 'Наемник'],
- 'узник': ['Сиделец', 'Раб на руднике', 'Раб на каменоломне', 'Холоп'],
- 'управленец': ['Мастер', 'Мастер на мануфактуре', 'Управляющий на мельнице', 'Прораб', 'Дворецкий', 'Магистрат'],
- 'ученый': ['Исследователь', 'Богослов-ученый', 'Библиотекарь', 'Геодезист'],
- 'учитель': ['Наставник', 'Обучающий наставник', 'Ученик', 'Подмастерье', 'Тренер'],
- 'учёный': ['Исследователь', 'Богослов-ученый', 'Библиотекарь', 'Геодезист'],
- 'фабричный': ['Рабочий на ткацкой фабрике',
-               'Рабочий на стекольной фабрике',
-               'Рабочий на шоколадной фабрике',
-               'Рабочий на холодильном заводе',
-               'Мастер на мануфактуре'],
- 'факир': ['Крылатый факир', 'Акробат', 'Актер'],
- 'фермер': ['Фермер', 'Фермер-подневольный', 'Рабочий на ферме', 'Жнец', 'Косарь', 'Сборщик ягод', 'скотник'],
- 'фехтовальщик': ['Фехтовальщик', 'Рыцарь-дуэлянт', 'Мечник'],
- 'холоп': ['Холоп', 'Фермер-подневольный', 'Слуга', 'Раб на руднике'],
- 'целитель': ['Лекарь', 'Священник', 'Аптекарь', 'Работник местной церкви'],
- 'циркач': ['Акробат', 'Крылатый факир', 'Актер', 'Бард'],
- 'чиновник': ['Духовный чиновник', 'Магистрат', 'Верховный лидер', 'Посланник'],
- 'шахтер': ['Шахтер', 'Раб на руднике', 'Рабочий на каменоломне', 'Раб на каменоломне'],
- 'шахтёр': ['Шахтер', 'Раб на руднике', 'Рабочий на каменоломне', 'Раб на каменоломне'],
- 'экономка': ['Горничная', 'Дворецкий', 'Слуга', 'Управляющий на мельнице'],
- 'ювелир': ['Ювелир', 'Медник', 'Ремесленник', 'Эльф раб дварфов']}
-
-
-def normalize_lookup_text(text: str) -> str:
-    """
-    Единая нормализация для поиска:
-    - не зависит от регистра;
-    - ё = е;
-    - дефисы/тире считаются пробелами;
-    - номера в конце убираются;
-    - лишняя пунктуация не ломает поиск.
-    """
-    text = (text or "").strip().lower().replace("ё", "е")
-    text = re.sub(r"\s*[-–—]\s*\d+\s*$", "", text)
-    text = re.sub(r"\s+\d+\s*$", "", text)
-    text = re.sub(r"[-–—]+", " ", text)
-    text = re.sub(r"[«»\"'`.,:;!?()\[\]{}]+", " ", text)
-    return " ".join(text.split())
-
-
-def dedupe_preserve_order(items: List[str]) -> List[str]:
-    """Убирает дубли, сохраняя первое написание."""
-    result: List[str] = []
-    seen = set()
-    for item in items:
-        item = str(item or "").strip()
-        key = normalize_lookup_text(item)
-        if key and key not in seen:
-            result.append(item)
-            seen.add(key)
-    return result
-
-
-def split_multi_field(value: str) -> List[str]:
-    """Разбивает поля вида 'А; Б, В\nГ'."""
-    if not value:
-        return []
-    parts = re.split(r"[;,\n]+", str(value))
-    return dedupe_preserve_order([part.strip() for part in parts if part.strip()])
-
-
-def _xlsx_col_to_index(cell_ref: str) -> int:
-    letters = "".join(ch for ch in str(cell_ref or "") if ch.isalpha()).upper()
-    number = 0
-    for ch in letters:
-        number = number * 26 + (ord(ch) - ord("A") + 1)
-    return max(number - 1, 0)
-
-
-def _xlsx_cell_text(cell, shared_strings: List[str], ns: Dict[str, str]) -> str:
-    cell_type = cell.attrib.get("t", "")
-
-    if cell_type == "inlineStr":
-        return "".join(t.text or "" for t in cell.findall(".//a:t", ns)).strip()
-
-    value = cell.find("a:v", ns)
-    if value is None or value.text is None:
-        return ""
-
-    raw = value.text.strip()
-    if cell_type == "s":
-        try:
-            return shared_strings[int(raw)].strip()
-        except Exception:
-            return raw
-    return raw
-
-
-def _read_xlsx_sheets(path: str) -> Dict[str, List[List[str]]]:
-    """Мини-ридер .xlsx без openpyxl: читает текст/числа из листов."""
-    ns = {
-        "a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
-        "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-        "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
-    }
-
-    with zipfile.ZipFile(path) as z:
-        shared_strings: List[str] = []
-        if "xl/sharedStrings.xml" in z.namelist():
-            root = ET.fromstring(z.read("xl/sharedStrings.xml"))
-            for si in root.findall("a:si", ns):
-                shared_strings.append("".join(t.text or "" for t in si.findall(".//a:t", ns)))
-
-        workbook = ET.fromstring(z.read("xl/workbook.xml"))
-        rels = ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))
-
-        rel_map: Dict[str, str] = {}
-        for rel in rels.findall("rel:Relationship", ns):
-            rel_id = rel.attrib.get("Id")
-            target = rel.attrib.get("Target", "")
-            if target.startswith("/"):
-                sheet_path = target.lstrip("/")
-            elif target.startswith("xl/"):
-                sheet_path = target
-            else:
-                sheet_path = "xl/" + target.lstrip("/")
-            rel_map[rel_id] = sheet_path
-
-        result: Dict[str, List[List[str]]] = {}
-        for sheet in workbook.findall("a:sheets/a:sheet", ns):
-            sheet_name = sheet.attrib.get("name", "")
-            rel_id = sheet.attrib.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
-            sheet_path = rel_map.get(rel_id)
-            if not sheet_path or sheet_path not in z.namelist():
-                continue
-
-            root = ET.fromstring(z.read(sheet_path))
-            rows: List[List[str]] = []
-            for row in root.findall(".//a:sheetData/a:row", ns):
-                values_by_col: Dict[int, str] = {}
-                max_col = -1
-                for cell in row.findall("a:c", ns):
-                    col_index = _xlsx_col_to_index(cell.attrib.get("r", "A1"))
-                    max_col = max(max_col, col_index)
-                    values_by_col[col_index] = _xlsx_cell_text(cell, shared_strings, ns)
-                if max_col >= 0:
-                    rows.append([values_by_col.get(i, "") for i in range(max_col + 1)])
-            result[sheet_name] = rows
-
-        return result
-
-
-def _rows_to_dicts(rows: List[List[str]], required_header: str) -> List[Dict[str, str]]:
-    header_index = None
-    for i, row in enumerate(rows):
-        if required_header in row:
-            header_index = i
-            break
-    if header_index is None:
-        return []
-
-    headers = [str(x or "").strip() for x in rows[header_index]]
-    data: List[Dict[str, str]] = []
-    for row in rows[header_index + 1:]:
-        item: Dict[str, str] = {}
-        for idx, header in enumerate(headers):
-            if header:
-                item[header] = str(row[idx] if idx < len(row) else "").strip()
-        if any(item.values()):
-            data.append(item)
-    return data
-
-
-def _to_int(value: str, default: int = 0) -> int:
-    try:
-        return int(float(str(value or "").replace("%", "").replace(",", ".").strip()))
-    except Exception:
-        return default
-
-
-def _yes(value: str) -> bool:
-    return normalize_lookup_text(value) in {"да", "yes", "true", "1", "есть"}
-
-
-def _resolve_existing_profession_name(name: str, mercs: Dict[str, List[str]]) -> Optional[str]:
-    """Находит профессию в базе без учёта регистра/ё/дефисов."""
-    key = normalize_lookup_text(name)
-    if not key:
-        return None
-    for profession in mercs.keys():
-        if normalize_lookup_text(profession) == key:
-            return profession
-    return None
-
-
-def _clean_profession_targets(targets: List[str], mercs: Dict[str, List[str]]) -> List[str]:
-    """Оставляет только профессии, которые реально есть в Excel-базе."""
-    cleaned: List[str] = []
-    for target in targets:
-        resolved = _resolve_existing_profession_name(target, mercs)
-        if resolved:
-            cleaned.append(resolved)
-    return dedupe_preserve_order(cleaned)
+DEFAULT_MERCENARY_QUERY_SYNONYMS: dict[str, list[str]] = {
+    "актер": ["Актер", "Актер в театре", "Голосистый артист"],
+    "актёр": ["Актер", "Актер в театре", "Голосистый артист"],
+    "алхимик": ["Аптекарь", "Провизор", "Кудесник", "Чернокнижник"],
+    "аркебузир": ["Стрелок", "Картечник", "Артиллерист"],
+    "артиллерист": ["Артиллерист", "Канонир", "Бомбардир", "Картечник"],
+    "артист": ["Актер", "Актер в театре", "Голосистый артист", "Певец", "Акробат", "Крылатый факир"],
+    "бандит": ["Сиделец", "Наемник", "Наймит", "Пират", "Пальцевщик", "Разведчик", "Каратель"],
+    "батрак": ["Рабочий на ферме", "Фермер-подневольный", "Жнец", "Косарь", "Сборщик ягод", "скотник"],
+    "боец": ["Солдат", "Пехотинец", "Мечник", "Копейщик", "Лучник", "Стрелок", "Турнирный борец", "Наемник"],
+    "бронник": ["Оружейник", "Кузнец", "Клиноковщик", "Клепальщик"],
+    "ведьмак": ["Ведьмак", "Охотник", "Ловец зверей", "Преследователь"],
+    "виноградарь": ["Винодел", "Рабочий на винодельне", "Раб на винодельне"],
+    "воин": [
+        "Солдат",
+        "Пехотинец",
+        "Мечник",
+        "Копейщик",
+        "Лучник",
+        "Стрелок",
+        "Рыцарь",
+        "Гвардеец",
+        "Наемник",
+        "Наймит",
+    ],
+    "вокалист": ["Певец", "Певец на королевском приеме", "Голосистый артист", "Бард"],
+    "вор": ["Пальцевщик", "Сиделец", "Разведчик", "Пират", "Наемник"],
+    "вояка": ["Солдат", "Пехотинец", "Наемник", "Наймит", "Гвардеец"],
+    "врач": ["Лекарь", "Аптекарь", "Провизор"],
+    "головорез": ["Каратель", "Палач", "Наемник", "Наймит", "Пират"],
+    "гончар": ["Гончар", "Ремесленник"],
+    "горничная": ["Горничная", "Слуга", "Комнатный слуга", "Лакеи"],
+    "горняк": ["Шахтер", "Раб на руднике", "Рабочий на каменоломне"],
+    "грабитель": ["Пират", "Наемник", "Наймит", "Сиделец", "Каратель"],
+    "гравер": ["Ремесленник", "Ювелир", "Медник", "Оружейник"],
+    "гравёр": ["Ремесленник", "Ювелир", "Медник", "Оружейник"],
+    "дворецкий": ["Дворецкий", "Лакеи", "Слуга", "Комнатный слуга"],
+    "дирижер": ["Дирижер", "Бард", "Гулящий музыкант"],
+    "дирижёр": ["Дирижер", "Бард", "Гулящий музыкант"],
+    "домработница": ["Горничная", "Слуга", "Комнатный слуга"],
+    "дровосек": ["Дровосек", "Лесоруб", "Рабочий на лесопилке"],
+    "дуэлянт": ["Фехтовальщик", "Рыцарь-дуэлянт", "Мечник"],
+    "жрец": ["Священник", "Служитель церкви", "Богослов", "Инквизитор"],
+    "заводской": [
+        "Рабочий на стекольной фабрике",
+        "Рабочий на шоколадной фабрике",
+        "Рабочий на холодильном заводе",
+        "Рабочий на кирпичной заводе",
+        "Железнодорожный техник",
+        "Котлобойщик",
+    ],
+    "заключенный": ["Сиделец", "Раб на руднике", "Раб на каменоломне", "Холоп"],
+    "заключённый": ["Сиделец", "Раб на руднике", "Раб на каменоломне", "Холоп"],
+    "зверолов": ["Ловец зверей", "Охотник", "Сторож-охотник", "Смотритель зоопарка"],
+    "златокузнец": ["Ювелир", "Медник", "Ремесленник"],
+    "илот": ["Раб на руднике", "Раб на каменоломне", "Холоп", "Фермер-подневольный"],
+    "каменщик": ["Каменщик", "Печник", "Рабочий на каменоломне", "Раб на каменоломне"],
+    "камердинер": ["Дворецкий", "Комнатный слуга", "Лакеи"],
+    "караульщик": ["Караульный", "Страж", "Стражник", "Ночной сторож", "Сторож"],
+    "картограф": ["Геодезист", "Исследователь", "Командир корабля"],
+    "каторжник": ["Раб на руднике", "Раб на каменоломне", "Надзиратель в тюрьме", "Сиделец"],
+    "книгочей": ["Библиотекарь", "Книгоносец", "Писарь", "Богослов", "Богослов-ученый"],
+    "книжник": ["Библиотекарь", "Книгоносец", "Писарь", "Богослов", "Богослов-ученый"],
+    "коваль": ["Кузнец", "Клепальщик", "Клиноковщик", "Медник", "Оружейник"],
+    "колдун": ["Кудесник", "Чернокнижник", "Ведьмак"],
+    "кондотьер": ["Наемник", "Наймит", "Солдат", "Пехотинец", "Мечник", "Рыцарь", "Гвардеец"],
+    "контрабандист": ["Пират", "Сиделец", "Продавец", "Наемник"],
+    "красильщик": ["Ткач", "Кардер", "Продавец тканей", "Ремесленник"],
+    "крепостной": ["Холоп", "Фермер-подневольный", "Рабочий на ферме", "Раб на саванной"],
+    "крестьянин": ["Фермер", "Фермер-подневольный", "Рабочий на ферме", "Жнец", "Косарь", "Сборщик ягод"],
+    "кузнец": ["Кузнец", "Клепальщик", "Клиноковщик", "Медник", "Оружейник"],
+    "кулинар": ["Повар", "Кухарь", "Мясник", "Рабочий на шоколадной фабрике"],
+    "купец": ["Продавец", "Продавец тканей", "Сиделец", "Посланник"],
+    "кухарка": ["Кухарь", "Повар", "Слуга", "Горничная"],
+    "лавочник": ["Продавец", "Сиделец", "Продавец тканей"],
+    "лакей": ["Лакеи", "Слуга", "Дворецкий", "Комнатный слуга"],
+    "ландскнехт": [
+        "Наемник",
+        "Наймит",
+        "Солдат",
+        "Пехотинец",
+        "Копейщик",
+        "Мечник",
+        "Рыцарь",
+        "Рыцарь-дуэлянт",
+        "Рыцарь ордена",
+        "Тевтонский рыцарь",
+        "Гвардеец",
+    ],
+    "лекарь": ["Лекарь", "Аптекарь", "Провизор", "Работник местной церкви", "Служитель церкви"],
+    "лесоруб": ["Лесоруб", "Дровосек", "Рабочий на лесопилке", "Раб на лесопилке"],
+    "маг": ["Кудесник", "Чернокнижник", "Богослов-ученый", "Священник"],
+    "мажордом": ["Дворецкий", "Лакеи", "Слуга"],
+    "мародер": ["Пират", "Наемник", "Наймит", "Сиделец"],
+    "мародёр": ["Пират", "Наемник", "Наймит", "Сиделец"],
+    "мастеровой": ["Ремесленник", "Мастер", "Подмастерье", "Ученик"],
+    "матрос": ["Корабельник", "Гребец", "Пират", "Рабочий в порту"],
+    "мельник": ["Мельник", "Рабочий на мельнице", "Управляющий на мельнице"],
+    "менестрель": ["Бард", "Гулящий музыкант", "Певец"],
+    "моряк": ["Корабельник", "Командир корабля", "Гребец", "Пират", "Рабочий в порту"],
+    "мошенник": ["Сиделец", "Продавец", "Посланник", "Пальцевщик"],
+    "музыкант": ["Бард", "Гулящий музыкант", "Баянист", "Фортепианщик", "Дирижер", "Голосистый артист"],
+    "мыловар": ["Ремесленник", "Аптекарь", "Провизор"],
+    "мясник": ["Мясник", "Рабочий на мясокомбинате", "Охотник"],
+    "налетчик": ["Пират", "Наемник", "Наймит", "Разведчик", "Каратель"],
+    "налётчик": ["Пират", "Наемник", "Наймит", "Разведчик", "Каратель"],
+    "наставник": ["Наставник", "Обучающий наставник", "Тренер", "Мастер"],
+    "невольник": [
+        "Раб на руднике",
+        "Раб на каменоломне",
+        "Раб на верфи",
+        "Раб на лесопилке",
+        "Раб на винодельне",
+        "Раб на шоколадной фабрике",
+        "Раб на стекольной фабрике",
+        "Раб на холодильном заводе",
+        "Раб на саванной",
+        "Эльф раб дварфов",
+        "Холоп",
+        "Фермер-подневольный",
+    ],
+    "оружейник": ["Оружейник", "Кузнец", "Клиноковщик", "Оруженосец"],
+    "охотник": ["Охотник", "Ловец зверей", "Сторож-охотник", "Ведьмак"],
+    "охранник": ["Страж", "Стражник", "Сторож", "Ночной сторож", "Караульный", "Гвардеец", "Городовой"],
+    "певец": ["Певец", "Певец на королевском приеме", "Голосистый артист", "Бард", "Гулящий музыкант"],
+    "певица": ["Певец", "Певец на королевском приеме", "Голосистый артист", "Бард"],
+    "пекарь": ["Повар", "Кухарь", "Мельник"],
+    "пес войны": ["Наемник", "Наймит", "Солдат", "Пехотинец", "Разведчик", "Мечник", "Стрелок"],
+    "писец": ["Писарь", "Книгоносец", "Библиотекарь"],
+    "плотник": ["Плотник", "Столяр", "Тесарь", "Рабочий на лесопилке", "Корабельник"],
+    "повар": ["Повар", "Кухарь", "Мясник", "Рабочий на шоколадной фабрике"],
+    "поденщик": ["Чернорабочий", "Рабочий на ферме", "Рабочий на каменоломне", "Рабочий на кирпичной заводе"],
+    "подмастерье": ["Подмастерье", "Ученик", "Ремесленник"],
+    "подёнщик": ["Чернорабочий", "Рабочий на ферме", "Рабочий на каменоломне", "Рабочий на кирпичной заводе"],
+    "портной": ["Ткач", "Сапожник", "Рабочий на ткацкой фабрике", "Кардер"],
+    "прислуга": ["Горничная", "Слуга", "Комнатный слуга", "Лакеи", "Дворецкий"],
+    "проповедник": ["Священник", "Богослов", "Служитель церкви", "Духовный чиновник"],
+    "прораб": ["Прораб", "Мастер", "Мастер на мануфактуре", "Надсмотрщик за общественными работами"],
+    "псы войны": ["Наемник", "Наймит", "Солдат", "Пехотинец", "Разведчик", "Мечник", "Стрелок"],
+    "пушкарь": ["Канонир", "Бомбардир", "Артиллерист", "Картечник"],
+    "раб": [
+        "Раб на руднике",
+        "Раб на каменоломне",
+        "Раб на верфи",
+        "Раб на лесопилке",
+        "Раб на винодельне",
+        "Раб на шоколадной фабрике",
+        "Раб на стекольной фабрике",
+        "Раб на холодильном заводе",
+        "Раб на саванной",
+        "Эльф раб дварфов",
+        "Холоп",
+        "Фермер-подневольный",
+    ],
+    "работник": [
+        "Работник местной церкви",
+        "Рабочий в порту",
+        "Рабочий на верфи",
+        "Рабочий на ферме",
+        "Чернорабочий",
+        "Мастер на мануфактуре",
+        "Мастер",
+    ],
+    "рабочий": [
+        "Рабочий в порту",
+        "Рабочий на верфи",
+        "Рабочий на винодельне",
+        "Рабочий на каменоломне",
+        "Рабочий на кирпичной заводе",
+        "Рабочий на лесопилке",
+        "Рабочий на мельнице",
+        "Рабочий на мясокомбинате",
+        "Рабочий на свинарнике",
+        "Рабочий на стекольной фабрике",
+        "Рабочий на ткацкой фабрике",
+        "Рабочий на ферме",
+        "Рабочий на холодильном заводе",
+        "Рабочий на шоколадной фабрике",
+        "Чернорабочий",
+    ],
+    "разбойник": ["Сиделец", "Наемник", "Наймит", "Пират", "Пальцевщик", "Разведчик", "Каратель"],
+    "разнорабочий": [
+        "Чернорабочий",
+        "Рабочий в порту",
+        "Рабочий на верфи",
+        "Рабочий на ферме",
+        "Рабочий на каменоломне",
+    ],
+    "ратник": ["Солдат", "Пехотинец", "Мечник", "Копейщик", "Рыцарь", "Страж", "Гвардеец"],
+    "ремесленник": ["Ремесленник", "Мастер", "Подмастерье", "Ученик"],
+    "рудокоп": ["Шахтер", "Раб на руднике"],
+    "рыбак": ["Рыбак", "Гребец", "Рабочий в порту"],
+    "садовник": ["Фермер", "Сборщик ягод", "Рабочий на ферме", "Винодел"],
+    "сапожник": ["Сапожник", "Ткач", "Ремесленник"],
+    "священник": [
+        "Священник",
+        "Служитель церкви",
+        "Работник местной церкви",
+        "Богослов",
+        "Духовный чиновник",
+    ],
+    "сипай": ["Солдат", "Пехотинец", "Наемник", "Наймит", "Страж", "Гвардеец"],
+    "скоморох": ["Бард", "Гулящий музыкант", "Актер", "Акробат", "Крылатый факир"],
+    "следопыт": ["Разведчик", "Преследователь", "Охотник", "Сторож-охотник", "Ловец зверей"],
+    "служанка": ["Горничная", "Слуга", "Комнатный слуга"],
+    "служивый": ["Солдат", "Пехотинец", "Страж", "Стражник", "Гвардеец", "Наемник"],
+    "солдат удачи": ["Наемник", "Наймит", "Солдат", "Пехотинец", "Разведчик", "Мечник", "Стрелок"],
+    "солдат фортуны": ["Наемник", "Наймит", "Солдат", "Пехотинец", "Разведчик", "Мечник", "Стрелок"],
+    "стеклодув": ["Рабочий на стекольной фабрике", "Раб на стекольной фабрике", "Ремесленник"],
+    "столяр": ["Столяр", "Плотник", "Тесарь"],
+    "стрелец": ["Стрелок", "Лучник", "Артиллерист", "Картечник"],
+    "строитель": [
+        "Каменщик",
+        "Плотник",
+        "Тесарь",
+        "Печник",
+        "Прораб",
+        "Чернорабочий",
+        "Рабочий на кирпичной заводе",
+    ],
+    "сыщик": ["Разведчик", "Преследователь", "Сторож-охотник", "Охотник"],
+    "ткач": ["Ткач", "Кардер", "Рабочий на ткацкой фабрике", "Продавец тканей"],
+    "торговец": ["Продавец", "Продавец тканей", "Сиделец", "Посланник", "Дворецкий"],
+    "травник": ["Аптекарь", "Провизор", "Табачник", "Фермер"],
+    "тюремщик": ["Надзиратель в тюрьме", "Каратель", "Палач", "Инквизитор"],
+    "уголовник": ["Сиделец", "Пальцевщик", "Каратель", "Пират", "Наемник"],
+    "узник": ["Сиделец", "Раб на руднике", "Раб на каменоломне", "Холоп"],
+    "управленец": [
+        "Мастер",
+        "Мастер на мануфактуре",
+        "Управляющий на мельнице",
+        "Прораб",
+        "Дворецкий",
+        "Магистрат",
+    ],
+    "ученый": ["Исследователь", "Богослов-ученый", "Библиотекарь", "Геодезист"],
+    "учитель": ["Наставник", "Обучающий наставник", "Ученик", "Подмастерье", "Тренер"],
+    "учёный": ["Исследователь", "Богослов-ученый", "Библиотекарь", "Геодезист"],
+    "фабричный": [
+        "Рабочий на ткацкой фабрике",
+        "Рабочий на стекольной фабрике",
+        "Рабочий на шоколадной фабрике",
+        "Рабочий на холодильном заводе",
+        "Мастер на мануфактуре",
+    ],
+    "факир": ["Крылатый факир", "Акробат", "Актер"],
+    "фермер": [
+        "Фермер",
+        "Фермер-подневольный",
+        "Рабочий на ферме",
+        "Жнец",
+        "Косарь",
+        "Сборщик ягод",
+        "скотник",
+    ],
+    "фехтовальщик": ["Фехтовальщик", "Рыцарь-дуэлянт", "Мечник"],
+    "холоп": ["Холоп", "Фермер-подневольный", "Слуга", "Раб на руднике"],
+    "целитель": ["Лекарь", "Священник", "Аптекарь", "Работник местной церкви"],
+    "циркач": ["Акробат", "Крылатый факир", "Актер", "Бард"],
+    "чиновник": ["Духовный чиновник", "Магистрат", "Верховный лидер", "Посланник"],
+    "шахтер": ["Шахтер", "Раб на руднике", "Рабочий на каменоломне", "Раб на каменоломне"],
+    "шахтёр": ["Шахтер", "Раб на руднике", "Рабочий на каменоломне", "Раб на каменоломне"],
+    "экономка": ["Горничная", "Дворецкий", "Слуга", "Управляющий на мельнице"],
+    "ювелир": ["Ювелир", "Медник", "Ремесленник", "Эльф раб дварфов"],
+}
 
 
 def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
@@ -6067,7 +4642,7 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
             f"Положи mercenary_command_database_v2.xlsx в папку data рядом с psinkamain.py."
         )
 
-    sheets = _read_xlsx_sheets(path)
+    sheets = read_mercenary_sheets(path)
 
     skill_rows = _rows_to_dicts(sheets.get(XLSX_SKILLS_SHEET, []), "Навык")
     known_skills = {row.get("Навык", "").strip() for row in skill_rows if row.get("Навык", "").strip()}
@@ -6078,20 +4653,22 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
     settings_rows = _rows_to_dicts(sheets.get(XLSX_SETTINGS_SHEET, []), "Параметр")
     synonym_rows = _rows_to_dicts(sheets.get(XLSX_SYNONYMS_SHEET, []), "Синоним/ввод")
 
-    mercs: Dict[str, List[str]] = {}
-    meta: Dict[str, Dict[str, Any]] = {}
+    mercs: dict[str, list[str]] = {}
+    meta: dict[str, dict[str, Any]] = {}
 
     for row in main_rows:
         profession = row.get("Профессия", "").strip()
         if not profession:
             continue
 
-        base_skills = dedupe_preserve_order([
-            row.get("Базовый навык 1", ""),
-            row.get("Базовый навык 2", ""),
-            row.get("Базовый навык 3", ""),
-            row.get("Базовый навык 4", ""),
-        ])
+        base_skills = dedupe_preserve_order(
+            [
+                row.get("Базовый навык 1", ""),
+                row.get("Базовый навык 2", ""),
+                row.get("Базовый навык 3", ""),
+                row.get("Базовый навык 4", ""),
+            ]
+        )
 
         if known_skills:
             base_skills = [skill for skill in base_skills if skill in known_skills]
@@ -6123,7 +4700,7 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
             "note": row.get("Заметка", ""),
         }
 
-    specs: Dict[str, List[Dict[str, Any]]] = {}
+    specs: dict[str, list[dict[str, Any]]] = {}
     for row in spec_rows:
         profession = row.get("Профессия", "").strip()
         spec_name = row.get("Специализация", "").strip()
@@ -6131,20 +4708,24 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
         if not profession or not spec_name or profession not in mercs:
             continue
 
-        spec_skills = dedupe_preserve_order([
-            row.get("Доп. навык 1", ""),
-            row.get("Доп. навык 2", ""),
-        ])
+        spec_skills = dedupe_preserve_order(
+            [
+                row.get("Доп. навык 1", ""),
+                row.get("Доп. навык 2", ""),
+            ]
+        )
         if known_skills:
             spec_skills = [skill for skill in spec_skills if skill in known_skills]
 
-        specs.setdefault(profession, []).append({
-            "name": spec_name,
-            "skills": spec_skills,
-            "note": row.get("Заметка", ""),
-        })
+        specs.setdefault(profession, []).append(
+            {
+                "name": spec_name,
+                "skills": spec_skills,
+                "note": row.get("Заметка", ""),
+            }
+        )
 
-    aliases: Dict[str, str] = {}
+    aliases: dict[str, str] = {}
     for row in alias_rows:
         alias_type = normalize_lookup_text(row.get("Тип", ""))
         old_name = row.get("Ввод/старое имя", "").strip()
@@ -6154,7 +4735,7 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
             aliases[normalize_lookup_text(old_name)] = resolved
 
     # Синонимы для автокомплита и мягкого поиска.
-    synonyms: Dict[str, List[str]] = {}
+    synonyms: dict[str, list[str]] = {}
 
     # 1) сначала встроенный фолбэк
     for synonym, targets in DEFAULT_MERCENARY_QUERY_SYNONYMS.items():
@@ -6174,7 +4755,7 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
                 synonyms[synonym] = clean_targets
 
     # Настройки шансов из 05_Настройки, если там есть строки уровней.
-    chances: Dict[str, int] = {}
+    chances: dict[str, int] = {}
     for row in settings_rows:
         param = row.get("Параметр", "").strip()
         value = row.get("Значение", "").strip()
@@ -6197,7 +4778,7 @@ def load_mercenary_database_from_xlsx(path: str = MERCENARY_DB_FILE) -> None:
     )
 
 
-def normalize_mercenary_name(name: str) -> Optional[str]:
+def normalize_mercenary_name(name: str) -> str | None:
     """
     Точный поиск профессии/алиаса.
     Важно: синонимы, которые дают несколько вариантов, здесь НЕ выбирают профессию сами.
@@ -6208,7 +4789,7 @@ def normalize_mercenary_name(name: str) -> Optional[str]:
     if normalized in MERCENARY_ALIASES:
         return MERCENARY_ALIASES[normalized]
 
-    for profession in MERCENARIES_DB.keys():
+    for profession in MERCENARIES_DB:
         if normalize_lookup_text(profession) == normalized:
             return profession
 
@@ -6216,21 +4797,23 @@ def normalize_mercenary_name(name: str) -> Optional[str]:
 
 
 def get_known_skills() -> set:
-    return set(KNOWN_MERCENARY_SKILLS) if KNOWN_MERCENARY_SKILLS else {
-        skill for pool in MERCENARIES_DB.values() for skill in pool
-    }
+    return (
+        set(KNOWN_MERCENARY_SKILLS)
+        if KNOWN_MERCENARY_SKILLS
+        else {skill for pool in MERCENARIES_DB.values() for skill in pool}
+    )
 
 
 def has_specialization(profession: str) -> bool:
     return bool(MERCENARY_SPECIALIZATIONS.get(profession))
 
 
-def roll_specialization(profession: str) -> Optional[Dict[str, Any]]:
+def roll_specialization(profession: str) -> dict[str, Any] | None:
     specs = MERCENARY_SPECIALIZATIONS.get(profession, [])
     return random.choice(specs) if specs else None
 
 
-def build_mercenary_skill_pool(profession: str, specialization: Optional[Dict[str, Any]]) -> List[str]:
+def build_mercenary_skill_pool(profession: str, specialization: dict[str, Any] | None) -> list[str]:
     """
     Возвращает итоговый пул навыков:
     - без спецы: 4 базовых навыка;
@@ -6257,7 +4840,7 @@ def build_mercenary_skill_pool(profession: str, specialization: Optional[Dict[st
     return final_pool[:max_skills]
 
 
-def _add_match(scored: Dict[str, int], profession: str, score: int) -> None:
+def _add_match(scored: dict[str, int], profession: str, score: int) -> None:
     if profession not in MERCENARIES_DB:
         return
     old = scored.get(profession)
@@ -6265,7 +4848,7 @@ def _add_match(scored: Dict[str, int], profession: str, score: int) -> None:
         scored[profession] = score
 
 
-def find_mercenary_matches(query: str, limit: int = 25) -> List[str]:
+def find_mercenary_matches(query: str, limit: int = 25) -> list[str]:
     """
     Мягкий поиск для autocomplete:
     - точные совпадения выше;
@@ -6280,7 +4863,7 @@ def find_mercenary_matches(query: str, limit: int = 25) -> List[str]:
     if not normalized:
         return sorted(MERCENARIES_DB.keys(), key=lambda x: normalize_lookup_text(x))[:limit]
 
-    scored: Dict[str, int] = {}
+    scored: dict[str, int] = {}
 
     # 1) точный алиас/точное имя
     exact = normalize_mercenary_name(normalized)
@@ -6289,7 +4872,7 @@ def find_mercenary_matches(query: str, limit: int = 25) -> List[str]:
 
     # 2) прямое совпадение с профессиями по подстроке/началу слов
     query_tokens = normalized.split()
-    for profession in MERCENARIES_DB.keys():
+    for profession in MERCENARIES_DB:
         p_norm = normalize_lookup_text(profession)
         p_tokens = p_norm.split()
 
@@ -6302,10 +4885,7 @@ def find_mercenary_matches(query: str, limit: int = 25) -> List[str]:
         elif any(token.startswith(normalized) for token in p_tokens):
             _add_match(scored, profession, 3)
         elif all(
-            any(
-                (len(qt) >= 3 and qt in pt) or (len(pt) >= 3 and pt in qt)
-                for pt in p_tokens
-            )
+            any((len(qt) >= 3 and qt in pt) or (len(pt) >= 3 and pt in qt) for pt in p_tokens)
             for qt in query_tokens
         ):
             _add_match(scored, profession, 4)
@@ -6346,14 +4926,11 @@ def find_mercenary_matches(query: str, limit: int = 25) -> List[str]:
 
     return [
         name
-        for name, _score in sorted(
-            scored.items(),
-            key=lambda item: (item[1], normalize_lookup_text(item[0]))
-        )
+        for name, _score in sorted(scored.items(), key=lambda item: (item[1], normalize_lookup_text(item[0])))
     ][:limit]
 
 
-def resolve_mercenary_query(query: str) -> Tuple[Optional[str], List[str]]:
+def resolve_mercenary_query(query: str) -> tuple[str | None, list[str]]:
     """
     Возвращает:
     - (профессия, []) если ввод точный или нашёлся один-единственный вариант;
@@ -6370,7 +4947,6 @@ def resolve_mercenary_query(query: str) -> Tuple[Optional[str], List[str]]:
     return None, matches
 
 
-load_mercenary_database_from_xlsx()
 # ============================================================================
 # АДМИН-КОМАНДА «ТЕМНИЦА»: обычное сообщение без префикса + временная роль «Спит»
 #
@@ -6422,36 +4998,10 @@ JAIL_RELEASE_PATTERN = re.compile(
 # ТАБЛИЦА ДЛЯ СОХРАНЕНИЯ СРОКОВ В БАЗЕ
 # ============================================================================
 
-class JailSentence(Base):
-    __tablename__ = "jail_sentences"
-
-    guild_id = Column(String(32), primary_key=True)
-    user_id = Column(String(32), primary_key=True)
-
-    role_id = Column(String(32), nullable=False)
-    moderator_id = Column(String(32), nullable=False)
-
-    reason = Column(String(500), nullable=False)
-    expires_at = Column(DateTime(timezone=True), nullable=False)
-
-
-# Основная инициализация БД в боте происходит раньше объявления этой модели,
-# поэтому создаём новую таблицу отдельно.
-if db_engine is not None:
-    try:
-        Base.metadata.create_all(db_engine)
-        logger.info("✅ Таблица jail_sentences готова.")
-    except Exception as e:
-        logger.error(
-            f"Не удалось создать таблицу jail_sentences: {e}",
-            exc_info=True,
-        )
-
-
 # Активные таймеры:
 # ключ — (ID сервера, ID участника)
-jail_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
-jail_deadlines: Dict[Tuple[int, int], datetime] = {}
+jail_tasks: dict[tuple[int, int], asyncio.Task] = {}
+jail_deadlines: dict[tuple[int, int], datetime] = {}
 
 jail_timers_restored = False
 
@@ -6459,6 +5009,7 @@ jail_timers_restored = False
 # ============================================================================
 # ПРОВЕРКА ДОСТУПА
 # ============================================================================
+
 
 def has_jail_access(member: disnake.Member) -> bool:
     """
@@ -6472,10 +5023,7 @@ def has_jail_access(member: disnake.Member) -> bool:
     if member.guild_permissions.administrator:
         return True
 
-    member_role_names = {
-        role.name.strip().casefold()
-        for role in member.roles
-    }
+    member_role_names = {role.name.strip().casefold() for role in member.roles}
 
     return bool(member_role_names & JAIL_GUARD_ROLE_NAMES)
 
@@ -6484,132 +5032,39 @@ def has_jail_access(member: disnake.Member) -> bool:
 # РАБОТА СО ВРЕМЕНЕМ И БАЗОЙ
 # ============================================================================
 
-def normalize_jail_datetime(value: datetime) -> datetime:
-    """Приводит дату к UTC с часовым поясом."""
-
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-
-    return value.astimezone(timezone.utc)
-
 
 def save_jail_sentence_db(
-    guild_id: int,
-    user_id: int,
-    moderator_id: int,
-    reason: str,
-    expires_at: datetime,
+    guild_id: int, user_id: int, moderator_id: int, reason: str, expires_at: datetime
 ) -> None:
-    """Создаёт или обновляет срок темницы в базе данных."""
-
-    if SessionLocal is None:
-        return
-
-    session = SessionLocal()
-
-    try:
-        record = (
-            session.query(JailSentence)
-            .filter_by(
-                guild_id=str(guild_id),
-                user_id=str(user_id),
-            )
-            .first()
-        )
-
-        if record is None:
-            record = JailSentence(
-                guild_id=str(guild_id),
-                user_id=str(user_id),
-                role_id=str(JAIL_ROLE_ID),
-                moderator_id=str(moderator_id),
-                reason=reason,
-                expires_at=expires_at,
-            )
-
-            session.add(record)
-
-        else:
-            record.role_id = str(JAIL_ROLE_ID)
-            record.moderator_id = str(moderator_id)
-            record.reason = reason
-            record.expires_at = expires_at
-
-        session.commit()
-
-    except Exception:
-        session.rollback()
-        raise
-
-    finally:
-        session.close()
+    """Persist jail state through the repository using the configured session."""
+    jail_storage.save_jail_sentence_db(
+        SessionLocal, JAIL_ROLE_ID, guild_id, user_id, moderator_id, reason, expires_at
+    )
 
 
-def delete_jail_sentence_db(
-    guild_id: int,
-    user_id: int,
-) -> None:
-    """Удаляет завершившийся срок из базы."""
-
-    if SessionLocal is None:
-        return
-
-    session = SessionLocal()
-
-    try:
-        (
-            session.query(JailSentence)
-            .filter_by(
-                guild_id=str(guild_id),
-                user_id=str(user_id),
-            )
-            .delete(synchronize_session=False)
-        )
-
-        session.commit()
-
-    except Exception:
-        session.rollback()
-        raise
-
-    finally:
-        session.close()
+def delete_jail_sentence_db(guild_id: int, user_id: int) -> None:
+    """Delete one jail term through the repository."""
+    jail_storage.delete_jail_sentence_db(SessionLocal, guild_id, user_id)
 
 
-def load_jail_sentences_db() -> List[Tuple[int, int, datetime]]:
-    """Загружает действующие сроки после перезапуска бота."""
-
-    if SessionLocal is None:
-        return []
-
-    session = SessionLocal()
-
-    try:
-        rows = session.query(JailSentence).all()
-
-        return [
-            (
-                int(row.guild_id),
-                int(row.user_id),
-                normalize_jail_datetime(row.expires_at),
-            )
-            for row in rows
-        ]
-
-    finally:
-        session.close()
+def load_jail_sentences_db() -> list[tuple[int, int, datetime]]:
+    """Read jail terms through the repository for restart recovery."""
+    return jail_storage.load_jail_sentences_db(SessionLocal)
 
 
-# ============================================================================
 # ПОИСК НАРУШИТЕЛЯ
 # ============================================================================
 
+
 async def get_jail_reply_target(
     message: disnake.Message,
-) -> Optional[disnake.Member]:
+) -> disnake.Member | None:
     """
     Получает автора сообщения, на которое ответил модератор.
     """
+
+    if message.guild is None:
+        return None
 
     reference = message.reference
 
@@ -6620,9 +5075,7 @@ async def get_jail_reply_target(
 
     if not isinstance(referenced_message, disnake.Message):
         try:
-            referenced_message = await message.channel.fetch_message(
-                reference.message_id
-            )
+            referenced_message = await message.channel.fetch_message(reference.message_id)
 
         except (
             disnake.NotFound,
@@ -6651,13 +5104,13 @@ async def get_jail_reply_target(
 
 async def get_jail_mentioned_target(
     message: disnake.Message,
-    mention_text: Optional[str],
-) -> Optional[disnake.Member]:
+    mention_text: str | None,
+) -> disnake.Member | None:
     """
     Получает участника из упоминания перед фразой.
     """
 
-    if not mention_text:
+    if not mention_text or message.guild is None:
         return None
 
     user_id_match = re.search(r"\d{15,25}", mention_text)
@@ -6687,6 +5140,7 @@ async def get_jail_mentioned_target(
 # СНЯТИЕ РОЛИ ПОСЛЕ ОКОНЧАНИЯ СРОКА
 # ============================================================================
 
+
 async def jail_release_worker(
     guild_id: int,
     user_id: int,
@@ -6702,9 +5156,7 @@ async def jail_release_worker(
             if expires_at is None:
                 return
 
-            delay = (
-                expires_at - datetime.now(timezone.utc)
-            ).total_seconds()
+            delay = (expires_at - datetime.now(timezone.utc)).total_seconds()
 
             if delay > 0:
                 await asyncio.sleep(delay)
@@ -6717,9 +5169,7 @@ async def jail_release_worker(
             guild = bot.get_guild(guild_id)
 
             if guild is None:
-                logger.warning(
-                    f"Темница: сервер {guild_id} не найден."
-                )
+                logger.warning(f"Темница: сервер {guild_id} не найден.")
 
                 jail_deadlines.pop(key, None)
 
@@ -6734,10 +5184,7 @@ async def jail_release_worker(
             sleep_role = guild.get_role(JAIL_ROLE_ID)
 
             if sleep_role is None:
-                logger.error(
-                    f"Темница: роль {JAIL_ROLE_ID} "
-                    f"на сервере {guild_id} не найдена."
-                )
+                logger.error(f"Темница: роль {JAIL_ROLE_ID} на сервере {guild_id} не найдена.")
 
                 jail_deadlines.pop(key, None)
 
@@ -6763,8 +5210,7 @@ async def jail_release_worker(
                     disnake.HTTPException,
                 ) as e:
                     logger.error(
-                        f"Темница: не удалось получить участника "
-                        f"{user_id}: {e}",
+                        f"Темница: не удалось получить участника {user_id}: {e}",
                         exc_info=True,
                     )
 
@@ -6805,10 +5251,7 @@ async def jail_release_worker(
                 user_id,
             )
 
-            logger.info(
-                f"Темница: роль снята с участника {user_id} "
-                f"на сервере {guild_id}."
-            )
+            logger.info(f"Темница: роль снята с участника {user_id} на сервере {guild_id}.")
 
             return
 
@@ -6817,8 +5260,7 @@ async def jail_release_worker(
 
     except Exception as e:
         logger.error(
-            f"Ошибка таймера темницы для "
-            f"{guild_id}/{user_id}: {e}",
+            f"Ошибка таймера темницы для {guild_id}/{user_id}: {e}",
             exc_info=True,
         )
 
@@ -6858,6 +5300,7 @@ def schedule_jail_release(
 # ВОССТАНОВЛЕНИЕ ТАЙМЕРОВ ПОСЛЕ ПЕРЕЗАПУСКА
 # ============================================================================
 
+
 @bot.listen("on_ready")
 async def restore_jail_timers_after_restart() -> None:
     global jail_timers_restored
@@ -6869,16 +5312,11 @@ async def restore_jail_timers_after_restart() -> None:
     jail_timers_restored = True
 
     if SessionLocal is None:
-        logger.warning(
-            "⚠️ DATABASE_URL не настроен: "
-            "сроки темницы не переживут перезапуск бота."
-        )
+        logger.warning("⚠️ DATABASE_URL не настроен: сроки темницы не переживут перезапуск бота.")
         return
 
     try:
-        records = await asyncio.to_thread(
-            load_jail_sentences_db
-        )
+        records = await asyncio.to_thread(load_jail_sentences_db)
 
         for guild_id, user_id, expires_at in records:
             schedule_jail_release(
@@ -6887,9 +5325,7 @@ async def restore_jail_timers_after_restart() -> None:
                 expires_at,
             )
 
-        logger.info(
-            f"Темница: восстановлено таймеров — {len(records)}."
-        )
+        logger.info(f"Темница: восстановлено таймеров — {len(records)}.")
 
     except Exception as e:
         logger.error(
@@ -6901,6 +5337,7 @@ async def restore_jail_timers_after_restart() -> None:
 # ============================================================================
 # ОБЫЧНОЕ СООБЩЕНИЕ-КОМАНДА БЕЗ «!» И БЕЗ СЛЭША
 # ============================================================================
+
 
 @bot.listen("on_message")
 async def jail_sentence_listener(
@@ -6920,13 +5357,9 @@ async def jail_sentence_listener(
         return
 
     # Проверяем права автора команды.
-    if (
-        not isinstance(message.author, disnake.Member)
-        or not has_jail_access(message.author)
-    ):
+    if not isinstance(message.author, disnake.Member) or not has_jail_access(message.author):
         await message.reply(
-            "❌ Эту команду могут использовать только администраторы, "
-            "Гвардейцы и Старшие Гвардейцы.",
+            "❌ Эту команду могут использовать только администраторы, Гвардейцы и Старшие Гвардейцы.",
             mention_author=False,
         )
         return
@@ -6936,16 +5369,14 @@ async def jail_sentence_listener(
 
     if not 1 <= minutes <= MAX_JAIL_MINUTES:
         await message.reply(
-            f"❌ Срок должен быть от 1 до "
-            f"{MAX_JAIL_MINUTES} минут.",
+            f"❌ Срок должен быть от 1 до {MAX_JAIL_MINUTES} минут.",
             mention_author=False,
         )
         return
 
     if len(reason) > 500:
         await message.reply(
-            "❌ Примечание слишком длинное. "
-            "Максимум — 500 символов.",
+            "❌ Примечание слишком длинное. Максимум — 500 символов.",
             mention_author=False,
         )
         return
@@ -6994,10 +5425,7 @@ async def jail_sentence_listener(
 
     bot_member = message.guild.me
 
-    if (
-        bot_member is None
-        or not bot_member.guild_permissions.manage_roles
-    ):
+    if bot_member is None or not bot_member.guild_permissions.manage_roles:
         await message.reply(
             "❌ У бота нет права **Управлять ролями**.",
             mention_author=False,
@@ -7006,35 +5434,26 @@ async def jail_sentence_listener(
 
     if sleep_role.managed:
         await message.reply(
-            "❌ Роль `Спит` управляется интеграцией, "
-            "поэтому бот не может её выдавать.",
+            "❌ Роль `Спит` управляется интеграцией, поэтому бот не может её выдавать.",
             mention_author=False,
         )
         return
 
     if sleep_role >= bot_member.top_role:
         await message.reply(
-            "❌ Роль бота должна находиться выше роли `Спит` "
-            "в списке ролей сервера.",
+            "❌ Роль бота должна находиться выше роли `Спит` в списке ролей сервера.",
             mention_author=False,
         )
         return
 
-    if (
-        target.id == message.guild.owner_id
-        or target.top_role >= bot_member.top_role
-    ):
+    if target.id == message.guild.owner_id or target.top_role >= bot_member.top_role:
         await message.reply(
-            "❌ Бот не может изменять роли этого участника: "
-            "его высшая роль находится не ниже роли бота.",
+            "❌ Бот не может изменять роли этого участника: его высшая роль находится не ниже роли бота.",
             mention_author=False,
         )
         return
 
-    expires_at = (
-        datetime.now(timezone.utc)
-        + timedelta(minutes=minutes)
-    )
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=minutes)
 
     audit_reason = (
         f"Темница на {minutes} мин.; "
@@ -7065,8 +5484,7 @@ async def jail_sentence_listener(
             # Без записи в БД таймер всё равно работает,
             # но только до перезапуска процесса.
             logger.error(
-                f"Темница: не удалось сохранить срок в БД: "
-                f"{db_error}",
+                f"Темница: не удалось сохранить срок в БД: {db_error}",
                 exc_info=True,
             )
 
@@ -7110,8 +5528,7 @@ async def jail_sentence_listener(
         )
 
         await message.reply(
-            f"❌ Discord вернул ошибку при выдаче роли: "
-            f"`{str(e)[:250]}`",
+            f"❌ Discord вернул ошибку при выдаче роли: `{str(e)[:250]}`",
             mention_author=False,
         )
 
@@ -7122,10 +5539,10 @@ async def jail_sentence_listener(
         )
 
         await message.reply(
-            "❌ При выполнении команды произошла "
-            "непредвиденная ошибка.",
+            "❌ При выполнении команды произошла непредвиденная ошибка.",
             mention_author=False,
         )
+
 
 # ============================================================================
 # ДОСРОЧНОЕ ОСВОБОЖДЕНИЕ ИЗ ТЕМНИЦЫ: снимает роль «Спит» и отменяет таймер
@@ -7136,6 +5553,7 @@ async def jail_sentence_listener(
 # Через упоминание:
 # @Пользователь ты освобождаешься из темницы за наказание снято
 # ============================================================================
+
 
 @bot.listen("on_message")
 async def jail_manual_release_listener(
@@ -7150,13 +5568,9 @@ async def jail_manual_release_listener(
     if match is None:
         return
 
-    if (
-        not isinstance(message.author, disnake.Member)
-        or not has_jail_access(message.author)
-    ):
+    if not isinstance(message.author, disnake.Member) or not has_jail_access(message.author):
         await message.reply(
-            "❌ Открывать Темницу могут только администраторы, "
-            "Гвардейцы и Старшие Гвардейцы.",
+            "❌ Открывать Темницу могут только администраторы, Гвардейцы и Старшие Гвардейцы.",
             mention_author=False,
         )
         return
@@ -7202,10 +5616,7 @@ async def jail_manual_release_listener(
         return
 
     bot_member = message.guild.me
-    if (
-        bot_member is None
-        or not bot_member.guild_permissions.manage_roles
-    ):
+    if bot_member is None or not bot_member.guild_permissions.manage_roles:
         await message.reply(
             "❌ У бота нет права **Управлять ролями**.",
             mention_author=False,
@@ -7226,13 +5637,9 @@ async def jail_manual_release_listener(
         )
         return
 
-    if (
-        target.id == message.guild.owner_id
-        or target.top_role >= bot_member.top_role
-    ):
+    if target.id == message.guild.owner_id or target.top_role >= bot_member.top_role:
         await message.reply(
-            "❌ Бот не может изменить роли этого участника: "
-            "его высшая роль находится не ниже роли бота.",
+            "❌ Бот не может изменить роли этого участника: его высшая роль находится не ниже роли бота.",
             mention_author=False,
         )
         return
@@ -7274,8 +5681,7 @@ async def jail_manual_release_listener(
 
         if role_was_present:
             text = (
-                f"🔓 Ворота Темницы открыты для {target.mention}. "
-                f"Роль `Спит` снята.\n**Причина:** {reason}"
+                f"🔓 Ворота Темницы открыты для {target.mention}. Роль `Спит` снята.\n**Причина:** {reason}"
             )
         else:
             text = (
@@ -7297,8 +5703,7 @@ async def jail_manual_release_listener(
 
     except disnake.Forbidden:
         await message.reply(
-            "❌ Discord не позволил открыть Темницу. Проверь право "
-            "**Управлять ролями** и иерархию ролей.",
+            "❌ Discord не позволил открыть Темницу. Проверь право **Управлять ролями** и иерархию ролей.",
             mention_author=False,
         )
 
@@ -7332,16 +5737,16 @@ async def jail_manual_release_listener(
 ALLOWED_MERCENARY_ROLE_NAMES = {"Фаеркадастр", "Секретариат", "Анкетолог"}
 
 
-def user_has_mercenary_access(member) -> bool:
+def user_has_mercenary_access(member: disnake.Member | disnake.User) -> bool:
     """Доступ к /наёмник только по ИМЕНАМ ролей, без role_id."""
     roles = getattr(member, "roles", []) or []
     return any(getattr(role, "name", "") in ALLOWED_MERCENARY_ROLE_NAMES for role in roles)
 
 
 async def mercenary_name_autocomplete(
-    interaction: disnake.ApplicationCommandInteraction,
+    interaction: ApplicationCommandInteraction,
     user_input: str,
-):
+) -> list[str]:
     """Всплывающий список Discord для параметра 'имя'."""
     # Чтобы команда не светила подсказки тем, у кого нет нужных ролей.
     if not user_has_mercenary_access(interaction.user):
@@ -7372,7 +5777,7 @@ def get_skill_level_emoji(level: str) -> str:
     return emojis.get(level, "•")
 
 
-def build_match_list_text(matches: List[str], max_items: int = 20) -> str:
+def build_match_list_text(matches: list[str], max_items: int = 20) -> str:
     if not matches:
         return "—"
     shown = matches[:max_items]
@@ -7384,13 +5789,13 @@ def build_match_list_text(matches: List[str], max_items: int = 20) -> str:
 
 @bot.slash_command(name="наёмник", description="Получить карточку наёмника из Excel-базы")
 async def slash_mercenary(
-    interaction: disnake.CommandInteraction,
+    interaction: ApplicationCommandInteraction,
     имя: str = commands.Param(
         min_length=1,
         description="Начни писать: раб, рабочий, певец, бандит, ландскнехт, Лучник...",
         autocomplete=mercenary_name_autocomplete,
     ),
-):
+) -> None:
     try:
         await interaction.response.defer(ephemeral=False)
 
@@ -7447,7 +5852,9 @@ async def slash_mercenary(
             skills_with_levels.append((skill, roll_skill_level()))
 
         level_order = ["Легендарный Мастер", "Мастер", "Ветеран", "Опытный", "Новичок"]
-        skills_with_levels.sort(key=lambda item: level_order.index(item[1]) if item[1] in level_order else 999)
+        skills_with_levels.sort(
+            key=lambda item: level_order.index(item[1]) if item[1] in level_order else 999
+        )
 
         skills_text = ""
         for skill, level in skills_with_levels:
@@ -7501,27 +5908,24 @@ async def slash_mercenary(
         else:
             await interaction.response.send_message(embed=error_embed, ephemeral=True)
 
-#мяу
+
+# мяу
 # ============================================================================
 # 📊 ПОДСЧЁТ ПОСТОВ — вставить сразу после:
 # bot = commands.Bot(command_prefix="!", intents=intents)
 # ============================================================================
-PC_MOSCOW_TZ = timezone(timedelta(hours=3), name="MSK")
 PC_SETTINGS_FILE = str(POST_COUNT_SETTINGS_FILE)
 PC_CONCURRENCY = max(1, min(safe_int_env("POST_COUNT_CONCURRENCY", 3), 8))
 PC_ARCHIVE_CONCURRENCY = max(1, min(safe_int_env("POST_COUNT_ARCHIVE_CONCURRENCY", 4), 8))
 PC_PROGRESS_SECONDS = 8.0
-PC_LONG_POST_MIN_CHARS = 300
 
 # Переключатель статистики длины:
 # False — считать длинные/короткие посты только для ГМ-постов.
 # True — считать длину для ГМ-постов, ДРП-вердиктов и Полит-вердиктов
 # во всех шаблонных режимах.
-PC_COUNT_LENGTH_FOR_ALL_TEMPLATES = False
 
 # Публичная детализация по каналам отправляется цепочкой сообщений,
 # каждое из которых собирается только по целым строкам.
-PC_PUBLIC_REPORT_CHUNK_CHARS = 3900
 
 # Если полный TXT окажется слишком большим для одного вложения,
 # он автоматически делится на несколько файлов по целым строкам.
@@ -7551,532 +5955,11 @@ PC_SEARCH_MAX_RETRY_WAIT = 30.0
 PC_SEARCH_SPLIT_STATUSES = {400, 413, 414, 431}
 PC_DISCORD_EPOCH_MS = 1420070400000
 
-PC_DATE_RE = re.compile(r"^\s*(\d{1,2})\.(\d{1,2})\.(\d{2}|\d{4})\s*$")
-PC_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
-PC_MARKDOWN_RE = re.compile(r"[*_~|`]")
-PC_SEGMENT_RE = re.compile(r"[^\s,;]+", re.UNICODE)
-PC_OUTER_PAYLOAD = "#*_~|` \\t\\r\\n-–—_=+()[]{}<>:;,.!?/\\"
-PC_VARIANT_LEFT = "*_~|` "
-PC_VARIANT_RIGHT = "*_~|` \t\r\n,;:.!?"
+PC_STORE = PCSettingsStore(PC_SETTINGS_FILE)
+PC_SETTINGS_FLUSH_TASK: asyncio.Task[None] | None = None
 
-PC_GM = "gm"
-PC_DRP = "drp"
-PC_POLIT = "polit"
-PC_ALL_FAMILIES = (PC_GM, PC_DRP, PC_POLIT)
-PC_LABELS = {
-    PC_GM: "ГМ-пост",
-    PC_DRP: "ДРП-вердикт",
-    PC_POLIT: "Полит-вердикт",
-}
-PC_PREFIXES = {
-    PC_GM: ("гмпост",),
-    PC_DRP: ("дрпвердикт", "дрпверд"),
-    PC_POLIT: ("политвердикт", "политверд"),
-}
-PC_MODE_ALIASES = {
-    "гмпост": (PC_GM,),
-    "дрпверд": (PC_DRP,),
-    "дрпвердикт": (PC_DRP,),
-    "политверд": (PC_POLIT,),
-    "политвердикт": (PC_POLIT,),
-    "тришаблона": PC_ALL_FAMILIES,
-}
 
-
-class PCDateError(ValueError):
-    pass
-
-
-class PCSearchUnavailable(RuntimeError):
-    """Быстрый поиск Discord недоступен; нужно повторить, делить пакет или перейти на history()."""
-
-    def __init__(self, message, status=None, code=None):
-        super().__init__(message)
-        self.status = status
-        self.code = code
-
-
-class PCPeriod:
-    def __init__(
-        self,
-        start_local,
-        end_exclusive_local,
-        start_utc,
-        end_exclusive_utc,
-        end_was_clamped,
-        requested_end_day,
-        actual_end_day,
-    ):
-        self.start_local = start_local
-        self.end_exclusive_local = end_exclusive_local
-        self.start_utc = start_utc
-        self.end_exclusive_utc = end_exclusive_utc
-        self.end_was_clamped = end_was_clamped
-        self.requested_end_day = requested_end_day
-        self.actual_end_day = actual_end_day
-
-    @property
-    def start_date(self):
-        return self.start_local.date()
-
-    @property
-    def end_date(self):
-        return (self.end_exclusive_local - timedelta(microseconds=1)).date()
-
-
-class PCTemplateMatch:
-    def __init__(
-        self,
-        family,
-        payload_key,
-        canonical,
-        raw_variant,
-        exact_surface,
-        span_start,
-        span_end,
-    ):
-        self.family = family
-        self.payload_key = payload_key
-        self.canonical = canonical
-        self.raw_variant = raw_variant
-        self.exact_surface = exact_surface
-        # Границы метки в нормализованном тексте сообщения.
-        self.span_start = span_start
-        self.span_end = span_end
-
-
-def pc_parse_date_parts(raw: str):
-    match = PC_DATE_RE.fullmatch(raw or "")
-    if not match:
-        raise PCDateError("нечитаемый формат")
-    day = int(match.group(1))
-    month = int(match.group(2))
-    year_raw = match.group(3)
-    year = 2000 + int(year_raw) if len(year_raw) == 2 else int(year_raw)
-    if not 1 <= month <= 12:
-        raise PCDateError("месяц существует только от 1 до 12")
-    if day < 1:
-        raise PCDateError("нулевой или отрицательный день календарю не предложили")
-    if not 2000 <= year <= 9999:
-        raise PCDateError("год вне поддерживаемого диапазона")
-    return day, month, year
-
-
-def pc_parse_period(start_raw: str, end_raw: str) -> PCPeriod:
-    start_day, start_month, start_year = pc_parse_date_parts(start_raw)
-    start_last = pc_calendar.monthrange(start_year, start_month)[1]
-    if start_day > start_last:
-        raise PCDateError("начальная дата не существует")
-
-    requested_end_day, end_month, end_year = pc_parse_date_parts(end_raw)
-    end_last = pc_calendar.monthrange(end_year, end_month)[1]
-    actual_end_day = min(requested_end_day, end_last)
-
-    start_local = datetime(
-        start_year, start_month, start_day, tzinfo=PC_MOSCOW_TZ
-    )
-    end_exclusive_local = datetime(
-        end_year, end_month, actual_end_day, tzinfo=PC_MOSCOW_TZ
-    ) + timedelta(days=1)
-    if end_exclusive_local <= start_local:
-        raise PCDateError("конечная дата раньше начальной")
-
-    return PCPeriod(
-        start_local=start_local,
-        end_exclusive_local=end_exclusive_local,
-        start_utc=start_local.astimezone(timezone.utc),
-        end_exclusive_utc=end_exclusive_local.astimezone(timezone.utc),
-        end_was_clamped=requested_end_day != actual_end_day,
-        requested_end_day=requested_end_day,
-        actual_end_day=actual_end_day,
-    )
-
-
-def pc_normalize_text(value: str) -> str:
-    text = pc_unicodedata.normalize("NFKC", value or "")
-    text = PC_ZERO_WIDTH_RE.sub("", text)
-    text = PC_MARKDOWN_RE.sub("", text)
-    return text.casefold()
-
-
-def pc_word_pattern(value: str):
-    normalized = pc_normalize_text(value).strip()
-    if not normalized:
-        raise ValueError("пустое значение")
-    return re.compile(rf"(?<!\w){re.escape(normalized)}(?!\w)", re.UNICODE)
-
-
-def pc_compact(value: str) -> str:
-    return "".join(ch for ch in pc_normalize_text(value) if ch.isalnum())
-
-
-def pc_template_mode(value: str):
-    return PC_MODE_ALIASES.get(pc_compact(value))
-
-
-def pc_damerau(left: str, right: str) -> int:
-    if left == right:
-        return 0
-    if not left:
-        return len(right)
-    if not right:
-        return len(left)
-    matrix = [[0] * (len(right) + 1) for _ in range(len(left) + 1)]
-    for i in range(len(left) + 1):
-        matrix[i][0] = i
-    for j in range(len(right) + 1):
-        matrix[0][j] = j
-    for i in range(1, len(left) + 1):
-        for j in range(1, len(right) + 1):
-            cost = 0 if left[i - 1] == right[j - 1] else 1
-            matrix[i][j] = min(
-                matrix[i - 1][j] + 1,
-                matrix[i][j - 1] + 1,
-                matrix[i - 1][j - 1] + cost,
-            )
-            if (
-                i > 1
-                and j > 1
-                and left[i - 1] == right[j - 2]
-                and left[i - 2] == right[j - 1]
-            ):
-                matrix[i][j] = min(matrix[i][j], matrix[i - 2][j - 2] + 1)
-    return matrix[-1][-1]
-
-
-def pc_alnum_positions(value: str, start: int):
-    chars, positions = [], []
-    for index in range(start, len(value)):
-        if value[index].isalnum():
-            chars.append(value[index].casefold())
-            positions.append(index)
-    return "".join(chars), positions
-
-
-def pc_candidate_starts(segment: str):
-    for index, char in enumerate(segment):
-        if char.isalnum() and (index == 0 or not segment[index - 1].isalnum()):
-            yield index
-
-
-def pc_best_prefix(compact: str, positions, families):
-    best = None
-    for family in families:
-        for canonical in PC_PREFIXES[family]:
-            for consumed in (len(canonical) - 1, len(canonical), len(canonical) + 1):
-                if consumed < 1 or consumed >= len(compact) or consumed > len(positions):
-                    continue
-                distance = pc_damerau(compact[:consumed], canonical)
-                if distance > 1:
-                    continue
-                boundary_penalty = 0 if positions[consumed] - positions[consumed - 1] > 1 else 1
-                key = (
-                    distance,
-                    boundary_penalty,
-                    abs(consumed - len(canonical)),
-                    -len(canonical),
-                    consumed,
-                    family,
-                )
-                if best is None or key < best:
-                    best = key
-    if best is None:
-        return None
-    return best[5], best[4]
-
-
-def pc_clean_payload(raw: str):
-    value = pc_unicodedata.normalize("NFKC", raw or "")
-    value = PC_ZERO_WIDTH_RE.sub("", value)
-    value = PC_MARKDOWN_RE.sub("", value).strip(PC_OUTER_PAYLOAD)
-    key = "".join(ch.casefold() for ch in value if ch.isalnum())
-    if not key:
-        return "", ""
-    display = "".join(
-        ch for ch in value
-        if ch != "_" and not ch.isspace() and ch not in "()[]{}<>"
-    ).strip("-–—_=+.:/\\")
-    return key, (display or key).upper()
-
-
-def pc_variant(segment: str, start: int) -> str:
-    display_start = start
-    while display_start > 0 and segment[display_start - 1] in "#([{" + PC_VARIANT_LEFT:
-        display_start -= 1
-    return segment[display_start:].strip(PC_VARIANT_LEFT).rstrip(PC_VARIANT_RIGHT)
-
-
-def pc_is_exact_surface(raw_variant: str, canonical: str) -> bool:
-    value = pc_unicodedata.normalize("NFKC", raw_variant or "")
-    value = PC_ZERO_WIDTH_RE.sub("", value)
-    value = PC_MARKDOWN_RE.sub("", value).strip()
-    if value.startswith("#"):
-        value = value[1:].strip()
-    return value.casefold() == canonical.casefold()
-
-
-def pc_find_templates(content: str, families):
-    selected = tuple(f for f in families if f in PC_ALL_FAMILIES)
-    if not selected:
-        return []
-    text = pc_unicodedata.normalize("NFKC", content or "")
-    text = PC_ZERO_WIDTH_RE.sub("", text)
-    found, seen = [], set()
-
-    for segment_match in PC_SEGMENT_RE.finditer(text):
-        segment = segment_match.group(0)
-        for start in pc_candidate_starts(segment):
-            compact, positions = pc_alnum_positions(segment, start)
-            if not compact:
-                continue
-            if any(compact == prefix for family in selected for prefix in PC_PREFIXES[family]):
-                continue
-            prefix = pc_best_prefix(compact, positions, selected)
-            if prefix is None:
-                continue
-            family, consumed = prefix
-            payload_key, payload_display = pc_clean_payload(segment[positions[consumed - 1] + 1:])
-            if not payload_key:
-                continue
-            location = (segment_match.start() + start, segment_match.end(), family)
-            if location in seen:
-                continue
-            seen.add(location)
-            canonical = f"{PC_LABELS[family]}-{payload_display}"
-
-            display_start = start
-            while (
-                display_start > 0
-                and segment[display_start - 1] in "#([{" + PC_VARIANT_LEFT
-            ):
-                display_start -= 1
-
-            raw_variant = pc_variant(segment, start)
-            found.append(PCTemplateMatch(
-                family=family,
-                payload_key=payload_key,
-                canonical=canonical,
-                raw_variant=raw_variant,
-                exact_surface=pc_is_exact_surface(raw_variant, canonical),
-                span_start=segment_match.start() + display_start,
-                span_end=segment_match.end(),
-            ))
-            break
-    return found
-
-
-def pc_template_body_length(content: str, matches) -> int:
-    """
-    Считает длину сообщения после удаления всех найденных шаблонных меток.
-    Оставшиеся пробелы, переносы, пунктуация и Discord-разметка считаются
-    символами; пробелы по краям сообщения не считаются.
-    """
-    text = pc_unicodedata.normalize("NFKC", content or "")
-    text = PC_ZERO_WIDTH_RE.sub("", text)
-
-    spans = []
-    for match in matches:
-        start = max(0, min(len(text), int(match.span_start)))
-        end = max(start, min(len(text), int(match.span_end)))
-        if end > start:
-            spans.append((start, end))
-
-    if not spans:
-        return len(text.strip())
-
-    spans.sort()
-    merged = []
-    for start, end in spans:
-        if not merged or start > merged[-1][1]:
-            merged.append([start, end])
-        else:
-            merged[-1][1] = max(merged[-1][1], end)
-
-    parts = []
-    cursor = 0
-    for start, end in merged:
-        parts.append(text[cursor:start])
-        parts.append(" ")
-        cursor = end
-    parts.append(text[cursor:])
-
-    return len("".join(parts).strip())
-
-
-def pc_length_enabled_for_family(family: str) -> bool:
-    return bool(
-        PC_COUNT_LENGTH_FOR_ALL_TEMPLATES
-        or family == PC_GM
-    )
-
-
-def pc_any_length_enabled(families) -> bool:
-    return bool(families) and any(
-        pc_length_enabled_for_family(family)
-        for family in families
-    )
-
-
-
-def pc_empty_settings():
-    return {"guilds": {}}
-
-
-def pc_normalize_settings(data):
-    if not isinstance(data, dict):
-        return pc_empty_settings()
-
-    guilds = data.get("guilds")
-    if not isinstance(guilds, dict):
-        return pc_empty_settings()
-
-    normalized = {"guilds": {}}
-    for guild_id, raw_guild in guilds.items():
-        if not str(guild_id).isdigit() or not isinstance(raw_guild, dict):
-            continue
-
-        guild_data = {"categories": [], "roles": []}
-        for key in ("categories", "roles"):
-            raw_values = raw_guild.get(key, [])
-            if not isinstance(raw_values, list):
-                continue
-            values = set()
-            for value in raw_values:
-                try:
-                    value_id = int(value)
-                except (TypeError, ValueError):
-                    continue
-                if value_id > 0:
-                    values.add(value_id)
-            guild_data[key] = sorted(values)
-
-        normalized["guilds"][str(guild_id)] = guild_data
-
-    return normalized
-
-
-def pc_load_settings():
-    if not os.path.exists(PC_SETTINGS_FILE):
-        return pc_empty_settings()
-
-    try:
-        with open(PC_SETTINGS_FILE, "r", encoding="utf-8") as file:
-            return pc_normalize_settings(json.load(file))
-    except Exception as exc:
-        logger.error(
-            "Не удалось прочитать настройки подсчёта из %s: %s",
-            PC_SETTINGS_FILE,
-            exc,
-            exc_info=True,
-        )
-        return pc_empty_settings()
-
-
-def pc_write_settings(data):
-    directory = os.path.dirname(PC_SETTINGS_FILE) or "."
-    os.makedirs(directory, exist_ok=True)
-    temp_file = PC_SETTINGS_FILE + ".tmp"
-
-    with open(temp_file, "w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2, sort_keys=True)
-        file.flush()
-        os.fsync(file.fileno())
-
-    os.replace(temp_file, PC_SETTINGS_FILE)
-
-
-PC_SETTINGS_CACHE = pc_load_settings()
-PC_SETTINGS_DIRTY = False
-PC_SETTINGS_FLUSH_TASK = None
-
-
-class PCSettingsStore:
-    def __init__(self):
-        self.lock = asyncio.Lock()
-
-    @staticmethod
-    def _guild_data(guild_id):
-        guilds = PC_SETTINGS_CACHE.setdefault("guilds", {})
-        return guilds.setdefault(
-            str(guild_id),
-            {"categories": [], "roles": []},
-        )
-
-    def values(self, guild_id: int, key: str) -> Set[int]:
-        guild_data = self._guild_data(guild_id)
-        return {int(value) for value in guild_data.get(key, [])}
-
-    async def _save_locked(self):
-        global PC_SETTINGS_DIRTY
-        try:
-            await asyncio.to_thread(pc_write_settings, PC_SETTINGS_CACHE)
-            PC_SETTINGS_DIRTY = False
-            return True
-        except Exception as exc:
-            PC_SETTINGS_DIRTY = True
-            logger.error(
-                "Не удалось записать настройки подсчёта в %s: %s",
-                PC_SETTINGS_FILE,
-                exc,
-                exc_info=True,
-            )
-            return False
-
-    async def add(self, guild_id: int, key: str, value_id: int) -> bool:
-        global PC_SETTINGS_DIRTY
-        async with self.lock:
-            guild_data = self._guild_data(guild_id)
-            values = {int(value) for value in guild_data.setdefault(key, [])}
-            if value_id in values:
-                return False
-
-            values.add(value_id)
-            guild_data[key] = sorted(values)
-            PC_SETTINGS_DIRTY = True
-            if not await self._save_locked():
-                raise OSError(f"не удалось записать {PC_SETTINGS_FILE}")
-            return True
-
-    async def remove(self, guild_id: int, key: str, value_id: int) -> bool:
-        global PC_SETTINGS_DIRTY
-        async with self.lock:
-            guild_data = self._guild_data(guild_id)
-            values = {int(value) for value in guild_data.setdefault(key, [])}
-            if value_id not in values:
-                return False
-
-            values.remove(value_id)
-            guild_data[key] = sorted(values)
-            PC_SETTINGS_DIRTY = True
-            if not await self._save_locked():
-                raise OSError(f"не удалось записать {PC_SETTINGS_FILE}")
-            return True
-
-    async def clear(self, guild_id: int, key: str) -> int:
-        global PC_SETTINGS_DIRTY
-        async with self.lock:
-            guild_data = self._guild_data(guild_id)
-            count = len(guild_data.setdefault(key, []))
-            if count == 0:
-                return 0
-
-            guild_data[key] = []
-            PC_SETTINGS_DIRTY = True
-            if not await self._save_locked():
-                raise OSError(f"не удалось записать {PC_SETTINGS_FILE}")
-            return count
-
-    async def flush_if_dirty(self):
-        async with self.lock:
-            if not PC_SETTINGS_DIRTY:
-                return True
-            return await self._save_locked()
-
-
-PC_STORE = PCSettingsStore()
-
-
-async def pc_periodic_settings_flush():
+async def pc_periodic_settings_flush() -> None:
     await bot.wait_until_ready()
     while not bot.is_closed():
         await asyncio.sleep(300)
@@ -8084,7 +5967,7 @@ async def pc_periodic_settings_flush():
 
 
 @bot.listen("on_ready")
-async def pc_start_periodic_settings_flush():
+async def pc_start_periodic_settings_flush() -> None:
     global PC_SETTINGS_FLUSH_TASK
     if PC_SETTINGS_FLUSH_TASK is None or PC_SETTINGS_FLUSH_TASK.done():
         PC_SETTINGS_FLUSH_TASK = asyncio.create_task(pc_periodic_settings_flush())
@@ -8094,11 +5977,11 @@ def pc_owner(user_id: int) -> bool:
     return bool(OWNER_ID and user_id == OWNER_ID)
 
 
-def pc_admin(member) -> bool:
+def pc_admin(member: disnake.Member | disnake.User) -> bool:
     return isinstance(member, disnake.Member) and bool(member.guild_permissions.administrator)
 
 
-def pc_can_count(interaction, roles: Set[int]) -> bool:
+def pc_can_count(interaction: ApplicationCommandInteraction, roles: set[int]) -> bool:
     if pc_owner(interaction.author.id) or pc_admin(interaction.author):
         return True
     return isinstance(interaction.author, disnake.Member) and any(
@@ -8106,22 +5989,23 @@ def pc_can_count(interaction, roles: Set[int]) -> bool:
     )
 
 
-def pc_channel_label(channel) -> str:
+def pc_channel_label(channel: Any) -> str:
     name = getattr(channel, "name", None) or str(getattr(channel, "id", "?"))
-    if isinstance(channel, disnake.Thread) and getattr(channel, "parent", None):
-        return f"{channel.parent.name} / {name}"
+    parent = getattr(channel, "parent", None) if isinstance(channel, disnake.Thread) else None
+    if parent is not None:
+        return f"{parent.name} / {name}"
     return name
 
 
-def pc_supported_parent(channel) -> bool:
-    types = (disnake.TextChannel, disnake.ForumChannel)
+def pc_supported_parent(channel: object) -> bool:
+    types: tuple[type[Any], ...] = (disnake.TextChannel, disnake.ForumChannel)
     media_type = getattr(disnake, "MediaChannel", None)
     if media_type is not None:
         types += (media_type,)
     return isinstance(channel, types)
 
 
-def pc_archive_in_period(thread, period: PCPeriod) -> bool:
+def pc_archive_in_period(thread: disnake.Thread, period: PCPeriod) -> bool:
     value = getattr(thread, "archive_timestamp", None)
     if not isinstance(value, datetime):
         return True
@@ -8131,12 +6015,12 @@ def pc_archive_in_period(thread, period: PCPeriod) -> bool:
 
 
 async def pc_collect_archive_stream(
-    parent,
-    iterator,
-    source_name,
-    period,
-    semaphore,
-):
+    parent: Any,
+    iterator: AsyncIterator[disnake.Thread],
+    source_name: str,
+    period: PCPeriod,
+    semaphore: asyncio.Semaphore,
+) -> tuple[list[disnake.Thread], list[str]]:
     found = []
     errors = []
     try:
@@ -8152,10 +6036,7 @@ async def pc_collect_archive_stream(
     except disnake.HTTPException as exc:
         errors.append(f"{source_name} {pc_channel_label(parent)}: {exc}")
     except TypeError as exc:
-        errors.append(
-            f"{source_name} {pc_channel_label(parent)}: "
-            "несовместимая сигнатура API"
-        )
+        errors.append(f"{source_name} {pc_channel_label(parent)}: несовместимая сигнатура API")
         logger.error(
             "archived_threads %s: %s",
             pc_channel_label(parent),
@@ -8167,60 +6048,63 @@ async def pc_collect_archive_stream(
 
 async def pc_collect_targets(
     guild: disnake.Guild,
-    category_ids: Set[int],
+    category_ids: set[int],
     period: PCPeriod,
-):
+) -> tuple[list[Any], list[str]]:
     errors = []
     channels = list(getattr(guild, "channels", ()) or ())
     if not channels:
         try:
-            channels = await guild.fetch_channels()
-        except Exception as exc:
+            channels = list(await guild.fetch_channels())
+        except (disnake.HTTPException, asyncio.TimeoutError) as exc:
             logger.warning("fetch_channels не сработал: %s", exc)
             channels = []
 
     parents = [
         channel
         for channel in channels
-        if getattr(channel, "category_id", None) in category_ids
-        and pc_supported_parent(channel)
+        if getattr(channel, "category_id", None) in category_ids and pc_supported_parent(channel)
     ]
     parent_ids = {channel.id for channel in parents}
-    targets = {}
-    archive_sources = []
+    targets: dict[int, Any] = {}
+    archive_sources: list[tuple[Any, Any, str]] = []
     media_type = getattr(disnake, "MediaChannel", None)
 
     for parent in parents:
         if isinstance(parent, disnake.TextChannel):
             targets[parent.id] = parent
-            archive_sources.extend((
+            archive_sources.extend(
                 (
-                    parent,
-                    parent.archived_threads(
-                        private=False,
-                        joined=False,
-                        limit=None,
+                    (
+                        parent,
+                        parent.archived_threads(
+                            private=False,
+                            joined=False,
+                            limit=None,
+                        ),
+                        "публичные архивы",
                     ),
-                    "публичные архивы",
-                ),
-                (
-                    parent,
-                    parent.archived_threads(
-                        private=True,
-                        joined=False,
-                        limit=None,
+                    (
+                        parent,
+                        parent.archived_threads(
+                            private=True,
+                            joined=False,
+                            limit=None,
+                        ),
+                        "приватные архивы",
                     ),
-                    "приватные архивы",
-                ),
-            ))
+                )
+            )
         elif isinstance(parent, disnake.ForumChannel) or (
             media_type is not None and isinstance(parent, media_type)
         ):
-            archive_sources.append((
-                parent,
-                parent.archived_threads(limit=None),
-                "архивы",
-            ))
+            archive_sources.append(
+                (
+                    parent,
+                    parent.archived_threads(limit=None),
+                    "архивы",
+                )
+            )
 
         for thread in getattr(parent, "threads", ()):
             targets[thread.id] = thread
@@ -8256,241 +6140,15 @@ async def pc_collect_targets(
 
     return list(targets.values()), errors
 
-def pc_channel_counter_add(counter, channel_id, label, amount=1):
-    key = str(channel_id) if channel_id is not None else f"label:{label}"
-    item = counter.setdefault(
-        key,
-        {
-            "id": int(channel_id) if channel_id is not None else None,
-            "label": str(label or "неизвестный канал"),
-            "messages": 0,
-        },
-    )
-    item["messages"] += int(amount)
 
-
-def pc_empty_surface_stats():
-    return {
-        "occurrences": 0,
-        "messages": 0,
-        "channels": {},
-    }
-
-
-def pc_empty_group(canonical):
-    return {
-        "canonical": canonical,
-        "occurrences": 0,
-        "messages": 0,
-        # Для ГМ это отдельная статистика длины конкретной арки/метки.
-        # Общая статистика семейства выше при этом сохраняется без изменений.
-        "long": 0,
-        "short": 0,
-        "channels": {},
-        "exact": pc_empty_surface_stats(),
-        "variants": {},
-    }
-
-
-def pc_empty_result(label, families, channel_id=None):
-    result = {
-        "label": label,
-        "channel_id": int(channel_id) if channel_id is not None else None,
-        "matched": 0,
-        "scanned": 0,
-        "error": None,
-        "families": {},
-        # Общая длина считается только для семейств, разрешённых
-        # PC_COUNT_LENGTH_FOR_ALL_TEMPLATES.
-        "lengths": {"long": 0, "short": 0},
-        # Полные записи нужны только для подробного TXT-отчёта.
-        "template_messages": [],
-    }
-    if families:
-        result["families"] = {
-            family: {
-                "messages": 0,
-                "occurrences": 0,
-                "long": 0,
-                "short": 0,
-                "channels": {},
-                "groups": {},
-            }
-            for family in families
-        }
-    return result
-
-
-def pc_iso_datetime(value):
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc).isoformat()
-    return str(value or "")
-
-
-def pc_apply_content(
-    result,
-    content,
-    word_pattern,
-    families,
-    *,
-    message_id=None,
-    channel_id=None,
-    guild_id=None,
-    created_at=None,
-    jump_url=None,
-):
-    """Проверяет одно сообщение уже выбранного пользователя."""
-    result["scanned"] += 1
-    content = content or ""
-
-    if families:
-        matches = pc_find_templates(content, families)
-        if not matches:
-            return
-
-        result["matched"] += 1
-        message_families = {match.family for match in matches}
-        channel_id = (
-            int(channel_id)
-            if channel_id is not None
-            else result.get("channel_id")
-        )
-        channel_label = result.get("label") or "неизвестный канал"
-
-        length_families = {
-            family
-            for family in message_families
-            if pc_length_enabled_for_family(family)
-        }
-        body_length = None
-        length_kind = None
-
-        if length_families:
-            body_length = pc_template_body_length(content, matches)
-            length_kind = (
-                "long"
-                if body_length >= PC_LONG_POST_MIN_CHARS
-                else "short"
-            )
-            # Одно сообщение учитывается в общей статистике длины один раз,
-            # даже если содержит несколько учитываемых семейств.
-            result["lengths"][length_kind] += 1
-
-        group_message_keys = set()
-        surface_message_keys = set()
-        record_matches = []
-
-        for match in matches:
-            family_data = result["families"][match.family]
-            family_data["occurrences"] += 1
-
-            group = family_data["groups"].setdefault(
-                match.payload_key,
-                pc_empty_group(match.canonical),
-            )
-            group["occurrences"] += 1
-            group_message_keys.add((match.family, match.payload_key))
-
-            if match.exact_surface:
-                surface = group["exact"]
-                surface["occurrences"] += 1
-                surface_message_keys.add(
-                    (match.family, match.payload_key, "exact", "")
-                )
-                surface_name = match.canonical
-            else:
-                surface = group["variants"].setdefault(
-                    match.raw_variant,
-                    pc_empty_surface_stats(),
-                )
-                surface["occurrences"] += 1
-                surface_message_keys.add(
-                    (
-                        match.family,
-                        match.payload_key,
-                        "variant",
-                        match.raw_variant,
-                    )
-                )
-                surface_name = match.raw_variant
-
-            record_matches.append({
-                "family": match.family,
-                "payload_key": match.payload_key,
-                "canonical": match.canonical,
-                "exact": bool(match.exact_surface),
-                "surface": surface_name,
-            })
-
-        # Сообщение в статистике семейства и канала считается один раз.
-        for family in message_families:
-            family_data = result["families"][family]
-            family_data["messages"] += 1
-            pc_channel_counter_add(
-                family_data["channels"],
-                channel_id,
-                channel_label,
-            )
-
-            if (
-                length_kind is not None
-                and pc_length_enabled_for_family(family)
-            ):
-                family_data[length_kind] += 1
-
-        # Сообщение в каждой канонической группе считается один раз,
-        # даже если одинаковая метка повторена несколько раз.
-        for family, payload_key in group_message_keys:
-            group = result["families"][family]["groups"][payload_key]
-            group["messages"] += 1
-            if length_kind is not None and pc_length_enabled_for_family(family):
-                group[length_kind] += 1
-            pc_channel_counter_add(
-                group["channels"],
-                channel_id,
-                channel_label,
-            )
-
-        # То же правило применяется отдельно к точному написанию
-        # и к каждой фактической вариации.
-        for family, payload_key, surface_kind, surface_name in surface_message_keys:
-            group = result["families"][family]["groups"][payload_key]
-            if surface_kind == "exact":
-                surface = group["exact"]
-            else:
-                surface = group["variants"][surface_name]
-            surface["messages"] += 1
-            pc_channel_counter_add(
-                surface["channels"],
-                channel_id,
-                channel_label,
-            )
-
-        if jump_url is None and guild_id and channel_id and message_id:
-            jump_url = (
-                f"https://discord.com/channels/"
-                f"{guild_id}/{channel_id}/{message_id}"
-            )
-
-        result["template_messages"].append({
-            "id": str(message_id or ""),
-            "channel_id": str(channel_id or ""),
-            "channel": channel_label,
-            "created_at": pc_iso_datetime(created_at),
-            "jump_url": str(jump_url or ""),
-            "content": content,
-            "body_length": body_length,
-            "length_kind": length_kind,
-            "matches": record_matches,
-        })
-
-    elif word_pattern.search(pc_normalize_text(content)):
-        result["matched"] += 1
-
-
-async def pc_scan_target(target, user_id, word_pattern, families, period, semaphore):
+async def pc_scan_target(
+    target: Any,
+    user_id: int,
+    word_pattern: re.Pattern[str] | None,
+    families: Sequence[str] | None,
+    period: PCPeriod,
+    semaphore: asyncio.Semaphore,
+) -> CountResult:
     """
     Резервный медленный путь через history().
     В отличие от старой версии, scanned считает только сообщения нужного автора,
@@ -8527,13 +6185,14 @@ async def pc_scan_target(target, user_id, word_pattern, families, period, semaph
             result["error"] = "нет доступа к истории"
         except disnake.HTTPException as exc:
             result["error"] = f"Discord API: {exc}"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - ошибка одной ветки не должна обрывать весь поиск
             result["error"] = f"{type(exc).__name__}: {exc}"
+            logger.exception("Не удалось просканировать ветку %s", pc_channel_label(target))
 
     return result
 
 
-def pc_datetime_to_snowflake(value):
+def pc_datetime_to_snowflake(value: datetime) -> int:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     value = value.astimezone(timezone.utc)
@@ -8541,7 +6200,7 @@ def pc_datetime_to_snowflake(value):
     return max(0, milliseconds - PC_DISCORD_EPOCH_MS) << 22
 
 
-def pc_api_timestamp(raw):
+def pc_api_timestamp(raw: object) -> datetime | None:
     if not raw:
         return None
     try:
@@ -8550,12 +6209,12 @@ def pc_api_timestamp(raw):
         return None
 
 
-def pc_chunks(values, size):
+def pc_chunks(values: list[_T], size: int) -> Iterator[list[_T]]:
     for index in range(0, len(values), size):
-        yield values[index:index + size]
+        yield values[index : index + size]
 
 
-def pc_search_headers():
+def pc_search_headers() -> dict[str, str]:
     token = (os.getenv("DISCORD_TOKEN") or "").strip()
     if not token:
         raise PCSearchUnavailable("DISCORD_TOKEN не найден")
@@ -8568,7 +6227,9 @@ def pc_search_headers():
     }
 
 
-async def pc_search_request(session, guild_id, params, search_info):
+async def pc_search_request(
+    session: aiohttp.ClientSession, guild_id: int, params: list[tuple[str, str]], search_info: dict[str, Any]
+) -> dict[str, Any]:
     """
     Один HTTP-запрос к Search Guild Messages.
 
@@ -8592,7 +6253,7 @@ async def pc_search_request(session, guild_id, params, search_info):
 
                 try:
                     data = await response.json(content_type=None)
-                except Exception:
+                except (aiohttp.ContentTypeError, ValueError, TypeError):
                     body = await response.text()
                     data = {"message": body[:1000]}
 
@@ -8605,11 +6266,7 @@ async def pc_search_request(session, guild_id, params, search_info):
                     return data
 
                 code = data.get("code") if isinstance(data, dict) else None
-                message = (
-                    data.get("message")
-                    if isinstance(data, dict)
-                    else str(data)
-                )
+                message = data.get("message") if isinstance(data, dict) else str(data)
                 detail = f"HTTP {response.status}"
                 if code is not None:
                     detail += f", code {code}"
@@ -8646,11 +6303,7 @@ async def pc_search_request(session, guild_id, params, search_info):
                     search_info["rate_limit_waits"] += 1
                     search_info["retry_attempts"] += 1
 
-                    retry_after = (
-                        data.get("retry_after")
-                        if isinstance(data, dict)
-                        else None
-                    )
+                    retry_after = data.get("retry_after") if isinstance(data, dict) else None
                     if retry_after is None:
                         retry_after = response.headers.get("Retry-After", 1)
                     try:
@@ -8693,17 +6346,15 @@ async def pc_search_request(session, guild_id, params, search_info):
             if http_attempts <= PC_SEARCH_HTTP_RETRIES:
                 await asyncio.sleep(min(2 ** (http_attempts - 1), 12))
                 continue
-            raise PCSearchUnavailable(
-                f"сетевая ошибка Discord Search: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise PCSearchUnavailable(f"сетевая ошибка Discord Search: {type(exc).__name__}: {exc}") from exc
 
 
-def pc_flatten_search_messages(data):
+def pc_flatten_search_messages(data: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Discord возвращает nested array: [[message], [message], ...].
     На случай изменения/старого формата поддерживаем и плоский массив.
     """
-    flattened = []
+    flattened: list[dict[str, Any]] = []
     raw_groups = data.get("messages", []) if isinstance(data, dict) else []
 
     if not isinstance(raw_groups, list):
@@ -8719,16 +6370,16 @@ def pc_flatten_search_messages(data):
 
 
 async def pc_search_batch(
-    session,
-    guild_id,
-    batch_targets,
-    user_id,
-    word_pattern,
-    families,
-    period,
-    search_info,
-    on_page=None,
-):
+    session: aiohttp.ClientSession,
+    guild_id: int,
+    batch_targets: Sequence[Any],
+    user_id: int,
+    word_pattern: re.Pattern[str] | None,
+    families: Sequence[str] | None,
+    period: PCPeriod,
+    search_info: dict[str, Any],
+    on_page: Any = None,
+) -> list[CountResult]:
     """Ищет сообщения автора в одном пакете каналов и полностью пагинирует его."""
     target_map = {int(target.id): target for target in batch_targets}
     local_results = {
@@ -8752,10 +6403,7 @@ async def pc_search_batch(
             ("sort_order", "desc"),
             ("include_nsfw", "true"),
         ]
-        params.extend(
-            ("channel_id", str(channel_id))
-            for channel_id in target_map
-        )
+        params.extend(("channel_id", str(channel_id)) for channel_id in target_map)
 
         data = await pc_search_request(
             session,
@@ -8774,9 +6422,9 @@ async def pc_search_batch(
 
         for raw_message in page_messages:
             try:
-                message_id = int(raw_message.get("id"))
-                channel_id = int(raw_message.get("channel_id"))
-                author_id = int((raw_message.get("author") or {}).get("id"))
+                message_id = int(str(raw_message.get("id")))
+                channel_id = int(str(raw_message.get("channel_id")))
+                author_id = int(str((raw_message.get("author") or {}).get("id")))
             except (TypeError, ValueError):
                 continue
 
@@ -8790,9 +6438,7 @@ async def pc_search_batch(
                 continue
 
             created_at = pc_api_timestamp(raw_message.get("timestamp"))
-            if created_at is not None and not (
-                period.start_utc <= created_at < period.end_exclusive_utc
-            ):
+            if created_at is not None and not (period.start_utc <= created_at < period.end_exclusive_utc):
                 continue
 
             pc_apply_content(
@@ -8804,10 +6450,7 @@ async def pc_search_batch(
                 channel_id=channel_id,
                 guild_id=guild_id,
                 created_at=created_at,
-                jump_url=(
-                    f"https://discord.com/channels/"
-                    f"{guild_id}/{channel_id}/{message_id}"
-                ),
+                jump_url=(f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"),
             )
 
         if on_page is not None:
@@ -8835,16 +6478,16 @@ async def pc_search_batch(
 
 
 async def pc_search_batch_adaptive(
-    session,
-    guild_id,
-    batch_targets,
-    user_id,
-    word_pattern,
-    families,
-    period,
-    search_info,
-    on_page=None,
-):
+    session: aiohttp.ClientSession,
+    guild_id: int,
+    batch_targets: Sequence[Any],
+    user_id: int,
+    word_pattern: re.Pattern[str] | None,
+    families: Sequence[str] | None,
+    period: PCPeriod,
+    search_info: dict[str, Any],
+    on_page: Any = None,
+) -> tuple[list[CountResult], list[Any], list[str]]:
     """
     Пробует пакет целиком. Если URL/запрос слишком велик, делит пакет
     пополам и повторяет. В history() уйдёт только минимальный неудачный кусок.
@@ -8864,10 +6507,7 @@ async def pc_search_batch_adaptive(
         return results, [], []
 
     except PCSearchUnavailable as exc:
-        can_split = (
-            exc.status in PC_SEARCH_SPLIT_STATUSES
-            and len(batch_targets) > PC_SEARCH_MIN_SPLIT_BATCH
-        )
+        can_split = exc.status in PC_SEARCH_SPLIT_STATUSES and len(batch_targets) > PC_SEARCH_MIN_SPLIT_BATCH
 
         if not can_split:
             return [], list(batch_targets), [str(exc)]
@@ -8878,8 +6518,7 @@ async def pc_search_batch_adaptive(
         right = batch_targets[midpoint:]
 
         logger.warning(
-            "Discord Search отклонил пакет из %s каналов (%s). "
-            "Делю на %s и %s и пробую снова.",
+            "Discord Search отклонил пакет из %s каналов (%s). Делю на %s и %s и пробую снова.",
             len(batch_targets),
             exc,
             len(left),
@@ -8917,14 +6556,14 @@ async def pc_search_batch_adaptive(
 
 
 async def pc_search_or_fallback(
-    guild,
-    targets,
-    user_id,
-    word_pattern,
-    families,
-    period,
-    progress_callback=None,
-):
+    guild: disnake.Guild,
+    targets: Sequence[Any],
+    user_id: int,
+    word_pattern: re.Pattern[str] | None,
+    families: Sequence[str] | None,
+    period: PCPeriod,
+    progress_callback: Any = None,
+) -> tuple[list[CountResult], dict[str, Any]]:
     """
     Гибридный механизм:
     1. Каналы делятся на безопасные пакеты (по умолчанию 100, не 500).
@@ -8933,7 +6572,7 @@ async def pc_search_or_fallback(
     4. Слишком большой запрос автоматически делится пополам.
     5. history()-fallback используется только для минимальных неудачных кусков.
     """
-    search_info = {
+    search_info: dict[str, Any] = {
         "method": "discord_search",
         "api_requests": 0,
         "search_pages": 0,
@@ -8952,8 +6591,8 @@ async def pc_search_or_fallback(
     target_batches = list(pc_chunks(list(targets), PC_SEARCH_CHANNEL_BATCH))
     search_info["search_batches"] = len(target_batches)
 
-    completed_results = []
-    fallback_targets = []
+    completed_results: list[CountResult] = []
+    fallback_targets: list[Any] = []
 
     try:
         headers = pc_search_headers()
@@ -8973,10 +6612,12 @@ async def pc_search_or_fallback(
             timeout=timeout,
         ) as session:
 
-            async def run_initial_batch(batch_number, batch_targets):
-                temporary_results = []
+            async def run_initial_batch(
+                batch_number: int, batch_targets: Sequence[Any]
+            ) -> tuple[list[CountResult], list[Any], list[str]]:
+                temporary_results: list[CountResult] = []
 
-                async def on_page(local_results, page_info):
+                async def on_page(local_results: list[CountResult], page_info: dict[str, Any]) -> None:
                     nonlocal temporary_results
                     temporary_results = local_results
 
@@ -9057,13 +6698,11 @@ async def pc_search_or_fallback(
     if fallback_targets:
         search_info["fallback_targets"] = len(fallback_targets)
         search_info["method"] = (
-            "history_fallback"
-            if not completed_results
-            else "discord_search+history_fallback"
+            "history_fallback" if not completed_results else "discord_search+history_fallback"
         )
 
         semaphore = asyncio.Semaphore(PC_CONCURRENCY)
-        tasks = [
+        fallback_tasks = [
             asyncio.create_task(
                 pc_scan_target(
                     target,
@@ -9079,8 +6718,8 @@ async def pc_search_or_fallback(
 
         fallback_results = []
 
-        for completed, task in enumerate(asyncio.as_completed(tasks), start=1):
-            fallback_results.append(await task)
+        for completed, fallback_task in enumerate(asyncio.as_completed(fallback_tasks), start=1):
+            fallback_results.append(await fallback_task)
             search_info["fallback_completed"] = completed
 
             if progress_callback is not None:
@@ -9096,330 +6735,15 @@ async def pc_search_or_fallback(
 
     return completed_results, search_info
 
-def pc_merge_channel_counters(target, source):
-    for key, item in (source or {}).items():
-        current = target.setdefault(
-            key,
-            {
-                "id": item.get("id"),
-                "label": item.get("label") or "неизвестный канал",
-                "messages": 0,
-            },
-        )
-        current["messages"] += int(item.get("messages", 0))
-
-
-def pc_merge_surface_stats(target, source):
-    target["occurrences"] += int(source.get("occurrences", 0))
-    target["messages"] += int(source.get("messages", 0))
-    pc_merge_channel_counters(
-        target["channels"],
-        source.get("channels", {}),
-    )
-
-
-def pc_merge_stats(results, families):
-    merged = {
-        family: {
-            "messages": 0,
-            "occurrences": 0,
-            "long": 0,
-            "short": 0,
-            "channels": {},
-            "groups": {},
-        }
-        for family in families
-    }
-
-    for result in results:
-        for family in families:
-            source = result.get("families", {}).get(family, {})
-            target = merged[family]
-            target["messages"] += int(source.get("messages", 0))
-            target["occurrences"] += int(source.get("occurrences", 0))
-            target["long"] += int(source.get("long", 0))
-            target["short"] += int(source.get("short", 0))
-            pc_merge_channel_counters(
-                target["channels"],
-                source.get("channels", {}),
-            )
-
-            for key, source_group in source.get("groups", {}).items():
-                group = target["groups"].setdefault(
-                    key,
-                    pc_empty_group(source_group["canonical"]),
-                )
-                group["occurrences"] += int(
-                    source_group.get("occurrences", 0)
-                )
-                group["messages"] += int(
-                    source_group.get("messages", 0)
-                )
-                group["long"] += int(source_group.get("long", 0))
-                group["short"] += int(source_group.get("short", 0))
-                pc_merge_channel_counters(
-                    group["channels"],
-                    source_group.get("channels", {}),
-                )
-                pc_merge_surface_stats(
-                    group["exact"],
-                    source_group.get("exact", {}),
-                )
-
-                for variant, source_variant in (
-                    source_group.get("variants", {}).items()
-                ):
-                    variant_target = group["variants"].setdefault(
-                        variant,
-                        pc_empty_surface_stats(),
-                    )
-                    pc_merge_surface_stats(
-                        variant_target,
-                        source_variant,
-                    )
-
-    return merged
-
-
-def pc_merge_lengths(results):
-    return {
-        "long": sum(
-            item.get("lengths", {}).get("long", 0)
-            for item in results
-        ),
-        "short": sum(
-            item.get("lengths", {}).get("short", 0)
-            for item in results
-        ),
-    }
-
-
-def pc_collect_template_records(results):
-    records = []
-    seen = set()
-
-    for result in results:
-        for record in result.get("template_messages", []):
-            identity = (
-                record.get("id")
-                or record.get("jump_url")
-                or (
-                    f"{record.get('channel_id')}:"
-                    f"{record.get('created_at')}:"
-                    f"{len(records)}"
-                )
-            )
-            if identity in seen:
-                continue
-            seen.add(identity)
-            records.append(record)
-
-    return records
-
-
-def pc_percent(part: int, total: int) -> float:
-    return (part * 100.0 / total) if total else 0.0
-
-
-
-def pc_public_clip(value, limit=240):
-    text = str(value or "").replace("\n", " ").replace("\r", " ")
-    text = " ".join(text.split())
-    if len(text) <= limit:
-        return text
-    return text[: max(1, limit - 16)] + "… [полностью в TXT]"
-
-
-def pc_sorted_channels(channels):
-    return sorted(
-        (channels or {}).values(),
-        key=lambda item: (
-            -int(item.get("messages", 0)),
-            str(item.get("label") or "").casefold(),
-            str(item.get("id") or ""),
-        ),
-    )
-
-
-def pc_channel_report_lines(channels, indent="  "):
-    rendered = []
-    for item in pc_sorted_channels(channels):
-        channel_id = item.get("id")
-        label = pc_public_clip(item.get("label"), 220)
-        location = (
-            f"<#{channel_id}> — {label}"
-            if channel_id
-            else label
-        )
-        rendered.append(
-            f"{indent}• `{item.get('messages', 0)}` — {location}"
-        )
-    return rendered or [f"{indent}• Совпадений нет."]
-
-
-def pc_template_channel_report_lines(stats, families):
-    """
-    Формирует публичную часть шаблонного отчёта.
-
-    В Discord показываются только:
-    - общая статистика каждого семейства;
-    - распределение семейства по каналам;
-    - каждый канонический шаблон;
-    - распределение канонического шаблона по каналам.
-
-    Количество меток, точные написания, опечатки и другие фактические
-    варианты выводятся только в подробном TXT-отчёте.
-    """
-    lines = [
-        "Числа возле каналов — количество сообщений.",
-        "",
-    ]
-
-    for family in families:
-        data = stats[family]
-        messages = int(data.get("messages", 0))
-        groups_count = len(data.get("groups", {}))
-        channels_count = len(data.get("channels", {}))
-
-        if messages == 0:
-            lines.extend([
-                f"## {PC_LABELS[family]} — совпадений нет.",
-                "",
-            ])
-            continue
-
-        lines.append(
-            f"## {PC_LABELS[family]} — сообщений `{messages}`, "
-            f"шаблонов `{groups_count}`, каналов `{channels_count}`"
-        )
-
-        if pc_length_enabled_for_family(family):
-            long_count = int(data.get("long", 0))
-            short_count = int(data.get("short", 0))
-            total_length = long_count + short_count
-            lines.append(
-                f"**Длина без меток:** длинных "
-                f"`{long_count}` (`{pc_percent(long_count, total_length):.1f}%`), "
-                f"коротких `{short_count}` "
-                f"(`{pc_percent(short_count, total_length):.1f}%`)."
-            )
-
-        lines.append("**Все сообщения семейства по каналам:**")
-        lines.extend(pc_channel_report_lines(data.get("channels", {})))
-
-        groups = sorted(
-            data.get("groups", {}).values(),
-            key=lambda item: (
-                -int(item.get("messages", 0)),
-                -int(item.get("occurrences", 0)),
-                str(item.get("canonical") or "").casefold(),
-            ),
-        )
-
-        for group in groups:
-            canonical = pc_public_clip(group.get("canonical"), 300)
-            group_channels = group.get("channels", {})
-            lines.extend([
-                "",
-                (
-                    f"### {canonical} — сообщений `{group['messages']}`, "
-                    f"каналов `{len(group_channels)}`"
-                ),
-            ])
-            if pc_length_enabled_for_family(family):
-                group_long = int(group.get("long", 0))
-                group_short = int(group.get("short", 0))
-                group_total = group_long + group_short
-                lines.append(
-                    f"**Длина по арке:** длинных `{group_long}` "
-                    f"(`{pc_percent(group_long, group_total):.1f}%`), "
-                    f"коротких `{group_short}` "
-                    f"(`{pc_percent(group_short, group_total):.1f}%`)."
-                )
-            lines.append("**По каналам:**")
-            lines.extend(pc_channel_report_lines(group_channels))
-
-        lines.append("")
-
-    return lines
-
-def pc_template_public_report_lines(
-    user,
-    mode_value,
-    period,
-    matched,
-    scanned,
-    successful_targets,
-    total_targets,
-    stats,
-    families,
-    elapsed,
-    extra_notes=None,
-):
-    """Объединяет итоговую сводку и распределение по каналам."""
-    lines = [
-        f"**Пользователь:** {user.mention} (`{user.id}`)",
-        f"**Режим:** `{str(mode_value)[:200]}`",
-        (
-            f"**Период (МСК):** `{period.start_date:%d.%m.%Y}` — "
-            f"`{period.end_date:%d.%m.%Y}` включительно"
-        ),
-        (
-            f"**Итог:** найдено сообщений `"
-            f"{matched}` • проверено сообщений пользователя `{scanned}` • "
-            f"каналов/веток успешно `{successful_targets}/{total_targets}`"
-        ),
-        "",
-    ]
-
-    lines.extend(pc_template_channel_report_lines(stats, families))
-
-    for note in extra_notes or ():
-        if note:
-            lines.append(str(note))
-
-    lines.append(f"Время выполнения: `{elapsed:.1f} сек.`")
-    return lines
-
-def pc_split_lines_for_discord(
-    lines,
-    max_chars=PC_PUBLIC_REPORT_CHUNK_CHARS,
-):
-    chunks = []
-    current = []
-    current_size = 0
-
-    for raw_line in lines:
-        line = str(raw_line or "")
-
-        # Динамические названия выше заранее ограничены, поэтому эта ветка —
-        # последняя защита от патологически длинной строки.
-        if len(line) > max_chars:
-            line = pc_public_clip(line, max_chars - 4)
-
-        added = len(line) + (1 if current else 0)
-        if current and current_size + added > max_chars:
-            chunks.append("\n".join(current))
-            current = [line]
-            current_size = len(line)
-        else:
-            current.append(line)
-            current_size += added
-
-    if current:
-        chunks.append("\n".join(current))
-
-    return chunks
-
 
 async def pc_send_reply_chain(
-    interaction,
-    chunks,
-    previous_message=None,
+    interaction: ApplicationCommandInteraction,
+    chunks: Sequence[str],
+    previous_message: disnake.Message | None = None,
     *,
-    start_part=2,
-    total_parts=None,
-):
+    start_part: int = 2,
+    total_parts: int | None = None,
+) -> disnake.Message | None:
     """
     Отправляет только продолжения отчёта цепочкой embed-сообщений.
     Первая часть уже находится в исходном сообщении команды.
@@ -9436,20 +6760,12 @@ async def pc_send_reply_chain(
     for offset, chunk in enumerate(chunks):
         part_number = start_part + offset
         report_embed = disnake.Embed(
-            title=(
-                f"📊 Подсчёт постов — продолжение "
-                f"{part_number}/{total_parts}"
-            ),
+            title=(f"📊 Подсчёт постов — продолжение {part_number}/{total_parts}"),
             description=str(chunk or "").strip() or "Продолжение отчёта.",
             color=0x5865F2,
             timestamp=datetime.now(),
         )
-        report_embed.set_footer(
-            text=(
-                f"Часть {part_number}/{total_parts} • "
-                "строки не обрезаются посередине"
-            )
-        )
+        report_embed.set_footer(text=(f"Часть {part_number}/{total_parts} • строки не обрезаются посередине"))
 
         sent = await interaction.channel.send(
             embed=report_embed,
@@ -9460,34 +6776,28 @@ async def pc_send_reply_chain(
 
     return previous_message
 
-def pc_record_identity(record):
+
+def pc_record_identity(record: Mapping[str, Any]) -> str:
     return (
         record.get("id")
         or record.get("jump_url")
-        or (
-            f"{record.get('channel_id')}:"
-            f"{record.get('created_at')}:"
-            f"{hash(record.get('content', ''))}"
-        )
+        or (f"{record.get('channel_id')}:{record.get('created_at')}:{hash(record.get('content', ''))}")
     )
 
 
 def pc_records_for_surface(
-    records,
-    family,
-    payload_key,
+    records: Sequence[TemplateMessage],
+    family: str,
+    payload_key: str,
     *,
-    exact=False,
-    variant=None,
-):
+    exact: bool = False,
+    variant: str | None = None,
+) -> list[TemplateMessage]:
     selected = {}
 
     for record in records:
         for match in record.get("matches", []):
-            if (
-                match.get("family") != family
-                or match.get("payload_key") != payload_key
-            ):
+            if match.get("family") != family or match.get("payload_key") != payload_key:
                 continue
 
             if exact and match.get("exact"):
@@ -9506,14 +6816,14 @@ def pc_records_for_surface(
     return list(selected.values())
 
 
-def pc_record_datetime_msk(record):
+def pc_record_datetime_msk(record: Mapping[str, Any]) -> str:
     value = pc_api_timestamp(record.get("created_at"))
     if value is None:
         return record.get("created_at") or "неизвестно"
     return value.astimezone(PC_MOSCOW_TZ).strftime("%d.%m.%Y %H:%M:%S МСК")
 
 
-def pc_record_sort_key(record):
+def pc_record_sort_key(record: Mapping[str, Any]) -> tuple[str, int, str, str]:
     body_length = record.get("body_length")
     if not isinstance(body_length, int):
         body_length = -1
@@ -9525,7 +6835,7 @@ def pc_record_sort_key(record):
     )
 
 
-def pc_append_txt_channels(lines, channels, indent="  "):
+def pc_append_txt_channels(lines: list[str], channels: ChannelCounters, indent: str = "  ") -> None:
     for item in pc_sorted_channels(channels):
         channel_id = item.get("id") or "?"
         lines.append(
@@ -9537,14 +6847,13 @@ def pc_append_txt_channels(lines, channels, indent="  "):
         lines.append(f"{indent}• Совпадений нет.")
 
 
-def pc_append_txt_message(lines, record, number, family):
+def pc_append_txt_message(lines: list[str], record: TemplateMessage, number: int, family: str) -> None:
     length_enabled = pc_length_enabled_for_family(family)
     body_length = record.get("body_length")
 
     if length_enabled and isinstance(body_length, int):
         length_text = (
-            f"{body_length} символов — "
-            f"{'ДЛИННЫЙ' if body_length >= PC_LONG_POST_MIN_CHARS else 'КОРОТКИЙ'}"
+            f"{body_length} символов — {'ДЛИННЫЙ' if body_length >= PC_LONG_POST_MIN_CHARS else 'КОРОТКИЙ'}"
         )
     else:
         length_text = "не классифицируется для этого семейства"
@@ -9553,11 +6862,7 @@ def pc_append_txt_message(lines, record, number, family):
     for match in record.get("matches", []):
         if match.get("family") != family:
             continue
-        surfaces.append(
-            match.get("canonical")
-            if match.get("exact")
-            else match.get("surface")
-        )
+        surfaces.append(match.get("canonical") if match.get("exact") else match.get("surface"))
 
     unique_surfaces = []
     seen_surfaces = set()
@@ -9568,74 +6873,64 @@ def pc_append_txt_message(lines, record, number, family):
         seen_surfaces.add(key)
         unique_surfaces.append(key)
 
-    lines.extend([
-        f"[{number}]",
-        f"Дата: {pc_record_datetime_msk(record)}",
-        (
-            f"Канал: {record.get('channel', 'неизвестный канал')} "
-            f"(channel_id: {record.get('channel_id') or '?'})"
-        ),
-        f"ID сообщения: {record.get('id') or '?'}",
-        f"Ссылка: {record.get('jump_url') or 'нет ссылки'}",
-        f"Длина текста без найденных меток: {length_text}",
-        "Найденные написания этого семейства: "
-        + (", ".join(unique_surfaces) if unique_surfaces else "не указаны"),
-        "Текст сообщения:",
-        "-" * 72,
-        record.get("content") or "[пустой текст]",
-        "-" * 72,
-        "",
-    ])
+    lines.extend(
+        [
+            f"[{number}]",
+            f"Дата: {pc_record_datetime_msk(record)}",
+            (
+                f"Канал: {record.get('channel', 'неизвестный канал')} "
+                f"(channel_id: {record.get('channel_id') or '?'})"
+            ),
+            f"ID сообщения: {record.get('id') or '?'}",
+            f"Ссылка: {record.get('jump_url') or 'нет ссылки'}",
+            f"Длина текста без найденных меток: {length_text}",
+            "Найденные написания этого семейства: "
+            + (", ".join(unique_surfaces) if unique_surfaces else "не указаны"),
+            "Текст сообщения:",
+            "-" * 72,
+            record.get("content") or "[пустой текст]",
+            "-" * 72,
+            "",
+        ]
+    )
 
 
-def pc_append_txt_surface_messages(lines, records, family):
+def pc_append_txt_surface_messages(lines: list[str], records: Sequence[TemplateMessage], family: str) -> None:
     records = sorted(records, key=pc_record_sort_key)
 
     if pc_length_enabled_for_family(family):
-        long_records = [
-            record for record in records
-            if record.get("length_kind") == "long"
-        ]
-        short_records = [
-            record for record in records
-            if record.get("length_kind") == "short"
-        ]
-        unclassified = [
-            record for record in records
-            if record.get("length_kind") not in {"long", "short"}
-        ]
+        long_records = [record for record in records if record.get("length_kind") == "long"]
+        short_records = [record for record in records if record.get("length_kind") == "short"]
+        unclassified = [record for record in records if record.get("length_kind") not in {"long", "short"}]
 
         sections = [
             (
-                f"ДЛИННЫЕ СООБЩЕНИЯ "
-                f"(≥{PC_LONG_POST_MIN_CHARS} символов)",
+                f"ДЛИННЫЕ СООБЩЕНИЯ (≥{PC_LONG_POST_MIN_CHARS} символов)",
                 long_records,
             ),
             (
-                f"КОРОТКИЕ СООБЩЕНИЯ "
-                f"(<{PC_LONG_POST_MIN_CHARS} символов)",
+                f"КОРОТКИЕ СООБЩЕНИЯ (<{PC_LONG_POST_MIN_CHARS} символов)",
                 short_records,
             ),
         ]
         if unclassified:
-            sections.append(
-                ("БЕЗ КЛАССИФИКАЦИИ ДЛИНЫ", unclassified)
-            )
+            sections.append(("БЕЗ КЛАССИФИКАЦИИ ДЛИНЫ", unclassified))
     else:
         sections = [
             (
-                "ВСЕ СООБЩЕНИЯ "
-                "(классификация длины для семейства отключена)",
+                "ВСЕ СООБЩЕНИЯ (классификация длины для семейства отключена)",
                 records,
             )
         ]
 
     for title, section_records in sections:
-        lines.extend([
-            title,
-            "." * 72,
-            f"Количество сообщений: {len(section_records)}",
-        ])
+        lines.extend(
+            [
+                title,
+                "." * 72,
+                f"Количество сообщений: {len(section_records)}",
+            ]
+        )
         if not section_records:
             lines.extend(["Сообщений нет.", ""])
             continue
@@ -9650,30 +6945,26 @@ def pc_append_txt_surface_messages(lines, records, family):
 
 
 def pc_full_report(
-    user,
-    period,
-    stats,
-    families,
-    matched,
-    scanned,
-    length_stats,
-    records,
+    user: disnake.Member,
+    period: PCPeriod,
+    stats: dict[str, FamilyStats],
+    families: Sequence[str],
+    matched: int,
+    scanned: int,
+    length_stats: dict[str, int],
+    records: Sequence[TemplateMessage],
     *,
-    search_info,
-    method_label,
-    elapsed,
-    stage_timings,
-    discovery_errors,
-    failed,
-):
+    search_info: Mapping[str, Any],
+    method_label: str,
+    elapsed: float,
+    stage_timings: Mapping[str, str],
+    discovery_errors: Sequence[str],
+    failed: Sequence[CountResult],
+) -> str:
     long_count = length_stats.get("long", 0)
     short_count = length_stats.get("short", 0)
     total_lengths = long_count + short_count
-    enabled_families = [
-        PC_LABELS[family]
-        for family in families
-        if pc_length_enabled_for_family(family)
-    ]
+    enabled_families = [PC_LABELS[family] for family in families if pc_length_enabled_for_family(family)]
 
     lines = [
         "ПОЛНЫЙ ОТЧЁТ ПО ШАБЛОНАМ",
@@ -9696,18 +6987,9 @@ def pc_full_report(
         f"Целей резервного history()-обхода: {search_info.get('fallback_targets', 0)}",
         f"Ошибок поиска веток: {len(discovery_errors or [])}",
         f"Непрочитанных каналов/веток: {len(failed or [])}",
-        (
-            "Сбор каналов и архивных веток: "
-            f"{stage_timings.get('collect', '0.0')} сек."
-        ),
-        (
-            "Discord Search API: "
-            f"{stage_timings.get('search', '0.0')} сек."
-        ),
-        (
-            "Формирование статистики и TXT: "
-            f"{stage_timings.get('report', '0.0')} сек."
-        ),
+        (f"Сбор каналов и архивных веток: {stage_timings.get('collect', '0.0')} сек."),
+        (f"Discord Search API: {stage_timings.get('search', '0.0')} сек."),
+        (f"Формирование статистики и TXT: {stage_timings.get('report', '0.0')} сек."),
         f"Всего: {stage_timings.get('total', f'{elapsed:.1f}')} сек.",
         "",
         "ПОДСЧЁТ МЕТОК",
@@ -9737,102 +7019,101 @@ def pc_full_report(
     ]
 
     if search_info.get("last_error"):
-        lines.append(
-            "Последняя ошибка быстрого поиска: "
-            + str(search_info.get("last_error"))
-        )
+        lines.append("Последняя ошибка быстрого поиска: " + str(search_info.get("last_error")))
 
     search_errors = search_info.get("search_errors") or []
     if search_errors:
-        lines.extend([
-            f"Ошибок Search API, потребовавших отката: {len(search_errors)}",
-            "Причины отката:",
-        ])
+        lines.extend(
+            [
+                f"Ошибок Search API, потребовавших отката: {len(search_errors)}",
+                "Причины отката:",
+            ]
+        )
         lines.extend(f"  • {error}" for error in search_errors)
 
     if discovery_errors:
-        lines.extend([
-            "Ошибки обнаружения каналов/веток:",
-            *(f"  • {error}" for error in discovery_errors),
-        ])
+        lines.extend(
+            [
+                "Ошибки обнаружения каналов/веток:",
+                *(f"  • {error}" for error in discovery_errors),
+            ]
+        )
 
     if failed:
-        lines.extend([
-            "Ошибки чтения каналов/веток:",
-            *(
-                f"  • {item.get('label')}: {item.get('error')}"
-                for item in failed
-            ),
-        ])
+        lines.extend(
+            [
+                "Ошибки чтения каналов/веток:",
+                *(f"  • {item.get('label')}: {item.get('error')}" for item in failed),
+            ]
+        )
 
-    lines.extend([
-        "",
-        "ОБЩАЯ СВОДКА",
-        "-" * 72,
-        f"Пользователь: {user} ({user.id})",
-        (
-            f"Период МСК: {period.start_date:%d.%m.%Y} — "
-            f"{period.end_date:%d.%m.%Y} включительно"
-        ),
-        f"Сообщений хотя бы с одним шаблоном: {matched}",
-        f"Проверено сообщений пользователя: {scanned}",
-        f"Полных записей сообщений в отчёте: {len(records)}",
-        "",
-    ])
+    lines.extend(
+        [
+            "",
+            "ОБЩАЯ СВОДКА",
+            "-" * 72,
+            f"Пользователь: {user} ({user.id})",
+            (f"Период МСК: {period.start_date:%d.%m.%Y} — {period.end_date:%d.%m.%Y} включительно"),
+            f"Сообщений хотя бы с одним шаблоном: {matched}",
+            f"Проверено сообщений пользователя: {scanned}",
+            f"Полных записей сообщений в отчёте: {len(records)}",
+            "",
+        ]
+    )
 
     if enabled_families:
-        lines.extend([
-            "ОБЩАЯ СТАТИСТИКА ДЛИНЫ УЧИТЫВАЕМЫХ ПОСТОВ БЕЗ МЕТОК",
-            "-" * 72,
-            (
-                f"Длинных: {long_count} "
-                f"({pc_percent(long_count, total_lengths):.1f}%)"
-            ),
-            (
-                f"Коротких: {short_count} "
-                f"({pc_percent(short_count, total_lengths):.1f}%)"
-            ),
-            "",
-        ])
+        lines.extend(
+            [
+                "ОБЩАЯ СТАТИСТИКА ДЛИНЫ УЧИТЫВАЕМЫХ ПОСТОВ БЕЗ МЕТОК",
+                "-" * 72,
+                (f"Длинных: {long_count} ({pc_percent(long_count, total_lengths):.1f}%)"),
+                (f"Коротких: {short_count} ({pc_percent(short_count, total_lengths):.1f}%)"),
+                "",
+            ]
+        )
 
     # Основная часть TXT: только семейства и канонические шаблоны.
     # Детализация точных написаний и опечаток намеренно откладывается
     # до отдельного завершающего раздела в самом конце файла.
     for family in families:
         data = stats[family]
-        lines.extend([
-            "",
-            "#" * 72,
-            PC_LABELS[family],
-            "#" * 72,
-            f"Сообщений: {data['messages']}",
-            f"Меток: {data['occurrences']}",
-            f"Уникальных шаблонов: {len(data['groups'])}",
-            f"Каналов с совпадениями: {len(data.get('channels', {}))}",
-        ])
+        lines.extend(
+            [
+                "",
+                "#" * 72,
+                PC_LABELS[family],
+                "#" * 72,
+                f"Сообщений: {data['messages']}",
+                f"Меток: {data['occurrences']}",
+                f"Уникальных шаблонов: {len(data['groups'])}",
+                f"Каналов с совпадениями: {len(data.get('channels', {}))}",
+            ]
+        )
 
         if pc_length_enabled_for_family(family):
             family_total = data.get("long", 0) + data.get("short", 0)
-            lines.extend([
-                (
-                    f"Длинных: {data.get('long', 0)} "
-                    f"({pc_percent(data.get('long', 0), family_total):.1f}%)"
-                ),
-                (
-                    f"Коротких: {data.get('short', 0)} "
-                    f"({pc_percent(data.get('short', 0), family_total):.1f}%)"
-                ),
-            ])
-        else:
-            lines.append(
-                "Классификация длины для этого семейства отключена."
+            lines.extend(
+                [
+                    (
+                        f"Длинных: {data.get('long', 0)} "
+                        f"({pc_percent(data.get('long', 0), family_total):.1f}%)"
+                    ),
+                    (
+                        f"Коротких: {data.get('short', 0)} "
+                        f"({pc_percent(data.get('short', 0), family_total):.1f}%)"
+                    ),
+                ]
             )
+        else:
+            lines.append("Классификация длины для этого семейства отключена.")
 
-        lines.extend([
-            "",
-            "РАСПРЕДЕЛЕНИЕ ВСЕГО СЕМЕЙСТВА ПО КАНАЛАМ",
-            "-" * 72,
-        ])
+        lines.extend(
+            [
+                "",
+                "РАСПРЕДЕЛЕНИЕ ВСЕГО СЕМЕЙСТВА ПО КАНАЛАМ",
+                "-" * 72,
+            ]
+        )
         pc_append_txt_channels(lines, data.get("channels", {}))
 
         groups = sorted(
@@ -9848,53 +7129,61 @@ def pc_full_report(
             lines.extend(["Совпадений нет.", ""])
             continue
 
-        lines.extend([
-            "",
-            "КАНОНИЧЕСКИЕ ШАБЛОНЫ И ИХ КАНАЛЫ",
-            "-" * 72,
-        ])
+        lines.extend(
+            [
+                "",
+                "КАНОНИЧЕСКИЕ ШАБЛОНЫ И ИХ КАНАЛЫ",
+                "-" * 72,
+            ]
+        )
 
         for payload_key, group in groups:
-            lines.extend([
-                "",
-                "=" * 72,
-                f"ШАБЛОН: {group['canonical']}",
-                "=" * 72,
-                f"Ключ группы: {payload_key}",
-                f"Сообщений: {group['messages']}",
-                f"Меток: {group['occurrences']}",
-                f"Каналов: {len(group.get('channels', {}))}",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "=" * 72,
+                    f"ШАБЛОН: {group['canonical']}",
+                    "=" * 72,
+                    f"Ключ группы: {payload_key}",
+                    f"Сообщений: {group['messages']}",
+                    f"Меток: {group['occurrences']}",
+                    f"Каналов: {len(group.get('channels', {}))}",
+                ]
+            )
             if pc_length_enabled_for_family(family):
                 group_total = int(group.get("long", 0)) + int(group.get("short", 0))
-                lines.extend([
-                    (
-                        f"Длинных по арке: {group.get('long', 0)} "
-                        f"({pc_percent(group.get('long', 0), group_total):.1f}%)"
-                    ),
-                    (
-                        f"Коротких по арке: {group.get('short', 0)} "
-                        f"({pc_percent(group.get('short', 0), group_total):.1f}%)"
-                    ),
-                ])
+                lines.extend(
+                    [
+                        (
+                            f"Длинных по арке: {group.get('long', 0)} "
+                            f"({pc_percent(group.get('long', 0), group_total):.1f}%)"
+                        ),
+                        (
+                            f"Коротких по арке: {group.get('short', 0)} "
+                            f"({pc_percent(group.get('short', 0), group_total):.1f}%)"
+                        ),
+                    ]
+                )
             lines.append("Распределение шаблона по каналам:")
             pc_append_txt_channels(lines, group.get("channels", {}))
 
     # Самый конец TXT: точные написания, все варианты/опечатки,
     # распределение каждого написания по каналам и полные сообщения.
-    lines.extend([
-        "",
-        "",
-        "#" * 72,
-        "ДЕТАЛИЗАЦИЯ ВАРИАНТОВ НАПИСАНИЯ И ПОЛНЫХ СООБЩЕНИЙ",
-        "#" * 72,
-        (
-            "Этот раздел намеренно расположен в самом конце отчёта. "
-            "Для каждого канонического шаблона здесь перечислены точное "
-            "написание и все найденные варианты/опечатки, их каналы, "
-            "полные тексты сообщений и прямые ссылки."
-        ),
-    ])
+    lines.extend(
+        [
+            "",
+            "",
+            "#" * 72,
+            "ДЕТАЛИЗАЦИЯ ВАРИАНТОВ НАПИСАНИЯ И ПОЛНЫХ СООБЩЕНИЙ",
+            "#" * 72,
+            (
+                "Этот раздел намеренно расположен в самом конце отчёта. "
+                "Для каждого канонического шаблона здесь перечислены точное "
+                "написание и все найденные варианты/опечатки, их каналы, "
+                "полные тексты сообщений и прямые ссылки."
+            ),
+        ]
+    )
 
     any_surface_details = False
 
@@ -9912,12 +7201,14 @@ def pc_full_report(
         if not groups:
             continue
 
-        lines.extend([
-            "",
-            "=" * 72,
-            f"СЕМЕЙСТВО: {PC_LABELS[family]}",
-            "=" * 72,
-        ])
+        lines.extend(
+            [
+                "",
+                "=" * 72,
+                f"СЕМЕЙСТВО: {PC_LABELS[family]}",
+                "=" * 72,
+            ]
+        )
 
         for payload_key, group in groups:
             exact = group.get("exact", {})
@@ -9934,14 +7225,16 @@ def pc_full_report(
                 continue
 
             any_surface_details = True
-            lines.extend([
-                "",
-                "*" * 72,
-                f"КАНОНИЧЕСКИЙ ШАБЛОН: {group['canonical']}",
-                "*" * 72,
-                f"Всего сообщений шаблона: {group['messages']}",
-                f"Всего меток шаблона: {group['occurrences']}",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "*" * 72,
+                    f"КАНОНИЧЕСКИЙ ШАБЛОН: {group['canonical']}",
+                    "*" * 72,
+                    f"Всего сообщений шаблона: {group['messages']}",
+                    f"Всего меток шаблона: {group['occurrences']}",
+                ]
+            )
 
             if exact.get("occurrences", 0):
                 exact_records = pc_records_for_surface(
@@ -9950,15 +7243,17 @@ def pc_full_report(
                     payload_key,
                     exact=True,
                 )
-                lines.extend([
-                    "",
-                    "~" * 72,
-                    f"ТОЧНОЕ НАПИСАНИЕ: {group['canonical']}",
-                    "~" * 72,
-                    f"Сообщений: {exact.get('messages', 0)}",
-                    f"Меток: {exact.get('occurrences', 0)}",
-                    "Распределение по каналам:",
-                ])
+                lines.extend(
+                    [
+                        "",
+                        "~" * 72,
+                        f"ТОЧНОЕ НАПИСАНИЕ: {group['canonical']}",
+                        "~" * 72,
+                        f"Сообщений: {exact.get('messages', 0)}",
+                        f"Меток: {exact.get('occurrences', 0)}",
+                        "Распределение по каналам:",
+                    ]
+                )
                 pc_append_txt_channels(
                     lines,
                     exact.get("channels", {}),
@@ -9976,16 +7271,18 @@ def pc_full_report(
                     payload_key,
                     variant=variant,
                 )
-                lines.extend([
-                    "",
-                    "~" * 72,
-                    f"ВАРИАНТ / ОПЕЧАТКА: {variant}",
-                    "~" * 72,
-                    f"Канонический шаблон: {group['canonical']}",
-                    f"Сообщений: {variant_data.get('messages', 0)}",
-                    f"Меток: {variant_data.get('occurrences', 0)}",
-                    "Распределение по каналам:",
-                ])
+                lines.extend(
+                    [
+                        "",
+                        "~" * 72,
+                        f"ВАРИАНТ / ОПЕЧАТКА: {variant}",
+                        "~" * 72,
+                        f"Канонический шаблон: {group['canonical']}",
+                        f"Сообщений: {variant_data.get('messages', 0)}",
+                        f"Меток: {variant_data.get('occurrences', 0)}",
+                        "Распределение по каналам:",
+                    ]
+                )
                 pc_append_txt_channels(
                     lines,
                     variant_data.get("channels", {}),
@@ -10002,7 +7299,7 @@ def pc_full_report(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def pc_txt_file(text: str, filename: str):
+def pc_txt_file(text: str, filename: str) -> disnake.File:
     return disnake.File(
         io.BytesIO(text.encode("utf-8-sig")),
         filename=filename,
@@ -10012,15 +7309,15 @@ def pc_txt_file(text: str, filename: str):
 def pc_split_txt_parts(
     text: str,
     filename: str,
-    max_bytes=PC_TXT_PART_MAX_BYTES,
-):
+    max_bytes: int = PC_TXT_PART_MAX_BYTES,
+) -> list[tuple[str, str]]:
     encoded = text.encode("utf-8-sig")
     if len(encoded) <= max_bytes:
         return [(filename, text)]
 
     lines = text.splitlines(keepends=True)
     parts = []
-    current = []
+    current: list[str] = []
     current_bytes = len("\ufeff".encode("utf-8"))
 
     for line in lines:
@@ -10029,9 +7326,7 @@ def pc_split_txt_parts(
         if current and current_bytes + line_bytes > max_bytes:
             parts.append("".join(current))
             current = [line]
-            current_bytes = (
-                len("\ufeff".encode("utf-8")) + line_bytes
-            )
+            current_bytes = len("\ufeff".encode("utf-8")) + line_bytes
         else:
             current.append(line)
             current_bytes += line_bytes
@@ -10045,15 +7340,14 @@ def pc_split_txt_parts(
 
     return [
         (
-            f"{stem}-part-{index:0{width}d}-of-"
-            f"{len(parts):0{width}d}{extension}",
+            f"{stem}-part-{index:0{width}d}-of-{len(parts):0{width}d}{extension}",
             part,
         )
         for index, part in enumerate(parts, start=1)
     ]
 
 
-def pc_faq(title, description, fields):
+def pc_faq(title: str, description: str, fields: list[tuple[str, str]]) -> disnake.Embed:
     embed = disnake.Embed(title=title, description=description, color=0x5865F2)
     for name, value in fields:
         embed.add_field(name=name, value=value, inline=False)
@@ -10061,41 +7355,68 @@ def pc_faq(title, description, fields):
     return embed
 
 
-def pc_categories_faq():
+def pc_categories_faq() -> disnake.Embed:
     return pc_faq(
         "FAQ: /категории_подсчёта",
         "Настраивает категории, внутри которых бот ищет сообщения. Менять список может только владелец бота из `OWNER_ID`.",
         [
-            ("действие", "`добавить`, `удалить`, `показать`, `очистить`. Оставь все поля пустыми, чтобы снова увидеть FAQ."),
-            ("категория", "Нужна только для добавления и удаления. Выбирается категория Discord, а не отдельный канал."),
-            ("Что обходится", "Все текстовые и новостные каналы категории, активные и архивные публичные/приватные ветки, форумные и медиапосты. Голосовые каналы не учитываются."),
+            (
+                "действие",
+                "`добавить`, `удалить`, `показать`, `очистить`. Оставь все поля пустыми, чтобы снова увидеть FAQ.",
+            ),
+            (
+                "категория",
+                "Нужна только для добавления и удаления. Выбирается категория Discord, а не отдельный канал.",
+            ),
+            (
+                "Что обходится",
+                "Все текстовые и новостные каналы категории, активные и архивные публичные/приватные ветки, форумные и медиапосты. Голосовые каналы не учитываются.",
+            ),
         ],
     )
 
 
-def pc_roles_faq():
+def pc_roles_faq() -> disnake.Embed:
     return pc_faq(
         "FAQ: /роли_подсчёта",
         "Настраивает дополнительные роли, которым разрешён `/подсчёт_постов`. Изменять список могут владелец и серверные администраторы.",
         [
             ("действие", "`добавить`, `удалить`, `показать`, `очистить`. Пустой вызов показывает FAQ."),
             ("роль", "Нужна для добавления и удаления."),
-            ("Кто имеет доступ", "Владелец, серверные администраторы и участники хотя бы с одной добавленной ролью."),
+            (
+                "Кто имеет доступ",
+                "Владелец, серверные администраторы и участники хотя бы с одной добавленной ролью.",
+            ),
         ],
     )
 
 
-def pc_posts_faq():
+def pc_posts_faq() -> disnake.Embed:
     return pc_faq(
         "FAQ: /подсчёт_постов",
         "Считает сообщения выбранного пользователя во всех доступных каналах и ветках настроенных категорий. Сначала использует быстрый серверный поиск Discord по автору; при его недоступности автоматически возвращается к обычному обходу истории.",
         [
             ("пользователь", "Участник, чьи сообщения нужно считать."),
-            ("слово — обычный режим", "Слово или фраза. Регистр и оформление `||`, `**`, `__`, `~~`, обратные кавычки игнорируются. Сообщение считается один раз независимо от повторений."),
-            ("слово — шаблонный режим", "`ГМ-пост`; `ДРП-верд`/`ДРП-вердикт`; `Полит-верд`/`Полит-вердикт`; `Три-шаблона` для всех трёх сразу."),
-            ("Допуски шаблонов", "Игнорируются регистр, `#`, дефисы, подчёркивания, скобки и Discord-разметка."),
-            ("с_даты", "Начало включительно: `ДД.ММ.ГГ` или `ДД.ММ.ГГГГ`. Начальная дата обязана существовать."),
-            ("по_дату", "Конец включительно. Завышенный день заменяется последним днём месяца: `99.06.2026` → `30.06.2026`."),
+            (
+                "слово — обычный режим",
+                "Слово или фраза. Регистр и оформление `||`, `**`, `__`, `~~`, обратные кавычки игнорируются. Сообщение считается один раз независимо от повторений.",
+            ),
+            (
+                "слово — шаблонный режим",
+                "`ГМ-пост`; `ДРП-верд`/`ДРП-вердикт`; `Полит-верд`/`Полит-вердикт`; `Три-шаблона` для всех трёх сразу.",
+            ),
+            (
+                "Допуски шаблонов",
+                "Игнорируются регистр, `#`, дефисы, подчёркивания, скобки и Discord-разметка.",
+            ),
+            (
+                "с_даты",
+                "Начало включительно: `ДД.ММ.ГГ` или `ДД.ММ.ГГГГ`. Начальная дата обязана существовать.",
+            ),
+            (
+                "по_дату",
+                "Конец включительно. Завышенный день заменяется последним днём месяца: `99.06.2026` → `30.06.2026`.",
+            ),
             (
                 "Длина шаблонных постов",
                 (
@@ -10114,18 +7435,18 @@ def pc_posts_faq():
     dm_permission=False,
 )
 async def slash_count_categories(
-    interaction: disnake.CommandInteraction,
-    действие: Optional[str] = commands.Param(
+    interaction: ApplicationCommandInteraction,
+    действие: str | None = commands.Param(
         default=None,
         choices=["добавить", "удалить", "показать", "очистить"],
         description="Действие; оставь пустым для FAQ",
     ),
-    категория: Optional[disnake.abc.GuildChannel] = commands.Param(
+    категория: disnake.abc.GuildChannel | None = commands.Param(
         default=None,
         channel_types=[disnake.ChannelType.category],
         description="Категория для добавления или удаления",
     ),
-):
+) -> None:
     if действие is None and категория is None:
         await interaction.response.send_message(embed=pc_categories_faq(), ephemeral=True)
         return
@@ -10155,17 +7476,19 @@ async def slash_count_categories(
         return
 
     try:
-        if действие == "добавить":
+        if действие == "добавить" and isinstance(категория, disnake.CategoryChannel):
             changed = await PC_STORE.add(interaction.guild.id, "categories", категория.id)
             text = (
                 f"✅ Категория {категория.mention} добавлена."
-                if changed else f"ℹ️ Категория {категория.mention} уже была в списке; повтор не делает её доступнее."
+                if changed
+                else f"ℹ️ Категория {категория.mention} уже была в списке; повтор не делает её доступнее."
             )
-        elif действие == "удалить":
+        elif действие == "удалить" and isinstance(категория, disnake.CategoryChannel):
             changed = await PC_STORE.remove(interaction.guild.id, "categories", категория.id)
             text = (
                 f"✅ Категория {категория.mention} удалена."
-                if changed else f"ℹ️ Категории {категория.mention} в списке не было. Удалить отсутствие ещё раз не получилось."
+                if changed
+                else f"ℹ️ Категории {категория.mention} в списке не было. Удалить отсутствие ещё раз не получилось."
             )
         elif действие == "очистить":
             count = await PC_STORE.clear(interaction.guild.id, "categories")
@@ -10196,17 +7519,17 @@ async def slash_count_categories(
     dm_permission=False,
 )
 async def slash_count_roles(
-    interaction: disnake.CommandInteraction,
-    действие: Optional[str] = commands.Param(
+    interaction: ApplicationCommandInteraction,
+    действие: str | None = commands.Param(
         default=None,
         choices=["добавить", "удалить", "показать", "очистить"],
         description="Действие; оставь пустым для FAQ",
     ),
-    роль: Optional[disnake.Role] = commands.Param(
+    роль: disnake.Role | None = commands.Param(
         default=None,
         description="Роль для добавления или удаления",
     ),
-):
+) -> None:
     if действие is None and роль is None:
         await interaction.response.send_message(embed=pc_roles_faq(), ephemeral=True)
         return
@@ -10236,12 +7559,20 @@ async def slash_count_roles(
         return
 
     try:
-        if действие == "добавить":
+        if действие == "добавить" and роль is not None:
             changed = await PC_STORE.add(interaction.guild.id, "roles", роль.id)
-            text = f"✅ Роль {роль.mention} получила доступ." if changed else f"ℹ️ Роль {роль.mention} уже имела доступ."
-        elif действие == "удалить":
+            text = (
+                f"✅ Роль {роль.mention} получила доступ."
+                if changed
+                else f"ℹ️ Роль {роль.mention} уже имела доступ."
+            )
+        elif действие == "удалить" and роль is not None:
             changed = await PC_STORE.remove(interaction.guild.id, "roles", роль.id)
-            text = f"✅ У роли {роль.mention} убран доступ." if changed else f"ℹ️ Роли {роль.mention} в списке не было."
+            text = (
+                f"✅ У роли {роль.mention} убран доступ."
+                if changed
+                else f"ℹ️ Роли {роль.mention} в списке не было."
+            )
         elif действие == "очистить":
             count = await PC_STORE.clear(interaction.guild.id, "roles")
             text = f"✅ Дополнительные роли очищены. Удалено: `{count}`. Владелец и администраторы сохранили доступ."
@@ -10267,25 +7598,25 @@ async def slash_count_roles(
     dm_permission=False,
 )
 async def slash_count_posts(
-    interaction: disnake.CommandInteraction,
-    пользователь: Optional[disnake.Member] = commands.Param(
+    interaction: ApplicationCommandInteraction,
+    пользователь: disnake.Member | None = commands.Param(
         default=None,
         description="Чьи сообщения считать",
     ),
-    слово: Optional[str] = commands.Param(
+    слово: str | None = commands.Param(
         default=None,
         max_length=200,
         description="Слово, фраза или шаблонный режим",
     ),
-    с_даты: Optional[str] = commands.Param(
+    с_даты: str | None = commands.Param(
         default=None,
         description="Начало: ДД.ММ.ГГ или ДД.ММ.ГГГГ",
     ),
-    по_дату: Optional[str] = commands.Param(
+    по_дату: str | None = commands.Param(
         default=None,
         description="Конец включительно: ДД.ММ.ГГ или ДД.ММ.ГГГГ",
     ),
-):
+) -> None:
     # Пустой вызов показывает публичный FAQ в канале.
     if пользователь is None and слово is None and с_даты is None and по_дату is None:
         await interaction.response.send_message(
@@ -10296,8 +7627,7 @@ async def slash_count_posts(
 
     if not interaction.guild:
         await interaction.response.send_message(
-            "❌ Команда серверная. Искать все серверные каналы из лички — "
-            "замысел эффектный, но бесполезный.",
+            "❌ Команда серверная. Искать все серверные каналы из лички — замысел эффектный, но бесполезный.",
             ephemeral=True,
         )
         return
@@ -10326,10 +7656,16 @@ async def slash_count_posts(
             "❌ Не заполнены поля: "
             + ", ".join(f"`{name}`" for name in missing)
             + ". Discord пока не извлекает недостающие данные из силы "
-              "намерения. Пустой вызов показывает FAQ.",
+            "намерения. Пустой вызов показывает FAQ.",
             ephemeral=True,
         )
         return
+
+    # The missing-fields branch returned above; retain this invariant for typed code.
+    assert пользователь is not None
+    assert слово is not None
+    assert с_даты is not None
+    assert по_дату is not None
 
     try:
         period = pc_parse_period(с_даты, по_дату)
@@ -10370,11 +7706,7 @@ async def slash_count_posts(
     await interaction.response.defer(ephemeral=False)
     started = time.monotonic()
 
-    mode_label = (
-        ", ".join(PC_LABELS[family] for family in families)
-        if families
-        else f"слово/фраза `{слово}`"
-    )
+    mode_label = ", ".join(PC_LABELS[family] for family in families) if families else f"слово/фраза `{слово}`"
 
     await interaction.edit_original_response(
         content=(
@@ -10401,8 +7733,7 @@ async def slash_count_posts(
         logger.error("Ошибка сбора каналов: %s", exc, exc_info=True)
         await interaction.edit_original_response(
             content=(
-                "❌ Получить каналы не удалось. Discord API внёс вклад "
-                f"в происходящее: `{str(exc)[:300]}`"
+                f"❌ Получить каналы не удалось. Discord API внёс вклад в происходящее: `{str(exc)[:300]}`"
             ),
             embed=None,
         )
@@ -10419,9 +7750,7 @@ async def slash_count_posts(
         )
         return
 
-    batches_total = (
-        len(targets) + PC_SEARCH_CHANNEL_BATCH - 1
-    ) // PC_SEARCH_CHANNEL_BATCH
+    batches_total = (len(targets) + PC_SEARCH_CHANNEL_BATCH - 1) // PC_SEARCH_CHANNEL_BATCH
 
     await interaction.edit_original_response(
         content=(
@@ -10441,33 +7770,20 @@ async def slash_count_posts(
 
     last_progress = 0.0
 
-    async def update_progress(search_state, partial_results, force=False):
+    async def update_progress(
+        search_state: dict[str, Any], partial_results: Sequence[CountResult], force: bool = False
+    ) -> None:
         nonlocal last_progress
 
         now = time.monotonic()
         if not force and now - last_progress < PC_PROGRESS_SECONDS:
             return
 
-        current_scanned = sum(
-            item.get("scanned", 0)
-            for item in partial_results
-        )
-        current_matched = sum(
-            item.get("matched", 0)
-            for item in partial_results
-        )
-        current_long = sum(
-            item.get("lengths", {}).get("long", 0)
-            for item in partial_results
-        )
-        current_short = sum(
-            item.get("lengths", {}).get("short", 0)
-            for item in partial_results
-        )
-        current_failed = sum(
-            1 for item in partial_results
-            if item.get("error")
-        )
+        current_scanned = sum(item.get("scanned", 0) for item in partial_results)
+        current_matched = sum(item.get("matched", 0) for item in partial_results)
+        current_long = sum(item.get("lengths", {}).get("long", 0) for item in partial_results)
+        current_short = sum(item.get("lengths", {}).get("short", 0) for item in partial_results)
+        current_failed = sum(1 for item in partial_results if item.get("error"))
         elapsed_now = now - started
         phase = search_state.get("phase")
 
@@ -10485,7 +7801,7 @@ async def slash_count_posts(
                 f"Подходящих сообщений пока: `{current_matched}`.\n"
                 + (
                     f"Длинных пока: `{current_long}`, коротких: `{current_short}`.\n"
-                    if pc_any_length_enabled(families)
+                    if pc_any_length_enabled(families or ())
                     else ""
                 )
                 + f"Ошибок чтения пока: `{current_failed}`.\n"
@@ -10494,9 +7810,8 @@ async def slash_count_posts(
                 f"Повторных попыток: `{search_state.get('retry_attempts', 0)}`.\n"
                 f"Делений пакетов: `{search_state.get('batch_splits', 0)}`.\n"
                 + (
-                    f"Последняя причина отката: "
-                    f"`{str(search_state.get('last_error'))[:300]}`.\n"
-                    if search_state.get('last_error')
+                    f"Последняя причина отката: `{str(search_state.get('last_error'))[:300]}`.\n"
+                    if search_state.get("last_error")
                     else ""
                 )
                 + f"Прошло времени: `{elapsed_now:.1f} сек.`"
@@ -10523,7 +7838,7 @@ async def slash_count_posts(
                 f"Подходящих сообщений пока: `{current_matched}`.\n"
                 + (
                     f"Длинных пока: `{current_long}`, коротких: `{current_short}`.\n"
-                    if pc_any_length_enabled(families)
+                    if pc_any_length_enabled(families or ())
                     else ""
                 )
                 + f"Прошло времени: `{elapsed_now:.1f} сек.`"
@@ -10535,7 +7850,7 @@ async def slash_count_posts(
                 embed=None,
             )
             last_progress = now
-        except Exception as exc:
+        except disnake.HTTPException as exc:
             logger.debug(
                 "Не удалось обновить прогресс /подсчёт_постов: %s",
                 exc,
@@ -10575,13 +7890,11 @@ async def slash_count_posts(
 
     method_labels = {
         "discord_search": "Discord Search API — фильтрация по автору",
-        "discord_search+history_fallback": (
-            "Discord Search API + резервный обход части каналов"
-        ),
+        "discord_search+history_fallback": ("Discord Search API + резервный обход части каналов"),
         "history_fallback": "Резервный обход истории каналов",
     }
     method_label = method_labels.get(
-        search_info.get("method"),
+        str(search_info.get("method") or ""),
         str(search_info.get("method") or "неизвестно"),
     )
 
@@ -10600,14 +7913,10 @@ async def slash_count_posts(
         )
 
     if discovery_errors:
-        public_notes.append(
-            f"Ошибок при поиске веток: `{len(discovery_errors)}`."
-        )
+        public_notes.append(f"Ошибок при поиске веток: `{len(discovery_errors)}`.")
 
     if failed:
-        public_notes.append(
-            f"Не прочитано каналов/веток: `{len(failed)}`."
-        )
+        public_notes.append(f"Не прочитано каналов/веток: `{len(failed)}`.")
 
     if families:
         report_started = time.monotonic()
@@ -10615,10 +7924,7 @@ async def slash_count_posts(
         length_stats = pc_merge_lengths(results)
         template_records = pc_collect_template_records(results)
 
-        filename = (
-            f"post-templates-{пользователь.id}-"
-            f"{period.start_date:%Y%m%d}-{period.end_date:%Y%m%d}.txt"
-        )
+        filename = f"post-templates-{пользователь.id}-{period.start_date:%Y%m%d}-{period.end_date:%Y%m%d}.txt"
         stage_timings = {
             "collect": f"{collect_elapsed:.1f}",
             "search": f"{search_elapsed:.1f}",
@@ -10684,24 +7990,15 @@ async def slash_count_posts(
                 max_bytes=adjusted_part_size,
             )
 
-        txt_files = [
-            pc_txt_file(part_text, part_filename)
-            for part_filename, part_text in txt_parts[:10]
-        ]
+        txt_files = [pc_txt_file(part_text, part_filename) for part_filename, part_text in txt_parts[:10]]
 
         first_embed = disnake.Embed(
             title="📊 Подсчёт постов завершён",
-            description=(
-                public_chunks[0]
-                if public_chunks
-                else "Совпадений не найдено."
-            ),
+            description=(public_chunks[0] if public_chunks else "Совпадений не найдено."),
             color=0xFFAA00 if failed else 0x4CAF50,
             timestamp=datetime.now(),
         )
-        first_embed.set_footer(
-            text=f"Часть 1/{max(1, len(public_chunks))}"
-        )
+        first_embed.set_footer(text=f"Часть 1/{max(1, len(public_chunks))}")
 
     else:
         embed = disnake.Embed(
@@ -10721,10 +8018,7 @@ async def slash_count_posts(
         )
         embed.add_field(
             name="Период (МСК)",
-            value=(
-                f"`{period.start_date:%d.%m.%Y}` — "
-                f"`{period.end_date:%d.%m.%Y}` включительно"
-            ),
+            value=(f"`{period.start_date:%d.%m.%Y}` — `{period.end_date:%d.%m.%Y}` включительно"),
             inline=False,
         )
         embed.add_field(
@@ -10748,10 +8042,7 @@ async def slash_count_posts(
             key=lambda item: item["matched"],
             reverse=True,
         )[:10]
-        top_text = "\n".join(
-            f"• `{item['matched']}` — {item['label']}"
-            for item in top
-        ) or "Совпадений нет."
+        top_text = "\n".join(f"• `{item['matched']}` — {item['label']}" for item in top) or "Совпадений нет."
         embed.add_field(
             name="Где найдено больше всего",
             value=top_text[:1024],
@@ -10765,27 +8056,19 @@ async def slash_count_posts(
             value="\n".join(word_notes)[:1024],
             inline=False,
         )
-        embed.set_footer(
-            text=(
-                "Одно сообщение считается один раз, даже если слово "
-                "повторено несколько раз."
-            )
-        )
+        embed.set_footer(text=("Одно сообщение считается один раз, даже если слово повторено несколько раз."))
         first_embed = embed
 
     # Исходное публичное сообщение становится первым и обычно единственным
     # embed-отчётом. Подробный TXT прикрепляется к нему без отдельной подписи.
-    edit_kwargs = {
-        "content": None,
-        "embed": first_embed,
-    }
-    if txt_files:
-        edit_kwargs["files"] = txt_files
-
+    final_message: disnake.Message
     try:
-        final_message = await interaction.edit_original_response(
-            **edit_kwargs,
-        )
+        if txt_files:
+            final_message = await interaction.edit_original_response(
+                content=None, embed=first_embed, files=txt_files
+            )
+        else:
+            final_message = await interaction.edit_original_response(content=None, embed=first_embed)
     except Exception as exc:
         logger.error(
             "Не удалось отредактировать публичный итог /подсчёт_постов: %s",
@@ -10793,14 +8076,23 @@ async def slash_count_posts(
             exc_info=True,
         )
         try:
-            send_kwargs = {
-                "content": interaction.author.mention,
-                "embed": first_embed,
-            }
             if txt_files:
-                send_kwargs["files"] = txt_files
-            final_message = await interaction.channel.send(**send_kwargs)
-        except Exception:
+                final_message = await interaction.channel.send(
+                    content=interaction.author.mention, embed=first_embed, files=txt_files
+                )
+            else:
+                final_message = await interaction.channel.send(
+                    content=interaction.author.mention, embed=first_embed
+                )
+        except (disnake.HTTPException, AttributeError) as exc:
+            logger.error("Не удалось отправить итоговый отчёт /подсчёт_постов: %s", exc, exc_info=True)
+            try:
+                await interaction.followup.send(
+                    "❌ Не удалось опубликовать отчёт: проверьте доступ бота к каналу и вложениям.",
+                    ephemeral=True,
+                )
+            except disnake.HTTPException:
+                logger.warning("Не удалось уведомить пользователя об ошибке публикации отчёта", exc_info=True)
             return
 
     # Дополнительные embed-ответы появляются только тогда, когда объединённый
@@ -10834,8 +8126,12 @@ logger.info(
 # СОБЫТИЯ
 # ============================================================================
 
+heartbeat_task: asyncio.Task[None] | None = None
+
+
 @bot.event
-async def on_ready():
+async def on_ready() -> None:
+    global heartbeat_task
     check_tokens()  # ✅ Проверка токенов
     logger.info(f"Bot {bot.user} ready! (Railway: {IS_RAILWAY})")
     logger.info("🚀 MODE: NO WARMUP (DB SAVING ENABLED)")
@@ -10847,40 +8143,44 @@ async def on_ready():
 
     if USE_PROXY:
         logger.info("Proxy mode allowed by .env, but proxy list refreshes only when /скажи прокси=Да.")
-    asyncio.create_task(heartbeat_keeper())
+    if heartbeat_task is None or heartbeat_task.done():
+        heartbeat_task = asyncio.create_task(heartbeat_keeper())
 
 
 @bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound): return
+async def on_command_error(ctx: commands.Context[Any], error: commands.CommandError) -> None:
+    if isinstance(error, commands.CommandNotFound):
+        return
 
     logger.error(f"Command error {ctx.command}: {error}", exc_info=True)
 
-    try:
-        with open(BOT_ERROR_LOG, 'a', encoding='utf-8') as f:
-            f.write(f"\n[{datetime.now()}] ERROR: {type(error).__name__}: {error}\n")
-            f.flush()
-            os.fsync(f.fileno())
-    except Exception as e:
-        print(f"Failed to write to log file: {e}")
+    # Logging already writes through the configured file handler. Avoid
+    # doing another synchronous disk write inside the Discord event loop.
 
-    if hasattr(ctx, 'author') and ctx.author.id == OWNER_ID:
+    if hasattr(ctx, "author") and ctx.author.id == OWNER_ID:
         try:
             msg = f"⚠️ Гав! Ошибка команды: {str(error)[:100]}"
-            if hasattr(ctx, 'response') and ctx.response.is_done():
-                await ctx.followup.send(msg, ephemeral=True)
-            else:
-                await ctx.send(msg, delete_after=10)
-        except:
-            pass
+            await ctx.send(msg, delete_after=10)
+        except disnake.HTTPException:
+            logger.warning("Не удалось отправить ответ об ошибке команды", exc_info=True)
 
 
 if __name__ == "__main__":
+    initialize_paths()
+    configure_logging(BOT_ERROR_LOG, ANALYSIS_LOG_FILE)
     logger.info("🚀 Start PsIInka Bot v0.4.3")
     try:
         discord_token = os.getenv("DISCORD_TOKEN")
         if not discord_token:
             raise RuntimeError("DISCORD_TOKEN не найден в переменных окружения (.env или панели хостинга)")
+        # Initialize PostgreSQL only after ModelSuccessLog and JailSentence exist.
+        db_engine, SessionLocal = init_db(DATABASE_URL)
+        db_manager.SessionLocal = SessionLocal
+        pending_test_manager.initialize()
+        PC_STORE.initialize()
+        load_mercenary_database_from_xlsx()
         bot.run(discord_token)
     except Exception as e:
-        logger.critical(f"💥 Startup crash: {e}", exc_info=True)
+        logger.critical("💥 Startup crash: %s", e, exc_info=True)
+        # Tell service managers and CI that the bot did not start successfully.
+        raise SystemExit(1) from e

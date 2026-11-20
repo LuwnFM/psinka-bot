@@ -1,0 +1,59 @@
+name: Regression checks
+
+on:
+  push:
+    branches:
+      - refactor/**
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install pytest pytest-asyncio disnake==2.12.0 openpyxl python-dotenv sqlalchemy
+      - name: Compile all active Python modules
+        run: python -m compileall -q psinkamain.py core cogs services db repositories handlers
+      - name: Run isolated domain regression tests
+        run: python -m pytest -q tests/test_post_count_templates.py tests/test_post_count_settings.py tests/test_post_count_metrics.py tests/test_post_count_reporting.py tests/test_post_count_store.py tests/test_auction_text.py tests/test_auction_lots.py tests/test_dice.py tests/test_spreadsheets.py tests/test_config.py tests/test_db_repository.py tests/test_jail_repository.py tests/test_pending_tests.py tests/test_logging_setup.py tests/test_mercenary_workbook.py tests/test_mercenary_normalize.py tests/test_utility_handlers.py tests/test_paths.py tests/test_import_lifecycle.py tests/test_ai_worker_binding.py tests/test_source_equivalence.py
+      - name: Verify all slash command definitions were retained
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          tree = ast.parse(Path('psinkamain.py').read_text(encoding='utf-8'))
+          names = [node.name for node in tree.body if isinstance(node, ast.AsyncFunctionDef)
+                   and any('slash_command' in ast.unparse(d) for d in node.decorator_list)]
+          assert len(names) == 19, f'Expected 19 slash commands, got {len(names)}: {names}'
+          assert len(names) == len(set(names)), 'Duplicate command handlers'
+          PY
+
+  quality-new-modules:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install code-quality tools
+        run: python -m pip install ruff mypy sqlalchemy python-dotenv
+      - name: Ruff — new infrastructure modules
+        run: ruff check core/logging_setup.py db/session.py repositories/model_success.py repositories/pending_tests.py services/spreadsheets.py services/jail_time.py
+      - name: mypy — new infrastructure modules
+        run: mypy --follow-imports=skip core/logging_setup.py db/session.py repositories/model_success.py repositories/pending_tests.py services/spreadsheets.py services/jail_time.py
