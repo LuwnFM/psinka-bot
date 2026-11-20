@@ -9,7 +9,7 @@ import time
 import traceback
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Any, TypeVar
+from typing import Any, TypeVar, TypedDict
 
 import aiohttp
 import disnake
@@ -19,6 +19,8 @@ from disnake.interactions.application_command import ApplicationCommandInteracti
 from disnake.interactions.message import MessageInteraction
 from groq import Groq
 from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam as OpenAIChatMessageParam
+from groq.types.chat import ChatCompletionMessageParam as GroqChatMessageParam
 
 from core.config import BotSettings, safe_int_env
 from core.logging_setup import configure_logging
@@ -93,6 +95,16 @@ from services.post_count_templates import (
 from services.spreadsheets import make_xlsx_file
 
 _T = TypeVar("_T")
+
+
+class ModelProbeResult(TypedDict):
+    """Provider test result with consistent model and latency fields."""
+
+    model: str
+    success: bool
+    latency: float
+    error: str | None
+
 
 try:
     from g4f.client import AsyncClient as G4FAsyncClient
@@ -534,7 +546,7 @@ async def get_random_proxy_async(use_proxy: bool) -> str | None:
 
 async def check_access(
     interaction: ApplicationCommandInteraction,
-    allowed_role_names: tuple[str, ...] = ("Псарь",),
+    allowed_role_names: Sequence[str] = ("Псарь",),
 ) -> bool:
     if interaction.author.id == OWNER_ID:
         return True
@@ -655,7 +667,7 @@ async def make_g4f_request(
             else:
                 # Совместимость со старой установкой: requirements уже фиксирует
                 # Синхронный Client оставлен намеренно как резервный путь совместимости.
-                def sync_call(provider_class=provider_class, kwargs=kwargs):
+                def sync_call(provider_class: Any = provider_class, kwargs: dict[str, Any] = kwargs) -> Any:
                     # Freeze the provider/request for worker threads that may outlive a timeout.
                     from g4f.client import Client as G4FClient
 
@@ -736,7 +748,7 @@ async def test_openrouter_single(
         return False, "Все модели OpenRouter исключены из маршрута", 0.0
 
     start = time.time()
-    messages = []
+    messages: list[OpenAIChatMessageParam] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
@@ -754,7 +766,7 @@ async def test_openrouter_single(
         for attempt in range(2):
             try:
 
-                def sync_call(model=model):
+                def sync_call(model: str = model) -> Any:
                     # Late-running workers must keep this retry's original model ID.
                     return client.chat.completions.create(
                         model=model,
@@ -854,7 +866,7 @@ async def test_groq_single(
     client = Groq(api_key=groq_token, timeout=timeout)
     start = time.time()
 
-    messages = []
+    messages: list[GroqChatMessageParam] = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
     messages.append({"role": "user", "content": prompt})
@@ -862,7 +874,7 @@ async def test_groq_single(
     for model in models:
         try:
 
-            def sync_call(model=model):
+            def sync_call(model: str = model) -> Any:
                 return client.chat.completions.create(
                     model=model,
                     messages=messages,
@@ -1260,11 +1272,11 @@ def format_test_results(provider: str, results: list[dict], max_show: int = 10) 
 
 
 class TestModeView(disnake.ui.View):
-    def __init__(self, ctx=None):
+    def __init__(self, ctx: object | None = None) -> None:
         super().__init__(timeout=None)
 
     @disnake.ui.button(label="⚡ Тест ВСЕ G4F", style=disnake.ButtonStyle.green, custom_id="test_all_g4f")
-    async def all_g4f_button(self, button: disnake.ui.Button, interaction: MessageInteraction):
+    async def all_g4f_button(self, button: disnake.ui.Button, interaction: MessageInteraction) -> None:
         await interaction.response.defer()
         log_analysis("TEST: All G4F providers started", "INFO")
         start = time.time()
@@ -1289,7 +1301,7 @@ class TestModeView(disnake.ui.View):
         all_results = []
         semaphore = asyncio.Semaphore(3)  # Ограничение параллельных запросов
 
-        async def test_single(prov, mod):
+        async def test_single(prov: str, mod: str) -> dict[str, Any]:
             async with semaphore:
                 try:
                     ok, ans, lat = await make_g4f_request(prov, mod, TEST_PROMPT, timeout=45.0)
@@ -1336,7 +1348,7 @@ class TestModeView(disnake.ui.View):
         successful = [r for r in all_results if r["success"]]
 
         # Группируем результаты по провайдерам
-        by_provider = {}
+        by_provider: dict[str, list[dict[str, Any]]] = {}
         for r in all_results:
             prov = r["provider"]
             if prov not in by_provider:
@@ -1407,7 +1419,7 @@ class TestModeView(disnake.ui.View):
         progress_embed.add_field(name="Статус", value="Запуск тестов...", inline=False)
         progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True, wait=True)
 
-        all_results = []
+        all_results: list[ModelProbeResult] = []
 
         for i, (prov, model) in enumerate(all_combinations):
             try:
@@ -1423,7 +1435,7 @@ class TestModeView(disnake.ui.View):
                 if ok:
                     await asyncio.to_thread(pending_test_manager.log_success, prov, model, int(lat * 1000))
 
-                result = {
+                result: ModelProbeResult = {
                     "model": model,
                     "success": ok,
                     "latency": round(lat, 2) if lat else 0,
@@ -1502,7 +1514,7 @@ class TestModeView(disnake.ui.View):
         progress_embed.add_field(name="Статус", value="Запуск тестов...", inline=False)
         progress_msg = await interaction.followup.send(embed=progress_embed, ephemeral=True, wait=True)
 
-        all_results = []
+        all_results: list[ModelProbeResult] = []
 
         for i, (prov, model) in enumerate(all_combinations):
             try:
@@ -1514,7 +1526,7 @@ class TestModeView(disnake.ui.View):
                 if ok:
                     await asyncio.to_thread(pending_test_manager.log_success, prov, model, int(lat * 1000))
 
-                result = {
+                result: ModelProbeResult = {
                     "model": model,
                     "success": ok,
                     "latency": round(lat, 2) if lat else 0,
@@ -1808,7 +1820,7 @@ async def find_thread_in_archives( guild: disnake.Guild | None, target_id: int) 
 
     for channel in getattr(guild, "channels", []):
         for thread in getattr(channel, "threads", []):
-            if getattr(thread, "id", None) == target_id:
+            if isinstance(thread, disnake.Thread) and thread.id == target_id:
                 return thread
 
         archived_threads = getattr(channel, "archived_threads", None)
@@ -1818,7 +1830,7 @@ async def find_thread_in_archives( guild: disnake.Guild | None, target_id: int) 
         for private_flag in (False, True):
             try:
                 async for thread in channel.archived_threads(private=private_flag, limit=100):
-                    if getattr(thread, "id", None) == target_id:
+                    if isinstance(thread, disnake.Thread) and thread.id == target_id:
                         return thread
             except Exception as e:
                 log_analysis(
@@ -1836,7 +1848,8 @@ async def resolve_analysis_target(
     Возвращает канал/форум/тред для анализа.
     Приоритет: ссылка/ID/упоминание → выбранный канал → текущий канал.
     """
-    if not getattr(interaction, "guild", None):
+    guild = interaction.guild
+    if guild is None:
         return None, "❌ Гав! `/анализ` работает только внутри сервера."
 
     target = None
@@ -1848,11 +1861,10 @@ async def resolve_analysis_target(
             "❌ ПсИИнка не смог разобрать ссылку/ID канала. Дай ссылку Discord, `<#канал>` или числовой ID.",
         )
 
-    if link_guild_id and link_guild_id != interaction.guild.id:
+    if link_guild_id and link_guild_id != guild.id:
         return None, "❌ Эта ссылка ведёт на другой сервер. ПсИИнка нюхает только текущий сервер."
 
     if link_channel_id:
-        guild = interaction.guild
         target = guild.get_channel(link_channel_id)
 
         if target is None and hasattr(guild, "get_thread"):
@@ -1882,7 +1894,7 @@ async def resolve_analysis_target(
         return None, "❌ ПсИИнка не нашёл такой канал/форум/тред. Проверь ссылку и права бота."
 
     target_guild = getattr(target, "guild", None)
-    if target_guild and getattr(target_guild, "id", None) != interaction.guild.id:
+    if target_guild and getattr(target_guild, "id", None) != guild.id:
         return None, "❌ Этот канал не из текущего сервера."
 
     has_history = callable(getattr(target, "history", None))
@@ -1899,9 +1911,9 @@ def analysis_target_name( channel: Any) -> str:
     return getattr(channel, "name", str(getattr(channel, "id", "unknown")))
 
 
-async def collect_all_messages_debug( channel: Any, days_limit: int, max_per_source: int = 400) -> tuple[list[disnake.Message], list[str]]:
+async def collect_all_messages_debug( channel: Any, days_limit: int, max_per_source: int = 400) -> list[dict[str, Any]]:
     after_date = datetime.now(timezone.utc) - timedelta(days=days_limit)
-    all_messages = []
+    all_messages: list[dict[str, Any]] = []
     target_label = analysis_target_name(channel)
     log_analysis(f"Start collecting #{target_label} for {days_limit} days.", "INFO")
 
@@ -2138,7 +2150,7 @@ async def slash_analyze(
                 used_provider = "NO_RESPONSE"
                 log_analysis(f"❌ Batch {current_batch}: FAILED.", "ERROR")
 
-            batch_violations = parse_ai_response(final_answer, batch_data)
+            batch_violations = parse_ai_response(final_answer or "", batch_data)
             all_violations.extend(batch_violations)
             log_analysis(f"Batch {current_batch}: {used_provider}. Found: {len(batch_violations)}", "INFO")
 
@@ -2166,7 +2178,7 @@ async def slash_analyze(
             return
 
         report_parts = []
-        current_part = []
+        current_part: list[str] = []
         current_len = 0
 
         for i, v in enumerate(all_violations, 1):
@@ -2448,7 +2460,7 @@ def build_auction_prices_xlsx(
     all_new_lot_rows: list[dict[str, Any]],
     log_rows: list[list[Any]],
     raw_embed_rows: list[list[Any]],
-    target_channel,
+    target_channel: Any,
     scanned: int,
     limit: int,
     raw_messages_count: int,
@@ -2499,7 +2511,7 @@ def build_auction_prices_xlsx(
         "Ссылка на сообщение",
     ]
 
-    people_sheet = [new_headers]
+    people_sheet: list[list[Any]] = [new_headers]
 
     for row in sorted(people_rows, key=lambda x: x["lot"]):
         people_sheet.append(
@@ -2517,7 +2529,7 @@ def build_auction_prices_xlsx(
             ]
         )
 
-    auctioneer_sheet = [new_headers]
+    auctioneer_sheet: list[list[Any]] = [new_headers]
 
     for row in sorted(auctioneer_rows, key=lambda x: x["lot"]):
         auctioneer_sheet.append(
@@ -2535,7 +2547,7 @@ def build_auction_prices_xlsx(
             ]
         )
 
-    ancient_sheet = [
+    ancient_sheet: list[list[Any]] = [
         [
             "№ лота",
             "Наименование",
@@ -2560,7 +2572,7 @@ def build_auction_prices_xlsx(
             ]
         )
 
-    all_new_sheet = [
+    all_new_sheet: list[list[Any]] = [
         [
             "№ лота",
             "Тип",
@@ -3301,9 +3313,9 @@ async def replace_member_name_mentions_for_guild(text: str, guild: disnake.Guild
     await ensure_guild_members_loaded(guild)
 
     result = text
-    name_to_member = {}
-    original_name_by_key = {}
-    ambiguous = set()
+    name_to_member: dict[str, disnake.Member] = {}
+    original_name_by_key: dict[str, str] = {}
+    ambiguous: set[str] = set()
 
     for member in guild.members:
         if member.bot:
@@ -3835,7 +3847,7 @@ async def fetch_bot_message_from_link(message_link: str) -> disnake.Message | No
     if not bot.user or message.author.id != bot.user.id:
         return None
 
-    return message
+    return message if isinstance(message, disnake.Message) else None
 
 
 def prepare_edited_bot_text(text: str, guild: disnake.Guild | None) -> str:
@@ -4107,7 +4119,7 @@ REAL_ESTATE_QUALITIES = [
 REAL_ESTATE_QUALITY_WEIGHTS = [2, 5, 10, 14, 34, 20, 10, 4, 1]
 
 
-def has_real_estate_access( member: disnake.Member) -> bool:
+def has_real_estate_access( member: disnake.User | disnake.Member) -> bool:
     member_roles = getattr(member, "roles", [])
     member_role_names = {role.name.strip().lower() for role in member_roles}
     allowed_role_names = {role_name.strip().lower() for role_name in REAL_ESTATE_ALLOWED_ROLES}
@@ -4145,10 +4157,13 @@ def roll_real_estate() -> tuple[str, str]:
         return "находящаяся на континенте на выбор, в государстве на выбор и городе на выбор", quality
 
     city = random.choice(location["cities"])
-    country = location["country"]
-    continent = location["continent"]
+    selected_country = location["country"]
+    selected_continent = location["continent"]
 
-    return f"находящаяся в городе **{city}**, государство **{country}**, континент **{continent}**", quality
+    return (
+        f"находящаяся в городе **{city}**, государство **{selected_country}**, континент **{selected_continent}**",
+        quality,
+    )
 
 
 def clean_real_estate_text( text: str) -> str:
@@ -4250,7 +4265,7 @@ QUALITY_ROLL_WEIGHTS = [
 ]
 
 
-def has_quality_roll_access( member: disnake.Member) -> bool:
+def has_quality_roll_access( member: disnake.User | disnake.Member) -> bool:
     member_roles = getattr(member, "roles", [])
     member_role_names = {role.name.strip().lower() for role in member_roles}
     allowed_role_names = {role_name.strip().lower() for role_name in QUALITY_ROLL_ALLOWED_ROLES}
@@ -6024,7 +6039,7 @@ async def pc_collect_targets(
     channels = list(getattr(guild, "channels", ()) or ())
     if not channels:
         try:
-            channels = await guild.fetch_channels()
+            channels = list(await guild.fetch_channels())
         except Exception as exc:
             logger.warning("fetch_channels не сработал: %s", exc)
             channels = []
@@ -6035,8 +6050,8 @@ async def pc_collect_targets(
         if getattr(channel, "category_id", None) in category_ids and pc_supported_parent(channel)
     ]
     parent_ids = {channel.id for channel in parents}
-    targets = {}
-    archive_sources = []
+    targets: dict[int, Any] = {}
+    archive_sources: list[tuple[Any, Any, str]] = []
     media_type = getattr(disnake, "MediaChannel", None)
 
     for parent in parents:
@@ -6313,7 +6328,7 @@ def pc_flatten_search_messages( data: dict[str, Any]) -> list[dict[str, Any]]:
     Discord возвращает nested array: [[message], [message], ...].
     На случай изменения/старого формата поддерживаем и плоский массив.
     """
-    flattened = []
+    flattened: list[dict[str, Any]] = []
     raw_groups = data.get("messages", []) if isinstance(data, dict) else []
 
     if not isinstance(raw_groups, list):
@@ -6372,9 +6387,9 @@ async def pc_search_batch( session: aiohttp.ClientSession, guild_id: int, batch_
 
         for raw_message in page_messages:
             try:
-                message_id = int(raw_message.get("id"))
-                channel_id = int(raw_message.get("channel_id"))
-                author_id = int((raw_message.get("author") or {}).get("id"))
+                message_id = int(str(raw_message.get("id")))
+                channel_id = int(str(raw_message.get("channel_id")))
+                author_id = int(str((raw_message.get("author") or {}).get("id")))
             except (TypeError, ValueError):
                 continue
 
@@ -6428,7 +6443,7 @@ async def pc_search_batch( session: aiohttp.ClientSession, guild_id: int, batch_
 
 
 async def pc_search_batch_adaptive( session: aiohttp.ClientSession, guild_id: int, batch_targets: Sequence[Any], user_id: int, word_pattern: re.Pattern[str] | None, families: Sequence[str] | None, period: PCPeriod, search_info: dict[str, Any], on_page: Any=None,
-) -> tuple[Any, Any]:
+) -> tuple[list[CountResult], list[Any], list[str]]:
     """
     Пробует пакет целиком. Если URL/запрос слишком велик, делит пакет
     пополам и повторяет. В history() уйдёт только минимальный неудачный кусок.
@@ -6506,7 +6521,7 @@ async def pc_search_or_fallback( guild: disnake.Guild, targets: Sequence[Any], u
     4. Слишком большой запрос автоматически делится пополам.
     5. history()-fallback используется только для минимальных неудачных кусков.
     """
-    search_info = {
+    search_info: dict[str, Any] = {
         "method": "discord_search",
         "api_requests": 0,
         "search_pages": 0,
@@ -6525,8 +6540,8 @@ async def pc_search_or_fallback( guild: disnake.Guild, targets: Sequence[Any], u
     target_batches = list(pc_chunks(list(targets), PC_SEARCH_CHANNEL_BATCH))
     search_info["search_batches"] = len(target_batches)
 
-    completed_results = []
-    fallback_targets = []
+    completed_results: list[CountResult] = []
+    fallback_targets: list[Any] = []
 
     try:
         headers = pc_search_headers()
@@ -6546,10 +6561,12 @@ async def pc_search_or_fallback( guild: disnake.Guild, targets: Sequence[Any], u
             timeout=timeout,
         ) as session:
 
-            async def run_initial_batch(batch_number, batch_targets):
-                temporary_results = []
+            async def run_initial_batch(
+                batch_number: int, batch_targets: Sequence[Any]
+            ) -> tuple[list[CountResult], list[Any], list[str]]:
+                temporary_results: list[CountResult] = []
 
-                async def on_page(local_results, page_info):
+                async def on_page(local_results: list[CountResult], page_info: dict[str, Any]) -> None:
                     nonlocal temporary_results
                     temporary_results = local_results
 
@@ -7238,7 +7255,7 @@ def pc_split_txt_parts(
 
     lines = text.splitlines(keepends=True)
     parts = []
-    current = []
+    current: list[str] = []
     current_bytes = len("\ufeff".encode("utf-8"))
 
     for line in lines:
@@ -7691,7 +7708,9 @@ async def slash_count_posts(
 
     last_progress = 0.0
 
-    async def update_progress(search_state, partial_results, force=False):
+    async def update_progress(
+        search_state: dict[str, Any], partial_results: Sequence[CountResult], force: bool = False
+    ) -> None:
         nonlocal last_progress
 
         now = time.monotonic()
@@ -7813,7 +7832,7 @@ async def slash_count_posts(
         "history_fallback": "Резервный обход истории каналов",
     }
     method_label = method_labels.get(
-        search_info.get("method"),
+        str(search_info.get("method") or ""),
         str(search_info.get("method") or "неизвестно"),
     )
 
@@ -7994,13 +8013,14 @@ async def slash_count_posts(
             exc_info=True,
         )
         try:
-            send_kwargs = {
-                "content": interaction.author.mention,
-                "embed": first_embed,
-            }
             if txt_files:
-                send_kwargs["files"] = txt_files
-            final_message = await interaction.channel.send(**send_kwargs)
+                final_message = await interaction.channel.send(
+                    content=interaction.author.mention, embed=first_embed, files=txt_files
+                )
+            else:
+                final_message = await interaction.channel.send(
+                    content=interaction.author.mention, embed=first_embed
+                )
         except Exception:
             return
 
@@ -8069,10 +8089,7 @@ async def on_command_error( ctx: commands.Context[Any], error: commands.CommandE
     if hasattr(ctx, "author") and ctx.author.id == OWNER_ID:
         try:
             msg = f"⚠️ Гав! Ошибка команды: {str(error)[:100]}"
-            if hasattr(ctx, "response") and ctx.response.is_done():
-                await ctx.followup.send(msg, ephemeral=True)
-            else:
-                await ctx.send(msg, delete_after=10)
+            await ctx.send(msg, delete_after=10)
         except disnake.HTTPException:
             logger.warning("Не удалось отправить ответ об ошибке команды", exc_info=True)
 
