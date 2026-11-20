@@ -1,4 +1,5 @@
 name: One-time reviewed safe Ruff fixes
+# Comparing normalized equivalent type spellings while still checking executable AST.
 
 on:
   push:
