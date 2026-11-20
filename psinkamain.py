@@ -9,7 +9,7 @@ import time
 import traceback
 from collections.abc import AsyncIterator, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Any, TypeVar, TypedDict
+from typing import Any, TypedDict, TypeVar
 
 import aiohttp
 import disnake
@@ -18,9 +18,9 @@ from disnake.ext import commands
 from disnake.interactions.application_command import ApplicationCommandInteraction
 from disnake.interactions.message import MessageInteraction
 from groq import Groq
+from groq.types.chat import ChatCompletionMessageParam as GroqChatMessageParam
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam as OpenAIChatMessageParam
-from groq.types.chat import ChatCompletionMessageParam as GroqChatMessageParam
 
 from core.config import BotSettings, safe_int_env
 from core.logging_setup import configure_logging
@@ -64,7 +64,6 @@ from services.mercenary_normalize import (
     split_multi_field,
 )
 from services.mercenary_workbook import read_mercenary_sheets
-from services.post_count_types import ChannelCounters, CountResult, FamilyStats, TemplateMessage
 from services.post_count_metrics import (
     PC_LONG_POST_MIN_CHARS,
     pc_apply_content,
@@ -92,6 +91,7 @@ from services.post_count_templates import (
     pc_template_mode,
     pc_word_pattern,
 )
+from services.post_count_types import ChannelCounters, CountResult, FamilyStats, TemplateMessage
 from services.spreadsheets import make_xlsx_file
 
 _T = TypeVar("_T")
@@ -356,9 +356,7 @@ def is_model_excluded(provider: str | None, model: str | None) -> bool:
         return True
     if provider == "OpenRouter" and model in EXCLUDED_OR_MODELS:
         return True
-    if provider == "Groq" and model in GROQ_EXCLUDED_MODELS:
-        return True
-    return False
+    return provider == "Groq" and model in GROQ_EXCLUDED_MODELS
 
 
 def get_all_groq_combinations() -> list[tuple[str, str]]:
@@ -503,7 +501,7 @@ def validate_proxy_format(proxy: str) -> bool:
         host_port = proxy.split("://")[-1]
         host, port = host_port.rsplit(":", 1)
         return bool(host) and port.isdigit() and 1 <= int(port) <= 65535
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         return False
 
 
@@ -1203,7 +1201,6 @@ async def test_provider_models(
     results = []
 
     for model in models:
-        start = time.time()
         try:
             proxy_url = get_random_proxy(use_proxy) if use_proxy else None
 
@@ -1341,8 +1338,8 @@ class TestModeView(disnake.ui.View):
                     inline=False,
                 )
                 await progress_msg.edit(embed=progress_embed)
-            except:
-                pass  # Игнорируем ошибки обновления сообщения
+            except disnake.HTTPException as exc:
+                logger.warning("Не удалось обновить прогресс G4F-тестирования: %s", exc)
 
         elapsed = time.time() - start
         successful = [r for r in all_results if r["success"]]
@@ -1684,7 +1681,6 @@ async def run_mass_test( channel: disnake.abc.Messageable) -> None:
 
     async def test_combo( provider: str, model: str) -> dict[str, Any]:
         async with semaphore:
-            start = time.time()
             try:
                 ok, ans, lat = await route_model_request(
                     provider,
@@ -1740,8 +1736,8 @@ async def run_mass_test( channel: disnake.abc.Messageable) -> None:
             )
 
             await progress_msg.edit(embed=progress_embed)
-        except:
-            pass
+        except disnake.HTTPException as exc:
+            logger.warning("Не удалось обновить прогресс массового тестирования: %s", exc)
 
     elapsed_total = time.time() - start_time
     successful = [r for r in results if r["success"]]
@@ -1963,8 +1959,8 @@ async def collect_all_messages_debug( channel: Any, days_limit: int, max_per_sou
                     count += 1
                 log_analysis(f"✅ Thread {thread.name}: {count} msgs.", "INFO")
                 await asyncio.sleep(0.5)
-            except:
-                pass
+            except (disnake.HTTPException, asyncio.TimeoutError) as exc:
+                logger.warning("Не удалось прочитать ветку %s: %s", getattr(thread, "name", "?"), exc)
 
     # Архивные треды: добавлено без изменения основного механизма анализа.
     if hasattr(channel, "archived_threads"):
@@ -2039,9 +2035,8 @@ async def slash_analyze(
         description="Период анализа",
     ),
 ) -> None:
-    if interaction.author.id != OWNER_ID:
-        if not await check_access(interaction, allowed_role_names=["Псарь"]):
-            return
+    if interaction.author.id != OWNER_ID and not await check_access(interaction, allowed_role_names=["Псарь"]):
+        return
 
     target_channel, target_error = await resolve_analysis_target(interaction, канал, ссылка)
     if target_error:
@@ -2144,7 +2139,8 @@ async def slash_analyze(
                             used_provider = f"{prov} ({mod}) [PROXY]"
                             success = True
                             break
-                    except:
+                    except Exception as exc:  # noqa: BLE001 - fallback для ошибок сторонних AI SDK
+                        logger.warning("Прокси-запрос AI %s/%s не удался: %s", prov, mod, exc)
                         continue
 
             if not success:
@@ -2293,16 +2289,16 @@ def disnake_message_to_raw_like(message: disnake.Message) -> dict[str, Any]:
     for embed in getattr(message, "embeds", []) or []:
         try:
             embeds.append(embed.to_dict())
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning("Не удалось преобразовать embed сообщения %s: %s", message.id, exc)
 
     components = []
 
     for row in getattr(message, "components", []) or []:
         try:
             components.append(row.to_dict())
-        except Exception:
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.warning("Не удалось преобразовать компоненты сообщения %s: %s", message.id, exc)
 
     author = getattr(message, "author", None)
 
@@ -3861,11 +3857,7 @@ def prepare_edited_bot_text(text: str, guild: disnake.Guild | None) -> str:
     text = text or ""
 
     if guild:
-        try:
-            text = replace_role_name_mentions_for_guild(text, guild)
-        except NameError:
-            # Если ты вдруг не вставил функцию из блока /напиши — просто отправит текст как есть.
-            pass
+        text = replace_role_name_mentions_for_guild(text, guild)
 
     return text
 
@@ -6042,7 +6034,7 @@ async def pc_collect_targets(
     if not channels:
         try:
             channels = list(await guild.fetch_channels())
-        except Exception as exc:
+        except (disnake.HTTPException, asyncio.TimeoutError) as exc:
             logger.warning("fetch_channels не сработал: %s", exc)
             channels = []
 
@@ -6164,8 +6156,9 @@ async def pc_scan_target( target: Any, user_id: int, word_pattern: re.Pattern[st
             result["error"] = "нет доступа к истории"
         except disnake.HTTPException as exc:
             result["error"] = f"Discord API: {exc}"
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - ошибка одной ветки не должна обрывать весь поиск
             result["error"] = f"{type(exc).__name__}: {exc}"
+            logger.exception("Не удалось просканировать ветку %s", pc_channel_label(target))
 
     return result
 
@@ -6229,7 +6222,7 @@ async def pc_search_request( session: aiohttp.ClientSession, guild_id: int, para
 
                 try:
                     data = await response.json(content_type=None)
-                except Exception:
+                except (aiohttp.ContentTypeError, ValueError, TypeError):
                     body = await response.text()
                     data = {"message": body[:1000]}
 
@@ -7790,7 +7783,7 @@ async def slash_count_posts(
                 embed=None,
             )
             last_progress = now
-        except Exception as exc:
+        except disnake.HTTPException as exc:
             logger.debug(
                 "Не удалось обновить прогресс /подсчёт_постов: %s",
                 exc,
@@ -8024,7 +8017,15 @@ async def slash_count_posts(
                 final_message = await interaction.channel.send(
                     content=interaction.author.mention, embed=first_embed
                 )
-        except Exception:
+        except (disnake.HTTPException, AttributeError) as exc:
+            logger.error("Не удалось отправить итоговый отчёт /подсчёт_постов: %s", exc, exc_info=True)
+            try:
+                await interaction.followup.send(
+                    "❌ Не удалось опубликовать отчёт: проверьте доступ бота к каналу и вложениям.",
+                    ephemeral=True,
+                )
+            except disnake.HTTPException:
+                logger.warning("Не удалось уведомить пользователя об ошибке публикации отчёта", exc_info=True)
             return
 
     # Дополнительные embed-ответы появляются только тогда, когда объединённый

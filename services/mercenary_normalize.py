@@ -65,7 +65,7 @@ def _rows_to_dicts(rows: list[list[str]], required_header: str) -> list[dict[str
 def _to_int(value: str, default: int = 0) -> int:
     try:
         return int(float(str(value or "").replace("%", "").replace(",", ".").strip()))
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         return default
 
 

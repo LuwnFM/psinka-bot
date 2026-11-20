@@ -215,10 +215,7 @@ def pc_apply_content(
         # и к каждой фактической вариации.
         for family, payload_key, surface_kind, surface_name in surface_message_keys:
             group = result["families"][family]["groups"][payload_key]
-            if surface_kind == "exact":
-                surface = group["exact"]
-            else:
-                surface = group["variants"][surface_name]
+            surface = group["exact"] if surface_kind == "exact" else group["variants"][surface_name]
             surface["messages"] += 1
             pc_channel_counter_add(
                 surface["channels"],

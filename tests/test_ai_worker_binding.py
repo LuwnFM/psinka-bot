@@ -35,7 +35,7 @@ def test_fallback_model_workers_keep_their_original_model() -> None:
             continue
         module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
         namespace = {"client": client, "model": "original", "messages": [], "Any": Any}
-        exec(compile(module, "<isolated-ai-worker>", "exec"), namespace)
+        exec(compile(module, "<isolated-ai-worker>", "exec"), namespace)  # noqa: S102 - доверенный AST проекта
         namespace["model"] = "next-fallback"
         namespace["sync_call"]()
         assert calls[-1]["model"] == "original"
@@ -79,7 +79,7 @@ def test_g4f_worker_keeps_provider_and_request_after_loop_moves(monkeypatch) -> 
 
     namespace = {"provider_class": "first-provider", "kwargs": {"model": "first-model"}, "Any": Any}
     target = ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[]))
-    exec(compile(target, "<isolated-g4f-worker>", "exec"), namespace)
+    exec(compile(target, "<isolated-g4f-worker>", "exec"), namespace)  # noqa: S102 - доверенный AST проекта
     namespace["provider_class"] = "next-provider"
     namespace["kwargs"] = {"model": "next-model"}
     namespace["sync_call"]()

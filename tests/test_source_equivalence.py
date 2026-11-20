@@ -109,7 +109,10 @@ def definitions(source: str) -> dict[str, ast.AST]:
 
 def source_from_main() -> str:
     """Read the original entrypoint from main without importing bot dependencies."""
-    return subprocess.check_output(["git", "show", f"origin/main:{ORIGINAL_FILE}"], text=True)
+    return subprocess.check_output(  # noqa: S603 - фиксированный Git для тестовой проверки
+        ["git", "show", f"origin/main:{ORIGINAL_FILE}"],  # noqa: S607 - Git из CI PATH
+        text=True,
+    )
 
 
 def test_extracted_logic_matches_original_ast() -> None:
