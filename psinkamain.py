@@ -2910,17 +2910,35 @@ async def slash_commit_tests(interaction: disnake.CommandInteraction):
         await interaction.followup.send("ℹ️ ПсИИнка проверил временный лог — там пусто. *нюхает* 🐕", ephemeral=True)
         return
 
-    count = 0
+    # One transaction: a failed write never destroys the pending CSV.
     try:
-        for prov, mod, lat in records:
-            await asyncio.to_thread(db_manager.log_success, prov, mod, lat)
-            count += 1
-        await asyncio.to_thread(pending_test_manager.clear)
-        await interaction.followup.send(f"✅ ПсИИнка записал `{count}` успешных тестов в БД Neon! *виляет хвостом* 🐕",
-                                        ephemeral=True)
-    except Exception as e:
-        logger.error(f"Error committing tests: {e}", exc_info=True)
-        await interaction.followup.send(f"❌ Ошибка записи, временный лог НЕ очищен: {str(e)[:100]}", ephemeral=True)
+        imported = await asyncio.to_thread(db_manager.import_pending_records, records)
+        if not imported:
+            await interaction.followup.send(
+                "❌ База данных отклонила перенос. Временный лог сохранён; подробности в журнале.",
+                ephemeral=True,
+            )
+            return
+
+        cleared = await asyncio.to_thread(pending_test_manager.clear)
+        if not cleared:
+            await interaction.followup.send(
+                "⚠️ Записи сохранены в БД, но временный CSV не удалось очистить. "
+                "Не повторяйте перенос до проверки файла, чтобы избежать дублей.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"✅ ПсИИнка записал `{len(records)}` успешных тестов в БД Neon! *виляет хвостом* 🐕",
+            ephemeral=True,
+        )
+    except Exception:
+        logger.exception("Error committing test records to the DB")
+        await interaction.followup.send(
+            "❌ Ошибка переноса тестов. Проверьте журнал и временный CSV.",
+            ephemeral=True,
+        )
 
 # ============================================================================
 # ✉️ КОМАНДА ДЛЯ ВЛАДЕЛЬЦА: НАПИСАТЬ В КАНАЛ ОТ ЛИЦА БОТА
