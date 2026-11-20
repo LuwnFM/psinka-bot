@@ -400,14 +400,16 @@ async def fetch_groq_model_ids() -> list[str]:
         return []
     try:
         headers = {"Authorization": f"Bearer {token}"}
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get("https://api.groq.com/openai/v1/models", timeout=15) as response:
-                if response.status != 200:
-                    logger.warning(f"Groq models list status: {response.status}")
-                    return []
-                data = await response.json()
-                return [item.get("id") for item in data.get("data", []) if item.get("id")]
-    except Exception as e:
+        async with (
+            aiohttp.ClientSession(headers=headers) as session,
+            session.get("https://api.groq.com/openai/v1/models", timeout=15) as response,
+        ):
+            if response.status != 200:
+                logger.warning(f"Groq models list status: {response.status}")
+                return []
+            data = await response.json()
+            return [item.get("id") for item in data.get("data", []) if item.get("id")]
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError, AttributeError, KeyError) as e:
         logger.warning(f"Не удалось получить живой список Groq моделей: {e}")
         return []
 
@@ -418,26 +420,28 @@ async def fetch_openrouter_model_ids(free_only: bool = True) -> list[str]:
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get("https://openrouter.ai/api/v1/models", timeout=20) as response:
-                if response.status != 200:
-                    logger.warning(f"OpenRouter models list status: {response.status}")
-                    return []
-                data = await response.json()
-                models = []
-                for item in data.get("data", []):
-                    model_id = item.get("id")
-                    if not model_id:
+        async with (
+            aiohttp.ClientSession(headers=headers) as session,
+            session.get("https://openrouter.ai/api/v1/models", timeout=20) as response,
+        ):
+            if response.status != 200:
+                logger.warning(f"OpenRouter models list status: {response.status}")
+                return []
+            data = await response.json()
+            models = []
+            for item in data.get("data", []):
+                model_id = item.get("id")
+                if not model_id:
+                    continue
+                if free_only and not model_id.endswith(":free"):
+                    pricing = item.get("pricing") or {}
+                    prompt_price = str(pricing.get("prompt", ""))
+                    completion_price = str(pricing.get("completion", ""))
+                    if prompt_price not in {"0", "0.0"} or completion_price not in {"0", "0.0"}:
                         continue
-                    if free_only and not model_id.endswith(":free"):
-                        pricing = item.get("pricing") or {}
-                        prompt_price = str(pricing.get("prompt", ""))
-                        completion_price = str(pricing.get("completion", ""))
-                        if prompt_price not in {"0", "0.0"} or completion_price not in {"0", "0.0"}:
-                            continue
-                    models.append(model_id)
-                return models
-    except Exception as e:
+                models.append(model_id)
+            return models
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, TypeError, AttributeError, KeyError) as e:
         logger.warning(f"Не удалось получить живой список OpenRouter моделей: {e}")
         return []
 
@@ -486,7 +490,7 @@ async def fetch_free_proxies(count: int = 20) -> list[str]:
                     if proxies:
                         logger.info(f"🌐 Обновлён список прокси: {len(proxies)} шт.")
                         return proxies
-    except Exception as e:
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, TypeError) as e:
         logger.warning(f"⚠️ Не удалось обновить прокси: {e}")
     return [p for p in FREE_PROXY_LIST if validate_proxy_format(p)]
 
@@ -699,7 +703,7 @@ async def make_g4f_request(
         except (AuthenticationError, RequestLimitError, ModelNotFoundError, ProviderError) as e:
             logger.debug(f"⚠️ G4F {display_name}/{model}: {str(e)[:80]}")
             continue
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - G4F fallback catches unknown provider errors
             err_str = str(e).lower()
 
             if any(
@@ -789,7 +793,7 @@ async def test_openrouter_single(
 
                 raise Exception("Пустой ответ от OpenRouter")
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - OpenRouter SDK errors must fall through routing
                 err_str = str(e).lower()
                 status_code = getattr(e, "status_code", None)
                 if status_code is None:
@@ -895,7 +899,7 @@ async def test_groq_single(
 
             raise Exception("Пустой ответ от Groq")
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - Groq SDK errors must fall through routing
             err_str = str(e).lower()
 
             if "timeout" in err_str:
@@ -1228,7 +1232,7 @@ async def test_provider_models(
             results.append(result)
             await asyncio.sleep(0.3)  # Небольшая пауза между запросами
 
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - model health probe results retain all errors
             results.append(
                 {"model": model, "success": False, "latency": 0, "error": str(e)[:80], "answer_preview": None}
             )
@@ -1311,7 +1315,7 @@ class TestModeView(disnake.ui.View):
                         "latency": round(lat, 2) if lat else 0,
                         "error": ans if not ok else None,
                     }
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - G4F model probe retains errors
                     return {
                         "provider": prov,
                         "model": mod,
@@ -1452,7 +1456,7 @@ class TestModeView(disnake.ui.View):
 
                 await asyncio.sleep(0.3)  # Пауза между запросами
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - model probe counts failures
                 all_results.append({"model": model, "success": False, "latency": 0, "error": str(e)[:80]})
 
         elapsed = time.time() - start
@@ -1543,7 +1547,7 @@ class TestModeView(disnake.ui.View):
 
                 await asyncio.sleep(0.3)  # Пауза между запросами
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - model probe counts failures
                 all_results.append({"model": model, "success": False, "latency": 0, "error": str(e)[:80]})
 
         elapsed = time.time() - start
@@ -1701,7 +1705,7 @@ async def run_mass_test( channel: disnake.abc.Messageable) -> None:
                     "time": lat,
                     "error": ans if not ok else None,
                 }
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - mass probe keeps other tasks alive
                 return {
                     "provider": provider,
                     "model": model,
@@ -1828,7 +1832,7 @@ async def find_thread_in_archives( guild: disnake.Guild | None, target_id: int) 
                 async for thread in channel.archived_threads(private=private_flag, limit=100):
                     if isinstance(thread, disnake.Thread) and thread.id == target_id:
                         return thread
-            except Exception as e:
+            except (disnake.HTTPException, TypeError, AttributeError) as e:
                 log_analysis(
                     f"Archive lookup skipped for {getattr(channel, 'name', '?')} private={private_flag}: {e}",
                     "DEBUG",
@@ -1872,13 +1876,13 @@ async def resolve_analysis_target(
         if target is None:
             try:
                 target = await bot.fetch_channel(link_channel_id)
-            except Exception as e:
+            except disnake.HTTPException as e:
                 log_analysis(f"bot.fetch_channel({link_channel_id}) failed: {e}", "DEBUG")
 
         if target is None:
             try:
                 target = await guild.fetch_channel(link_channel_id)
-            except Exception as e:
+            except disnake.HTTPException as e:
                 log_analysis(f"guild.fetch_channel({link_channel_id}) failed: {e}", "DEBUG")
 
         if target is None:
@@ -1931,7 +1935,7 @@ async def collect_all_messages_debug( channel: Any, days_limit: int, max_per_sou
                     }
                 )
             log_analysis(f"✅ Main channel/thread: {len(all_messages)} msgs.", "INFO")
-        except Exception as e:
+        except (disnake.HTTPException, asyncio.TimeoutError, TypeError, AttributeError) as e:
             log_analysis(f"❌ Main channel/thread error: {e}", "ERROR")
     else:
         log_analysis(f"Main history skipped for {target_label}: no direct history method.", "INFO")
@@ -1994,9 +1998,9 @@ async def collect_all_messages_debug( channel: Any, days_limit: int, max_per_sou
                             count += 1
                         log_analysis(f"✅ Archived thread {thread.name}: {count} msgs.", "INFO")
                         await asyncio.sleep(0.5)
-                    except Exception as e:
+                    except (disnake.HTTPException, asyncio.TimeoutError, TypeError, AttributeError) as e:
                         log_analysis(f"Archived thread {getattr(thread, 'name', '?')} error: {e}", "DEBUG")
-            except Exception as e:
+            except (disnake.HTTPException, asyncio.TimeoutError, TypeError, AttributeError) as e:
                 log_analysis(f"Archived threads private={private_flag} unavailable: {e}", "DEBUG")
 
     return all_messages
@@ -2120,7 +2124,7 @@ async def slash_analyze(
                         if not used_temp_file:
                             await asyncio.to_thread(db_manager.log_success, prov, mod, int(lat * 1000))
                         break
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 - analysis AI fallback keeps processing
                     log_analysis(f"Error {prov}/{mod}: {e}", "DEBUG")
                     continue
 
@@ -2394,7 +2398,7 @@ async def fetch_raw_discord_messages(
                     if len(batch) < batch_limit:
                         break
 
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - raw history fallback records unexpected errors
                 logs.append(["REST", "", f"Ошибка raw REST чтения: {type(e).__name__}: {e}", "", ""])
                 break
 
@@ -2425,7 +2429,7 @@ async def fetch_history_fallback( target_channel: Any,
 
             result.append(raw_like)
 
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - history fallback records unexpected errors
         logs.append(["HISTORY", "", f"Ошибка fallback history: {type(e).__name__}: {e}", "", ""])
 
     return result, logs
@@ -3269,7 +3273,7 @@ async def ensure_guild_members_loaded(guild: disnake.Guild) -> None:
 
         if hasattr(guild, "chunk"):
             await guild.chunk(cache=True)
-    except Exception as e:
+    except (disnake.HTTPException, disnake.ClientException, asyncio.TimeoutError) as e:
         logger.warning(f"Не удалось подгрузить участников сервера {guild.name}: {e}")
 
 
@@ -3621,7 +3625,7 @@ async def find_user_for_owner_dm(raw_target: str) -> tuple[disnake.User | disnak
             await ensure_guild_members_loaded(guild)
         except NameError:
             pass
-        except Exception as e:
+        except (disnake.HTTPException, disnake.ClientException, asyncio.TimeoutError) as e:
             logger.warning(f"Не удалось подгрузить участников {guild.name}: {e}")
 
         for member in guild.members:
