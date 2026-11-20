@@ -128,6 +128,25 @@ class DBManager:
                 logger.exception("Ошибка экспорта статистики в CSV")
                 return None
 
+    def clear_all(self) -> int | None:
+        """Delete all success records and report the deleted count.
+
+        Returning None distinguishes a database failure from an empty table.
+        The caller may run this synchronous operation via asyncio.to_thread.
+        """
+        if self.SessionLocal is None:
+            return None
+        with self.SessionLocal() as session:
+            try:
+                count = int(session.query(ModelSuccessLog).count())
+                session.query(ModelSuccessLog).delete(synchronize_session=False)
+                session.commit()
+                return count
+            except SQLAlchemyError:
+                session.rollback()
+                logger.exception("Ошибка очистки статистики моделей")
+                return None
+
     def is_connected(self) -> bool:
         """Indicate whether a session factory is configured."""
         return self.SessionLocal is not None
