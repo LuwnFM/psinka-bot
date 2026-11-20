@@ -9,8 +9,8 @@ from core.preflight import check_deployment
 def _settings() -> BotSettings:
     return BotSettings(
         database_url="postgresql://user:private-password@db.example.invalid/psinka",
-        discord_token="offline-test-discord-token",
-        groq_token="offline-test-groq-key",
+        discord_token="offline-test-discord-token",  # noqa: S106 - test-only value
+        groq_token="offline-test-groq-key",  # noqa: S106 - test-only value
         openrouter_token=None,
         is_railway=False,
         owner_id=123,
@@ -56,13 +56,13 @@ def test_optional_integrations_are_warnings(tmp_path) -> None:
 def test_malformed_database_url_is_fatal_without_exposing_password(tmp_path) -> None:
     workbook = tmp_path / "mercenaries.xlsx"
     workbook.write_bytes(b"fixture")
-    secret = "secret-not-for-logs"
+    marker = "test-marker-not-for-logs"
     findings = check_deployment(
-        replace(_settings(), database_url=f"this is not a URL {secret}"),
+        replace(_settings(), database_url=f"this is not a URL {marker}"),
         workbook=workbook,
     )
     assert any(f.severity == "ERROR" and "DATABASE_URL" in f.message for f in findings)
-    assert all(secret not in f.message for f in findings)
+    assert all(marker not in f.message for f in findings)
 
 
 def test_non_postgres_database_raises_warning_not_failure(tmp_path) -> None:
