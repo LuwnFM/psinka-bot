@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 import disnake
+from disnake.interactions.application_command import ApplicationCommandInteraction
 
 from repositories.model_success import DBManager
 from services.dice import DiceParser, DiceResult
@@ -14,7 +15,7 @@ from services.dice_format import _dice_paginate, _dice_result_block
 logger = logging.getLogger(__name__)
 
 
-async def _send_ephemeral_error(interaction: disnake.ApplicationCommandInteraction, message: str) -> None:
+async def _send_ephemeral_error(interaction: ApplicationCommandInteraction, message: str) -> None:
     """Send errors via the correct Disnake response path.
 
     A slash interaction has exactly one initial response. After a defer or
@@ -30,7 +31,7 @@ async def _send_ephemeral_error(interaction: disnake.ApplicationCommandInteracti
 
 
 async def respond_to_cube(
-    interaction: disnake.ApplicationCommandInteraction,
+    interaction: ApplicationCommandInteraction,
     formula: str | None,
     dice_engine: DiceParser,
 ) -> None:
@@ -112,7 +113,7 @@ async def respond_to_cube(
         await interaction.followup.send(embed=error_embed, ephemeral=True)
 
 
-async def respond_to_bark(interaction: disnake.ApplicationCommandInteraction, bot: disnake.Client) -> None:
+async def respond_to_bark(interaction: ApplicationCommandInteraction, bot: disnake.Client) -> None:
     """Report bot latency without blocking Discord event handling."""
     try:
         ping_ms = round(bot.latency * 1000)
@@ -134,8 +135,8 @@ async def respond_to_bark(interaction: disnake.ApplicationCommandInteraction, bo
 
 
 async def respond_to_status(
-    interaction: disnake.ApplicationCommandInteraction,
-    check_access: Callable[[disnake.ApplicationCommandInteraction], Awaitable[bool]],
+    interaction: ApplicationCommandInteraction,
+    check_access: Callable[[ApplicationCommandInteraction], Awaitable[bool]],
     db_manager: DBManager,
 ) -> None:
     """Render the original AI model health summary without blocking the event loop."""

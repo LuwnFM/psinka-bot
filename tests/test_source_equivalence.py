@@ -43,8 +43,10 @@ class _AnnotationStyleNormalizer(ast.NodeTransformer):
     def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
         self.generic_visit(node)
         if isinstance(node.value, ast.Name) and node.value.id == "disnake":
-            if node.attr == "CommandInteraction":
-                node.attr = "ApplicationCommandInteraction"
+            if node.attr in {"CommandInteraction", "ApplicationCommandInteraction"}:
+                return ast.Name(id="ApplicationCommandInteraction", ctx=ast.Load())
+            if node.attr == "MessageInteraction":
+                return ast.Name(id="MessageInteraction", ctx=ast.Load())
         return node
 
     def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
