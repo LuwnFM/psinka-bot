@@ -14,7 +14,7 @@ from services.dice_format import _dice_paginate, _dice_result_block
 logger = logging.getLogger(__name__)
 
 
-async def _send_ephemeral_error(interaction: disnake.CommandInteraction, message: str) -> None:
+async def _send_ephemeral_error(interaction: disnake.ApplicationCommandInteraction, message: str) -> None:
     """Send errors via the correct Disnake response path.
 
     A slash interaction has exactly one initial response. After a defer or
@@ -30,7 +30,7 @@ async def _send_ephemeral_error(interaction: disnake.CommandInteraction, message
 
 
 async def respond_to_cube(
-    interaction: disnake.CommandInteraction,
+    interaction: disnake.ApplicationCommandInteraction,
     formula: str | None,
     dice_engine: DiceParser,
 ) -> None:
@@ -112,7 +112,7 @@ async def respond_to_cube(
         await interaction.followup.send(embed=error_embed, ephemeral=True)
 
 
-async def respond_to_bark(interaction: disnake.CommandInteraction, bot: disnake.Client) -> None:
+async def respond_to_bark(interaction: disnake.ApplicationCommandInteraction, bot: disnake.Client) -> None:
     """Report bot latency without blocking Discord event handling."""
     try:
         ping_ms = round(bot.latency * 1000)
@@ -134,8 +134,8 @@ async def respond_to_bark(interaction: disnake.CommandInteraction, bot: disnake.
 
 
 async def respond_to_status(
-    interaction: disnake.CommandInteraction,
-    check_access: Callable[[disnake.CommandInteraction], Awaitable[bool]],
+    interaction: disnake.ApplicationCommandInteraction,
+    check_access: Callable[[disnake.ApplicationCommandInteraction], Awaitable[bool]],
     db_manager: DBManager,
 ) -> None:
     """Render the original AI model health summary without blocking the event loop."""

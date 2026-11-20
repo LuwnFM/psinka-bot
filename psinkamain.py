@@ -527,7 +527,7 @@ async def get_random_proxy_async(use_proxy: bool) -> str | None:
 
 
 async def check_access(
-    interaction: disnake.CommandInteraction, allowed_role_names: list[str] = ["Псарь"]
+    interaction: disnake.ApplicationCommandInteraction, allowed_role_names: list[str] = ["Псарь"]
 ) -> bool:
     if interaction.author.id == OWNER_ID:
         return True
@@ -577,8 +577,8 @@ async def make_g4f_request(
     model: str,
     prompt: str,
     timeout: float = 45.0,
-    system_prompt: str = None,
-    proxy_url: str = None,
+    system_prompt: str | None = None,
+    proxy_url: str | None = None,
 ) -> tuple[bool, str, float]:
     """Запрос к актуальному g4f через AsyncClient с сохранением каскадного fallback."""
     start = time.time()
@@ -589,7 +589,7 @@ async def make_g4f_request(
     messages.append({"role": "user", "content": prompt})
 
     requested_provider = normalize_provider_name(provider_name)
-    providers_to_try = []
+    providers_to_try: list[str | None] = []
 
     # None означает штатный автоматический роутинг g4f.
     if requested_provider == "g4f-default" or not requested_provider:
@@ -601,8 +601,8 @@ async def make_g4f_request(
     providers_to_try.extend(G4F_FALLBACK_PROVIDERS)
     providers_to_try.append(None)
 
-    deduped_providers = []
-    seen_providers = set()
+    deduped_providers: list[str | None] = []
+    seen_providers: set[str] = set()
     for item in providers_to_try:
         key = item or "__default__"
         if key not in seen_providers:
@@ -702,7 +702,7 @@ async def make_g4f_request(
 
 
 async def test_openrouter_single(
-    models: list, prompt: str, timeout: float = 45.0, system_prompt: str = None, proxy_url: str = None
+    models: list, prompt: str, timeout: float = 45.0, system_prompt: str | None = None, proxy_url: str | None = None
 ) -> tuple[bool, str, float]:
     """Запрос к OpenRouter с одним контролируемым retry для временных ошибок."""
     openrouter_token = os.getenv("OPENR_TOKEN")
@@ -817,7 +817,7 @@ async def test_groq_single(
     models: list,
     prompt: str,
     timeout: float = 45.0,
-    system_prompt: str = None,
+    system_prompt: str | None = None,
     return_model_name: bool = False,
 ) -> tuple[bool, str, float]:
     """
@@ -899,8 +899,8 @@ async def route_model_request(
     prompt: str,
     *,
     timeout: float = 45.0,
-    system_prompt: str = None,
-    proxy_url: str = None,
+    system_prompt: str | None = None,
+    proxy_url: str | None = None,
     return_model_name: bool = False,
 ) -> tuple[bool, str, float]:
     """Единая точка маршрутизации команд к Groq, OpenRouter и G4F."""
@@ -1014,7 +1014,7 @@ async def get_analysis_priority_queue():
 
 @bot.slash_command(name="скажи", description="Запрос к ИИ")
 async def slash_say(
-    interaction: disnake.CommandInteraction,
+    interaction: disnake.ApplicationCommandInteraction,
     вопрос: str = commands.Param(min_length=1, description="Ваш вопрос или запрос"),
     прокси: str = commands.Param(choices=["Да", "Нет"], default="Нет", description="Использовать прокси"),
 ):
@@ -1140,7 +1140,7 @@ async def slash_say(
 
 @bot.slash_command(name="кубик", description="Бросок кубиков")
 async def slash_cube(
-    interaction: disnake.CommandInteraction,
+    interaction: disnake.ApplicationCommandInteraction,
     формула: str | None = commands.Param(
         description="Формула броска (например: 1d6+1d4 или dndstats)", default=None
     ),
@@ -1149,12 +1149,12 @@ async def slash_cube(
 
 
 @bot.slash_command(name="погавкай", description="Проверка пинга бота")
-async def slash_bark(interaction: disnake.CommandInteraction):
+async def slash_bark(interaction: disnake.ApplicationCommandInteraction):
     await respond_to_bark(interaction, bot)
 
 
 @bot.slash_command(name="статус", description="Статистика использования моделей")
-async def slash_status(interaction: disnake.CommandInteraction):
+async def slash_status(interaction: disnake.ApplicationCommandInteraction):
     await respond_to_status(interaction, check_access, db_manager)
 
 
@@ -1168,7 +1168,7 @@ async def test_provider_models(
     models: list,
     prompt: str = TEST_PROMPT,
     timeout: float = 30.0,
-    system_prompt: str = None,
+    system_prompt: str | None = None,
     use_proxy: bool = False,
 ) -> list[dict]:
     """Универсальная функция для тестирования всех моделей провайдера"""
@@ -1560,7 +1560,7 @@ class TestModeView(disnake.ui.View):
 
 
 @bot.slash_command(name="тест", description="Тестирование провайдеров и моделей")
-async def slash_test(interaction: disnake.CommandInteraction):
+async def slash_test(interaction: disnake.ApplicationCommandInteraction):
     try:
         if not await check_access(interaction):
             return
@@ -1814,7 +1814,7 @@ async def find_thread_in_archives(guild, target_id: int):
 
 
 async def resolve_analysis_target(
-    interaction: disnake.CommandInteraction, selected_channel=None, ссылка: str | None = None
+    interaction: disnake.ApplicationCommandInteraction, selected_channel=None, ссылка: str | None = None
 ):
     """
     Возвращает канал/форум/тред для анализа.
@@ -1995,7 +1995,7 @@ def parse_ai_response(ai_text: str, original_data: list[dict]) -> list[dict]:
 
 @bot.slash_command(name="анализ", description="Анализ канала, форума или треда на нарушения")
 async def slash_analyze(
-    interaction: disnake.CommandInteraction,
+    interaction: disnake.ApplicationCommandInteraction,
     канал: disnake.abc.GuildChannel | None = commands.Param(
         default=None,
         description="Канал/форум/тред для анализа",
@@ -2610,7 +2610,7 @@ def build_auction_prices_xlsx(
 
 @bot.slash_command(name="цены", description="Посчитать цены выкупа лотов в аукционном канале")
 async def slash_auction_prices(
-    interaction: disnake.CommandInteraction,
+    interaction: disnake.ApplicationCommandInteraction,
     канал: disnake.abc.GuildChannel | None = commands.Param(
         default=None,
         description="Канал или тред с лотами. Если не указать — текущий канал.",
@@ -2917,7 +2917,7 @@ async def slash_auction_prices(
 
 
 @bot.slash_command(name="скачать_анализ", description="Скачать лог анализа")
-async def slash_download_analysis_log(interaction: disnake.CommandInteraction):
+async def slash_download_analysis_log(interaction: disnake.ApplicationCommandInteraction):
     if interaction.author.id != OWNER_ID:
         return
     await interaction.response.defer()
@@ -2932,7 +2932,7 @@ async def slash_download_analysis_log(interaction: disnake.CommandInteraction):
 
 
 @bot.slash_command(name="скачать_ошибки", description="Скачать общий лог ошибок бота")
-async def slash_download_logs(interaction: disnake.CommandInteraction):
+async def slash_download_logs(interaction: disnake.ApplicationCommandInteraction):
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
         return
@@ -2953,7 +2953,7 @@ async def slash_download_logs(interaction: disnake.CommandInteraction):
 
 
 @bot.slash_command(name="скачать_бд", description="Скачать таблицу успехов из БД (CSV)")
-async def slash_download_db(interaction: disnake.CommandInteraction):
+async def slash_download_db(interaction: disnake.ApplicationCommandInteraction):
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
         return
@@ -2972,7 +2972,7 @@ async def slash_download_db(interaction: disnake.CommandInteraction):
 
 
 @bot.slash_command(name="очистить_бд", description="Полная очистка таблицы успехов в БД")
-async def slash_clear_db(interaction: disnake.CommandInteraction):
+async def slash_clear_db(interaction: disnake.ApplicationCommandInteraction):
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
         return
@@ -2995,7 +2995,7 @@ async def slash_clear_db(interaction: disnake.CommandInteraction):
 
 
 @bot.slash_command(name="записать_тест", description="Перенос данных из временного лога тестов в БД")
-async def slash_commit_tests(interaction: disnake.CommandInteraction):
+async def slash_commit_tests(interaction: disnake.ApplicationCommandInteraction):
     if interaction.author.id != OWNER_ID:
         await interaction.response.send_message("❌ Гав! Доступ запрещён.", ephemeral=True)
         return
@@ -3355,7 +3355,7 @@ def build_allowed_mentions_for_owner_message() -> disnake.AllowedMentions:
     dm_permission=True,
 )
 async def slash_owner_write(
-    interaction: disnake.CommandInteraction,
+    interaction: disnake.ApplicationCommandInteraction,
     канал: str = commands.Param(
         min_length=1,
         autocomplete=owner_channel_autocomplete,
@@ -3629,7 +3629,7 @@ async def find_user_for_owner_dm(raw_target: str) -> tuple[disnake.User | None, 
     contexts=disnake.InteractionContextTypes(bot_dm=True),
 )
 async def slash_owner_write_user(
-    interaction: disnake.CommandInteraction,
+    interaction: disnake.ApplicationCommandInteraction,
     пользователь: str = commands.Param(min_length=1, description="ID пользователя, mention или @username"),
     текст: str = commands.Param(min_length=1, description="Текст, который бот отправит человеку в ЛС"),
 ):
@@ -3882,7 +3882,7 @@ async def edit_bot_message_content(target_message: disnake.Message, new_text: st
     dm_permission=True,
 )
 async def slash_owner_edit_bot_message(
-    interaction: disnake.CommandInteraction,
+    interaction: disnake.ApplicationCommandInteraction,
     сообщение: str = commands.Param(min_length=1, description="Ссылка на сообщение бота"),
     текст: str = commands.Param(min_length=1, description="Новый текст сообщения"),
 ):
@@ -5743,7 +5743,7 @@ def build_match_list_text(matches: list[str], max_items: int = 20) -> str:
 
 @bot.slash_command(name="наёмник", description="Получить карточку наёмника из Excel-базы")
 async def slash_mercenary(
-    interaction: disnake.CommandInteraction,
+    interaction: disnake.ApplicationCommandInteraction,
     имя: str = commands.Param(
         min_length=1,
         description="Начни писать: раб, рабочий, певец, бандит, ландскнехт, Лучник...",
@@ -7375,7 +7375,7 @@ def pc_posts_faq():
     dm_permission=False,
 )
 async def slash_count_categories(
-    interaction: disnake.CommandInteraction,
+    interaction: disnake.ApplicationCommandInteraction,
     действие: str | None = commands.Param(
         default=None,
         choices=["добавить", "удалить", "показать", "очистить"],
@@ -7459,7 +7459,7 @@ async def slash_count_categories(
     dm_permission=False,
 )
 async def slash_count_roles(
-    interaction: disnake.CommandInteraction,
+    interaction: disnake.ApplicationCommandInteraction,
     действие: str | None = commands.Param(
         default=None,
         choices=["добавить", "удалить", "показать", "очистить"],
@@ -7538,7 +7538,7 @@ async def slash_count_roles(
     dm_permission=False,
 )
 async def slash_count_posts(
-    interaction: disnake.CommandInteraction,
+    interaction: disnake.ApplicationCommandInteraction,
     пользователь: disnake.Member | None = commands.Param(
         default=None,
         description="Чьи сообщения считать",

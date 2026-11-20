@@ -18,8 +18,8 @@ def _dice_term_lines(term: DiceTermResult, is_first: bool = False) -> list[str]:
     label_prefix = f"{sign_text} " if sign_text else ""
     if term.kind == "number":
         value = _dice_number(term.number_value or 0.0)
-        contribution = _dice_number(term.sign * (term.number_value or 0.0))
-        return [f"🧮 `{label_prefix}{value}` → вклад **{contribution}**"]
+        number_contribution = _dice_number(term.sign * (term.number_value or 0.0))
+        return [f"🧮 `{label_prefix}{value}` → вклад **{number_contribution}**"]
 
     lines = [f"🎲 `{label_prefix}{term.source}`: исходно `{_dice_roll_list(term.base_rolls)}`"]
 

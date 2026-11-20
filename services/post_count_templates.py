@@ -336,7 +336,7 @@ def pc_template_body_length(content: str, matches: Sequence[PCTemplateMatch]) ->
         return len(text.strip())
 
     spans.sort()
-    merged = []
+    merged = []  # type: list[list[int]]
     for start, end in spans:
         if not merged or start > merged[-1][1]:
             merged.append([start, end])

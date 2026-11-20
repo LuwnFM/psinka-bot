@@ -40,6 +40,13 @@ class _AnnotationStyleNormalizer(ast.NodeTransformer):
             node.id = self._typing_aliases[node.id]
         return node
 
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.value, ast.Name) and node.value.id == "disnake":
+            if node.attr == "CommandInteraction":
+                node.attr = "ApplicationCommandInteraction"
+        return node
+
     def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
         self.generic_visit(node)
         if isinstance(node.value, ast.Name) and node.value.id == "Optional":
