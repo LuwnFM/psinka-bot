@@ -1,6 +1,8 @@
 """Pure per-message post counting, grouping and length classification."""
 
+from collections.abc import Sequence
 from datetime import datetime, timezone
+import re
 
 from services.post_count_templates import (
     pc_find_templates,
@@ -9,10 +11,20 @@ from services.post_count_templates import (
     pc_template_body_length,
 )
 
+from services.post_count_types import (
+    ChannelCounters,
+    CountResult,
+    GroupStats,
+    SurfaceStats,
+    TemplateMatchRecord,
+)
+
 PC_LONG_POST_MIN_CHARS = 300
 
 
-def pc_channel_counter_add(counter, channel_id, label, amount=1):
+def pc_channel_counter_add(
+    counter: ChannelCounters, channel_id: int | None, label: str | None, amount: int = 1
+) -> None:
     key = str(channel_id) if channel_id is not None else f"label:{label}"
     item = counter.setdefault(
         key,
@@ -25,7 +37,7 @@ def pc_channel_counter_add(counter, channel_id, label, amount=1):
     item["messages"] += int(amount)
 
 
-def pc_empty_surface_stats():
+def pc_empty_surface_stats() -> SurfaceStats:
     return {
         "occurrences": 0,
         "messages": 0,
@@ -33,7 +45,7 @@ def pc_empty_surface_stats():
     }
 
 
-def pc_empty_group(canonical):
+def pc_empty_group(canonical: str) -> GroupStats:
     return {
         "canonical": canonical,
         "occurrences": 0,
@@ -48,8 +60,10 @@ def pc_empty_group(canonical):
     }
 
 
-def pc_empty_result(label, families, channel_id=None):
-    result = {
+def pc_empty_result(
+    label: str, families: Sequence[str] | None, channel_id: int | None = None
+) -> CountResult:
+    result: CountResult = {
         "label": label,
         "channel_id": int(channel_id) if channel_id is not None else None,
         "matched": 0,
@@ -77,7 +91,7 @@ def pc_empty_result(label, families, channel_id=None):
     return result
 
 
-def pc_iso_datetime(value):
+def pc_iso_datetime(value: object) -> str:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
@@ -86,17 +100,17 @@ def pc_iso_datetime(value):
 
 
 def pc_apply_content(
-    result,
-    content,
-    word_pattern,
-    families,
+    result: CountResult,
+    content: str | None,
+    word_pattern: re.Pattern[str] | None,
+    families: Sequence[str] | None,
     *,
-    message_id=None,
-    channel_id=None,
-    guild_id=None,
-    created_at=None,
-    jump_url=None,
-):
+    message_id: int | str | None = None,
+    channel_id: int | None = None,
+    guild_id: int | None = None,
+    created_at: object = None,
+    jump_url: str | None = None,
+) -> None:
     """Проверяет одно сообщение уже выбранного пользователя."""
     result["scanned"] += 1
     content = content or ""
@@ -124,7 +138,7 @@ def pc_apply_content(
 
         group_message_keys = set()
         surface_message_keys = set()
-        record_matches = []
+        record_matches: list[TemplateMatchRecord] = []
 
         for match in matches:
             family_data = result["families"][match.family]
@@ -179,7 +193,10 @@ def pc_apply_content(
             )
 
             if length_kind is not None and pc_length_enabled_for_family(family):
-                family_data[length_kind] += 1
+                if length_kind == "long":
+                    family_data["long"] += 1
+                else:
+                    family_data["short"] += 1
 
         # Сообщение в каждой канонической группе считается один раз,
         # даже если одинаковая метка повторена несколько раз.
@@ -187,7 +204,10 @@ def pc_apply_content(
             group = result["families"][family]["groups"][payload_key]
             group["messages"] += 1
             if length_kind is not None and pc_length_enabled_for_family(family):
-                group[length_kind] += 1
+                if length_kind == "long":
+                    group["long"] += 1
+                else:
+                    group["short"] += 1
             pc_channel_counter_add(
                 group["channels"],
                 channel_id,
@@ -226,5 +246,5 @@ def pc_apply_content(
             }
         )
 
-    elif word_pattern.search(pc_normalize_text(content)):
+    elif word_pattern is not None and word_pattern.search(pc_normalize_text(content)):
         result["matched"] += 1

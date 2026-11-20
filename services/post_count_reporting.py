@@ -1,12 +1,31 @@
 """Pure aggregation and public summary formatting for post-count statistics."""
 
+from collections.abc import Iterable, Sequence
+from typing import Protocol
+
 from services.post_count_metrics import pc_empty_group, pc_empty_surface_stats
+from services.post_count_templates import PCPeriod
+from services.post_count_types import (
+    ChannelCounters,
+    ChannelCounter,
+    CountResult,
+    FamilyStats,
+    SurfaceStats,
+    TemplateMessage,
+)
 from services.post_count_templates import PC_LABELS, pc_length_enabled_for_family
 
 PC_PUBLIC_REPORT_CHUNK_CHARS = 3900
 
 
-def pc_merge_channel_counters(target, source):
+class ReportUser(Protocol):
+    """Only the properties required from a Discord user."""
+
+    id: int
+    mention: str
+
+
+def pc_merge_channel_counters(target: ChannelCounters, source: ChannelCounters) -> None:
     for key, item in (source or {}).items():
         current = target.setdefault(
             key,
@@ -19,7 +38,7 @@ def pc_merge_channel_counters(target, source):
         current["messages"] += int(item.get("messages", 0))
 
 
-def pc_merge_surface_stats(target, source):
+def pc_merge_surface_stats(target: SurfaceStats, source: SurfaceStats) -> None:
     target["occurrences"] += int(source.get("occurrences", 0))
     target["messages"] += int(source.get("messages", 0))
     pc_merge_channel_counters(
@@ -28,8 +47,10 @@ def pc_merge_surface_stats(target, source):
     )
 
 
-def pc_merge_stats(results, families):
-    merged = {
+def pc_merge_stats(
+    results: Sequence[CountResult], families: Sequence[str]
+) -> dict[str, FamilyStats]:
+    merged: dict[str, FamilyStats] = {
         family: {
             "messages": 0,
             "occurrences": 0,
@@ -43,7 +64,9 @@ def pc_merge_stats(results, families):
 
     for result in results:
         for family in families:
-            source = result.get("families", {}).get(family, {})
+            source = result["families"].get(family)
+            if source is None:
+                continue
             target = merged[family]
             target["messages"] += int(source.get("messages", 0))
             target["occurrences"] += int(source.get("occurrences", 0))
@@ -54,7 +77,7 @@ def pc_merge_stats(results, families):
                 source.get("channels", {}),
             )
 
-            for key, source_group in source.get("groups", {}).items():
+            for key, source_group in source["groups"].items():
                 group = target["groups"].setdefault(
                     key,
                     pc_empty_group(source_group["canonical"]),
@@ -69,10 +92,10 @@ def pc_merge_stats(results, families):
                 )
                 pc_merge_surface_stats(
                     group["exact"],
-                    source_group.get("exact", {}),
+                    source_group["exact"],
                 )
 
-                for variant, source_variant in source_group.get("variants", {}).items():
+                for variant, source_variant in source_group["variants"].items():
                     variant_target = group["variants"].setdefault(
                         variant,
                         pc_empty_surface_stats(),
@@ -85,15 +108,15 @@ def pc_merge_stats(results, families):
     return merged
 
 
-def pc_merge_lengths(results):
+def pc_merge_lengths(results: Sequence[CountResult]) -> dict[str, int]:
     return {
         "long": sum(item.get("lengths", {}).get("long", 0) for item in results),
         "short": sum(item.get("lengths", {}).get("short", 0) for item in results),
     }
 
 
-def pc_collect_template_records(results):
-    records = []
+def pc_collect_template_records(results: Sequence[CountResult]) -> list[TemplateMessage]:
+    records: list[TemplateMessage] = []
     seen = set()
 
     for result in results:
@@ -115,7 +138,7 @@ def pc_percent(part: int, total: int) -> float:
     return (part * 100.0 / total) if total else 0.0
 
 
-def pc_public_clip(value, limit=240):
+def pc_public_clip(value: object, limit: int = 240) -> str:
     text = str(value or "").replace("\n", " ").replace("\r", " ")
     text = " ".join(text.split())
     if len(text) <= limit:
@@ -123,7 +146,7 @@ def pc_public_clip(value, limit=240):
     return text[: max(1, limit - 16)] + "… [полностью в TXT]"
 
 
-def pc_sorted_channels(channels):
+def pc_sorted_channels(channels: ChannelCounters | None) -> list[ChannelCounter]:
     return sorted(
         (channels or {}).values(),
         key=lambda item: (
@@ -134,7 +157,9 @@ def pc_sorted_channels(channels):
     )
 
 
-def pc_channel_report_lines(channels, indent="  "):
+def pc_channel_report_lines(
+    channels: ChannelCounters | None, indent: str = "  "
+) -> list[str]:
     rendered = []
     for item in pc_sorted_channels(channels):
         channel_id = item.get("id")
@@ -144,7 +169,9 @@ def pc_channel_report_lines(channels, indent="  "):
     return rendered or [f"{indent}• Совпадений нет."]
 
 
-def pc_template_channel_report_lines(stats, families):
+def pc_template_channel_report_lines(
+    stats: dict[str, FamilyStats], families: Sequence[str]
+) -> list[str]:
     """
     Формирует публичную часть шаблонного отчёта.
 
@@ -233,18 +260,18 @@ def pc_template_channel_report_lines(stats, families):
 
 
 def pc_template_public_report_lines(
-    user,
-    mode_value,
-    period,
-    matched,
-    scanned,
-    successful_targets,
-    total_targets,
-    stats,
-    families,
-    elapsed,
-    extra_notes=None,
-):
+    user: ReportUser,
+    mode_value: str,
+    period: PCPeriod,
+    matched: int,
+    scanned: int,
+    successful_targets: int,
+    total_targets: int,
+    stats: dict[str, FamilyStats],
+    families: Sequence[str],
+    elapsed: float,
+    extra_notes: Iterable[str] | None = None,
+) -> list[str]:
     """Объединяет итоговую сводку и распределение по каналам."""
     lines = [
         f"**Пользователь:** {user.mention} (`{user.id}`)",
@@ -269,11 +296,11 @@ def pc_template_public_report_lines(
 
 
 def pc_split_lines_for_discord(
-    lines,
-    max_chars=PC_PUBLIC_REPORT_CHUNK_CHARS,
-):
+    lines: Iterable[str],
+    max_chars: int = PC_PUBLIC_REPORT_CHUNK_CHARS,
+) -> list[str]:
     chunks = []
-    current = []
+    current: list[str] = []
     current_size = 0
 
     for raw_line in lines:
