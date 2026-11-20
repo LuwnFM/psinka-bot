@@ -38,3 +38,7 @@ Bulk workflow: `.github/workflows/bulk-quality-pass.yml`. It commits to the refa
 - Do not merge: live Discord and PostgreSQL staging checks have not been run.
 
 GitHub Actions regression and full audit workflows remain authoritative for subsequent commits.
+
+## Release-candidate gate decision — 21 November 2026
+
+At commit 98b724a the complete mypy run passed on 31 active source files, while full regressions passed on Python 3.10 and 3.12 and the credential-free startup smoke passed. Strict Ruff emitted 92 remaining diagnostics. Per owner priority, non-functional lint and complexity diagnostics are advisory, not merge blockers. The full-audit workflow now keeps compilation, mypy and full pytest strict; it still executes and shows all Ruff issues, but marks those steps advisory. This is NOT a claim that the remaining broad catch blocks have been verified safe in production. Live Discord, PostgreSQL and real AI provider integration were not exercised. Do not describe this as a fully staging-validated production release.
