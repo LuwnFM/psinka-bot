@@ -19,9 +19,7 @@ class ModelSuccessLog(Base):
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     model_name: Mapped[str] = mapped_column(String(100), nullable=False)
     success_count: Mapped[int] = mapped_column(Integer, default=1)
-    last_success_at: Mapped[datetime] = mapped_column(
-        DateTime, default=lambda: datetime.now(timezone.utc)
-    )
+    last_success_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     avg_latency_ms: Mapped[int] = mapped_column(Integer, default=0)
     __table_args__ = (UniqueConstraint("provider", "model_name", name="_provider_model_uc"),)
 

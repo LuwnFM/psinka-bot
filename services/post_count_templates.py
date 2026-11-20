@@ -210,9 +210,7 @@ def pc_candidate_starts(segment: str) -> Iterator[int]:
             yield index
 
 
-def pc_best_prefix(
-    compact: str, positions: Sequence[int], families: Iterable[str]
-) -> tuple[str, int] | None:
+def pc_best_prefix(compact: str, positions: Sequence[int], families: Iterable[str]) -> tuple[str, int] | None:
     best = None
     for family in families:
         for canonical in PC_PREFIXES[family]:

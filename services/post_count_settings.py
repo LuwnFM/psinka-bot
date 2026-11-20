@@ -6,7 +6,6 @@ GuildPostCountSettings = dict[str, list[int]]
 PostCountSettings = dict[str, dict[str, GuildPostCountSettings]]
 
 
-
 def pc_empty_settings() -> PostCountSettings:
     return {"guilds": {}}
 

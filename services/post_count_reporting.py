@@ -4,16 +4,15 @@ from collections.abc import Iterable, Sequence
 from typing import Protocol
 
 from services.post_count_metrics import pc_empty_group, pc_empty_surface_stats
-from services.post_count_templates import PCPeriod
+from services.post_count_templates import PC_LABELS, PCPeriod, pc_length_enabled_for_family
 from services.post_count_types import (
-    ChannelCounters,
     ChannelCounter,
+    ChannelCounters,
     CountResult,
     FamilyStats,
     SurfaceStats,
     TemplateMessage,
 )
-from services.post_count_templates import PC_LABELS, pc_length_enabled_for_family
 
 PC_PUBLIC_REPORT_CHUNK_CHARS = 3900
 
@@ -54,9 +53,7 @@ def pc_merge_surface_stats(target: SurfaceStats, source: SurfaceStats) -> None:
     )
 
 
-def pc_merge_stats(
-    results: Sequence[CountResult], families: Sequence[str]
-) -> dict[str, FamilyStats]:
+def pc_merge_stats(results: Sequence[CountResult], families: Sequence[str]) -> dict[str, FamilyStats]:
     merged: dict[str, FamilyStats] = {
         family: {
             "messages": 0,
@@ -164,9 +161,7 @@ def pc_sorted_channels(channels: ChannelCounters | None) -> list[ChannelCounter]
     )
 
 
-def pc_channel_report_lines(
-    channels: ChannelCounters | None, indent: str = "  "
-) -> list[str]:
+def pc_channel_report_lines(channels: ChannelCounters | None, indent: str = "  ") -> list[str]:
     rendered = []
     for item in pc_sorted_channels(channels):
         channel_id = item.get("id")
@@ -176,9 +171,7 @@ def pc_channel_report_lines(
     return rendered or [f"{indent}• Совпадений нет."]
 
 
-def pc_template_channel_report_lines(
-    stats: dict[str, FamilyStats], families: Sequence[str]
-) -> list[str]:
+def pc_template_channel_report_lines(stats: dict[str, FamilyStats], families: Sequence[str]) -> list[str]:
     """
     Формирует публичную часть шаблонного отчёта.
 

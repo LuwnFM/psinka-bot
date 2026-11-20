@@ -12,10 +12,10 @@ from typing import Any
 
 import aiohttp
 import disnake
-from disnake.interactions.application_command import ApplicationCommandInteraction
-from disnake.interactions.message import MessageInteraction
 import g4f
 from disnake.ext import commands
+from disnake.interactions.application_command import ApplicationCommandInteraction
+from disnake.interactions.message import MessageInteraction
 from groq import Groq
 from openai import OpenAI
 
@@ -710,7 +710,11 @@ async def make_g4f_request(
 
 
 async def test_openrouter_single(
-    models: list, prompt: str, timeout: float = 45.0, system_prompt: str | None = None, proxy_url: str | None = None
+    models: list,
+    prompt: str,
+    timeout: float = 45.0,
+    system_prompt: str | None = None,
+    proxy_url: str | None = None,
 ) -> tuple[bool, str, float]:
     """Запрос к OpenRouter с одним контролируемым retry для временных ошибок."""
     openrouter_token = os.getenv("OPENR_TOKEN")
@@ -8019,9 +8023,7 @@ async def slash_count_posts(
                 content=None, embed=first_embed, files=txt_files
             )
         else:
-            final_message = await interaction.edit_original_response(
-                content=None, embed=first_embed
-            )
+            final_message = await interaction.edit_original_response(content=None, embed=first_embed)
     except Exception as exc:
         logger.error(
             "Не удалось отредактировать публичный итог /подсчёт_постов: %s",

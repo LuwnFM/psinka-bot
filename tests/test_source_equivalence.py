@@ -120,9 +120,7 @@ def test_extracted_logic_matches_original_ast() -> None:
             assert name in original, f"{name} is not in baseline main"
             assert _canonical_ast(node, allow_added_annotations=True) == _canonical_ast(
                 original[name], allow_added_annotations=True
-            ), (
-                f"Executable logic changed while extracting {name}"
-            )
+            ), f"Executable logic changed while extracting {name}"
 
 
 def test_slash_command_contract_matches_main() -> None:

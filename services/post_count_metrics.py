@@ -1,8 +1,8 @@
 """Pure per-message post counting, grouping and length classification."""
 
+import re
 from collections.abc import Sequence
 from datetime import datetime, timezone
-import re
 
 from services.post_count_templates import (
     pc_find_templates,
@@ -10,7 +10,6 @@ from services.post_count_templates import (
     pc_normalize_text,
     pc_template_body_length,
 )
-
 from services.post_count_types import (
     ChannelCounters,
     CountResult,
@@ -60,9 +59,7 @@ def pc_empty_group(canonical: str) -> GroupStats:
     }
 
 
-def pc_empty_result(
-    label: str, families: Sequence[str] | None, channel_id: int | None = None
-) -> CountResult:
+def pc_empty_result(label: str, families: Sequence[str] | None, channel_id: int | None = None) -> CountResult:
     result: CountResult = {
         "label": label,
         "channel_id": int(channel_id) if channel_id is not None else None,
