@@ -4,6 +4,7 @@ import ast
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 
 
 def _sync_call_nodes() -> list[ast.FunctionDef]:
@@ -33,7 +34,7 @@ def test_fallback_model_workers_keep_their_original_model() -> None:
         if not any(arg.arg == "model" for arg in function.args.args):
             continue
         module = ast.fix_missing_locations(ast.Module(body=[function], type_ignores=[]))
-        namespace = {"client": client, "model": "original", "messages": []}
+        namespace = {"client": client, "model": "original", "messages": [], "Any": Any}
         exec(compile(module, "<isolated-ai-worker>", "exec"), namespace)
         namespace["model"] = "next-fallback"
         namespace["sync_call"]()
@@ -76,7 +77,7 @@ def test_g4f_worker_keeps_provider_and_request_after_loop_moves(monkeypatch) -> 
     monkeypatch.setitem(sys.modules, "g4f", package)
     monkeypatch.setitem(sys.modules, "g4f.client", module)
 
-    namespace = {"provider_class": "first-provider", "kwargs": {"model": "first-model"}}
+    namespace = {"provider_class": "first-provider", "kwargs": {"model": "first-model"}, "Any": Any}
     target = ast.fix_missing_locations(ast.Module(body=functions, type_ignores=[]))
     exec(compile(target, "<isolated-g4f-worker>", "exec"), namespace)
     namespace["provider_class"] = "next-provider"

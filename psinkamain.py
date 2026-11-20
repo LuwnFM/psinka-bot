@@ -1852,7 +1852,7 @@ async def resolve_analysis_target(
     if guild is None:
         return None, "❌ Гав! `/анализ` работает только внутри сервера."
 
-    target = None
+    target: object | None = None
     link_guild_id, link_channel_id = extract_channel_reference(ссылка)
 
     if ссылка and not link_channel_id:
@@ -2089,7 +2089,9 @@ async def slash_analyze(
             used_provider = "Unknown"
             used_temp_file = False
 
-            async def try_request(prov, mod, use_proxy=False, user_prompt=user_prompt):
+            async def try_request(
+                prov: str, mod: str, use_proxy: bool = False, user_prompt: str = user_prompt
+            ) -> tuple[bool, str, float]:
                 proxy_str = get_random_proxy(True) if use_proxy else None
                 return await route_model_request(
                     prov,
@@ -6651,7 +6653,7 @@ async def pc_search_or_fallback( guild: disnake.Guild, targets: Sequence[Any], u
         )
 
         semaphore = asyncio.Semaphore(PC_CONCURRENCY)
-        tasks = [
+        fallback_tasks = [
             asyncio.create_task(
                 pc_scan_target(
                     target,
@@ -6667,7 +6669,7 @@ async def pc_search_or_fallback( guild: disnake.Guild, targets: Sequence[Any], u
 
         fallback_results = []
 
-        for completed, task in enumerate(asyncio.as_completed(tasks), start=1):
+        for completed, task in enumerate(asyncio.as_completed(fallback_tasks), start=1):
             fallback_results.append(await task)
             search_info["fallback_completed"] = completed
 
@@ -6884,22 +6886,22 @@ def pc_append_txt_surface_messages( lines: list[str], records: Sequence[Template
 
 
 def pc_full_report(
-    user,
-    period,
-    stats,
-    families,
-    matched,
-    scanned,
-    length_stats,
-    records,
+    user: disnake.Member,
+    period: PCPeriod,
+    stats: dict[str, FamilyStats],
+    families: Sequence[str],
+    matched: int,
+    scanned: int,
+    length_stats: dict[str, int],
+    records: Sequence[TemplateMessage],
     *,
-    search_info,
-    method_label,
-    elapsed,
-    stage_timings,
-    discovery_errors,
-    failed,
-):
+    search_info: Mapping[str, Any],
+    method_label: str,
+    elapsed: float,
+    stage_timings: Mapping[str, float],
+    discovery_errors: Sequence[str],
+    failed: Sequence[CountResult],
+) -> str:
     long_count = length_stats.get("long", 0)
     short_count = length_stats.get("short", 0)
     total_lengths = long_count + short_count
@@ -7999,6 +8001,7 @@ async def slash_count_posts(
 
     # Исходное публичное сообщение становится первым и обычно единственным
     # embed-отчётом. Подробный TXT прикрепляется к нему без отдельной подписи.
+    final_message: disnake.Message
     try:
         if txt_files:
             final_message = await interaction.edit_original_response(
