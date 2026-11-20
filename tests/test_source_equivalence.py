@@ -5,6 +5,7 @@ This is deliberately structural, not a replacement for behavior tests.
 """
 
 import ast
+import copy
 import subprocess
 from pathlib import Path
 
@@ -22,6 +23,53 @@ EXTRACTED_FILES = (
     "services/jail_time.py",
     "services/dice_format.py",
 )
+
+
+class _AnnotationStyleNormalizer(ast.NodeTransformer):
+    """Normalize type spelling only; never normalize executable statements."""
+
+    _typing_aliases = {
+        "Dict": "dict",
+        "List": "list",
+        "Tuple": "tuple",
+        "Set": "set",
+        "FrozenSet": "frozenset",
+        "Type": "type",
+    }
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if node.id in self._typing_aliases:
+            node.id = self._typing_aliases[node.id]
+        return node
+
+    def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.value, ast.Name) and node.value.id == "Optional":
+            return ast.BinOp(
+                left=node.slice,
+                op=ast.BitOr(),
+                right=ast.Constant(value=None),
+            )
+        return node
+
+
+def _canonical_ast(original: ast.AST) -> str:
+    """Compare code, allowing only equivalent typing spellings.
+
+    Optional[T] and T | None are equivalent in Python 3.10 and later.
+    Function bodies, argument defaults, and decorators stay checked.
+    """
+    node = copy.deepcopy(original)
+    normalizer = _AnnotationStyleNormalizer()
+    for descendant in list(ast.walk(node)):
+        if isinstance(descendant, ast.arg) and descendant.annotation is not None:
+            descendant.annotation = normalizer.visit(descendant.annotation)
+        elif isinstance(descendant, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if descendant.returns is not None:
+                descendant.returns = normalizer.visit(descendant.returns)
+        elif isinstance(descendant, ast.AnnAssign):
+            descendant.annotation = normalizer.visit(descendant.annotation)
+    return ast.dump(node, include_attributes=False)
 
 
 def definitions(source: str) -> dict[str, ast.AST]:
@@ -47,9 +95,9 @@ def test_extracted_logic_matches_original_ast() -> None:
     for path in EXTRACTED_FILES:
         for name, node in definitions(Path(path).read_text(encoding="utf-8")).items():
             assert name in original, f"{name} is not in baseline main"
-            assert ast.dump(node, include_attributes=False) == ast.dump(
-                original[name], include_attributes=False
-            ), f"Logic changed while extracting {name}"
+            assert _canonical_ast(node) == _canonical_ast(
+                original[name]
+            ), f"Executable logic changed while extracting {name}"
 
 
 def test_slash_command_contract_matches_main() -> None:
@@ -63,7 +111,7 @@ def test_slash_command_contract_matches_main() -> None:
         tree = ast.parse(source)
         return {
             node.name: (
-                ast.dump(node.args, include_attributes=False),
+                _canonical_ast(node.args),
                 ast.dump(ast.Module(body=node.decorator_list, type_ignores=[]), include_attributes=False),
             )
             for node in tree.body
