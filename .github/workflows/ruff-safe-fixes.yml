@@ -1,5 +1,5 @@
 name: One-time reviewed safe Ruff fixes
-# Comparing normalized equivalent type spellings while still checking executable AST.
+# Comparing type spellings and dict key iteration, still checking executable rules.
 
 on:
   push:
